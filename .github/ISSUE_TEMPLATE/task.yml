@@ -1,0 +1,86 @@
+name: "Task"
+description: "A Ready-able unit of work (≤ 2 IED). Must satisfy the Definition of Ready."
+title: "AVID-NN · <short outcome>"
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fill every field. An issue may not enter **In Progress** until it passes the
+        Definition of Ready (`CONTRIBUTING.md`). State the **outcome as observable
+        behavior**, not the implementation.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: One or two sentences. Observable behavior, not implementation.
+      placeholder: "A fresh clone on any machine gets an identical, working environment in one command."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (binary)
+      description: Checkboxes. Each must be objectively true or false.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: input
+    id: sds
+    attributes:
+      label: SDS / PMP section(s)
+      description: The section this implements. If none exists, open a PR against the SDS first.
+      placeholder: "SDS §3.11.1, ADR-008"
+    validations:
+      required: true
+  - type: input
+    id: depends
+    attributes:
+      label: Depends on
+      description: Issue numbers that must be closed first. "—" if none.
+      placeholder: "#1, #3"
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size (IED)
+      options:
+        - "XS (0.25)"
+        - "S (0.5)"
+        - "M (1)"
+        - "L (2)"
+        - "XL (3) — must be split before Ready"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - core
+        - domain
+        - adapters
+        - hal
+        - ai
+        - audio
+        - vision
+        - display
+        - motion
+        - memory
+        - behavior
+        - infra
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: contract
+    attributes:
+      label: Contract-test change (if it touches a port)
+      description: Name the contract test to add/update, or "N/A".
+      placeholder: "tests/contract/test_display.py"
+    validations:
+      required: true
