@@ -82,6 +82,23 @@ exactly what P1 exists to protect.
   *are* the simulator (SDS §3.9.2) — which is why the simulator can never drift
   from the real system: it *is* the real system.
 
+### The vendor boundary — model/provider changes are config + one adapter, never domain
+
+No vendor (OpenAI, its Realtime API, a voice, a model version) is ever named or
+imported outside `adapters/`. The domain and services are provider-agnostic; a
+service works in terms of domain events, never a vendor's message shapes.
+
+- **Swapping model or voice is a config edit**, not code — `[ai] model`, `[ai]
+  voice`, `[adapters] realtime = "openai" | "replay"` (SDS §9.6). Model names are
+  pinned to dated snapshots (`gpt-realtime-2.1-mini-2026-07-06`) because the
+  Realtime family churns fast (SDS §6.10 volatility warning).
+- **The adapter is the blast radius.** If OpenAI changes the Realtime API, exactly
+  one adapter changes (risk R-10, PMP §9.2). The `RealtimeClient` adapter →
+  `ConversationService` translates the vendor's stream into our `conversation.*`
+  domain events; `avid/domain/` stays sealed (the domain-purity test enforces it).
+- A new model reaches the domain only if it introduces a genuinely new *fact* —
+  that's a new `Event` subclass, and even then the envelope base is untouched.
+
 ---
 
 ## 4. The event bus (SDS §3.5, §9.1)
