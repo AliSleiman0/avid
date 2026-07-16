@@ -6,6 +6,20 @@ No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``Affect`` (AVID-8).
 """
 
-from avid.domain.events import EVENT_DOMAINS, Event, validate_event_name
+from avid.domain.events import (
+    EVENT_DOMAINS,
+    REASON_HANDLER_RAISED,
+    REASON_QUEUE_OVERFLOW,
+    Event,
+    SystemHandlerFailed,
+    validate_event_name,
+)
 
-__all__ = ["EVENT_DOMAINS", "Event", "validate_event_name"]
+__all__ = [
+    "EVENT_DOMAINS",
+    "REASON_HANDLER_RAISED",
+    "REASON_QUEUE_OVERFLOW",
+    "Event",
+    "SystemHandlerFailed",
+    "validate_event_name",
+]

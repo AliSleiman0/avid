@@ -96,3 +96,28 @@ class Event:
         declared = cls.__dict__.get("name")
         if isinstance(declared, str):
             validate_event_name(declared)
+
+
+# The two ``reason`` values the bus stamps on a ``system.handler_failed`` (§3.5.5,
+# §9.1.3). Only ``queue_overflow`` is pinned by the AVID-10 acceptance criteria; the
+# raise reason is ours. Kept as module constants so the bus and its tests agree.
+REASON_HANDLER_RAISED = "handler_raised"
+REASON_QUEUE_OVERFLOW = "queue_overflow"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SystemHandlerFailed(Event):
+    """The bus's only self-referential event (SDS §9.1.3): a subscriber either raised
+    (§3.5.2) or overflowed its bounded queue (§3.5.5). Published *by the EventBus
+    itself* so a broken subscriber degrades one feature instead of killing the robot.
+
+    It must never be published from a handler *of* ``system.handler_failed`` — that is
+    an infinite loop, guarded in the bus (see ``AsyncioEventBus._emit_handler_failed``).
+    """
+
+    name: ClassVar[str] = "system.handler_failed"
+
+    handler: str  # the failing subscriber's registered name
+    event_type: str  # ``type(event).__name__`` of the event being delivered
+    reason: str  # REASON_HANDLER_RAISED | REASON_QUEUE_OVERFLOW
+    exc: str | None = None  # ``repr(exception)`` for a raise; None for an overflow
