@@ -10,7 +10,7 @@ dist/
 # uv / virtualenv
 .venv/
 venv/
-.python-version
+# .python-version IS committed — it pins the dev interpreter (ADR-008: 3.13)
 
 # Test / coverage / type caches
 .pytest_cache/
