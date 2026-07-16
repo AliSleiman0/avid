@@ -4,3 +4,7 @@ The EventBus (AVID-9/10), StateManager, Config, Lifecycle, and the port Protocol
 in ``ports.py`` (AVID-11). Depends on ``domain`` only; never imports
 ``avid.adapters`` (P1, P5).
 """
+
+from avid.core.event_bus import AsyncioEventBus, Subscription
+
+__all__ = ["AsyncioEventBus", "Subscription"]
