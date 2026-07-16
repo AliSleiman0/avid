@@ -5,6 +5,6 @@ in ``ports.py`` (AVID-11). Depends on ``domain`` only; never imports
 ``avid.adapters`` (P1, P5).
 """
 
-from avid.core.event_bus import AsyncioEventBus, Subscription
+from avid.core.event_bus import AsyncioEventBus, OverflowPolicy, Subscription
 
-__all__ = ["AsyncioEventBus", "Subscription"]
+__all__ = ["AsyncioEventBus", "OverflowPolicy", "Subscription"]

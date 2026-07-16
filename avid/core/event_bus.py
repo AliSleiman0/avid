@@ -1,36 +1,55 @@
-"""The in-process async event bus — concurrent dispatch core (SDS §3.5, AVID-9).
+"""The in-process async event bus — concurrent dispatch, failure isolation, and
+backpressure (SDS §3.5, AVID-9 + AVID-10).
 
 A publisher announces that something *happened* and stops caring who reacts
 (SDS §3.5.1). This module is that mechanism: :class:`AsyncioEventBus` routes each
 published :class:`~avid.domain.Event` to every subscriber registered for its exact
-type, dispatching handlers **concurrently** — one per-subscriber queue drained by
-one per-subscriber worker task.
+type, dispatching handlers **concurrently** — one per-subscriber bounded queue
+drained by one per-subscriber worker task.
 
-Deliberately *not* here yet, to keep this issue's blast radius small:
+Two reliability properties live here (SDS §3.5.2, §3.5.5):
 
-* **Failure isolation** — swallowing a raising handler and republishing it as
-  ``system.handler_failed`` — is **AVID-10**. Until then, the worker below has no
-  ``try``/``except``: a raising handler stops only its own subscriber; the
-  publisher and every other subscriber are unaffected.
-* **Backpressure** — a *bounded* queue (default 100) plus the ``DROP_OLDEST`` /
-  ``DROP_NEWEST`` overflow policies (``BLOCK`` forbidden) — is also **AVID-10**.
-  The queue here is unbounded, so ``put_nowait`` never overflows.
-* The ``EventBus`` **Protocol** lives in ``core/ports.py`` as of **AVID-11**; this
-  concrete class satisfies it structurally.
+* **Failure isolation.** A handler that raises is logged, swallowed, and republished
+  as ``system.handler_failed`` (§3.5.2). A crashing display renderer must not kill a
+  conversation — the single most important reliability property in the system. The
+  worker survives its handler and keeps draining.
+* **Backpressure.** Each subscriber's queue is bounded (default 100). On overflow the
+  per-subscriber :class:`OverflowPolicy` decides which event to drop; the drop is a
+  *loud* ``system.handler_failed`` (``reason="queue_overflow"``) plus a counter, never
+  a silent loss (§3.5.5). ``BLOCK`` is forbidden — it would push backpressure into the
+  audio path — and is rejected at registration.
 
-The bus never mints envelope fields: publishers construct their own events
-(``event_id``/timestamps come from the ``Clock`` port later — AVID-11/AVID-14).
+``system.handler_failed`` is the bus's only self-referential event. A handler *of* it
+that fails must not spawn another — that is an infinite loop, guarded explicitly in
+:meth:`AsyncioEventBus._emit_handler_failed`.
+
+Still deferred (to keep the blast radius small): the ``EventBus`` **Protocol** and the
+real ``Clock`` port live in ``core/ports.py`` as of **AVID-11**. Until then the bus
+stamps the ``system.handler_failed`` events it builds via an injected, ``Clock``-shaped
+time source (:class:`_TimeSource`), defaulting to :class:`_SystemClock`. AVID-11's real
+``Clock`` port satisfies :class:`_TimeSource` structurally and drops in unchanged.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import Enum
 from types import TracebackType
-from typing import TypeVar, cast
+from typing import Protocol, TypeVar, cast
+from uuid import uuid4
 
-from avid.domain import Event
+from avid.domain import (
+    REASON_HANDLER_RAISED,
+    REASON_QUEUE_OVERFLOW,
+    Event,
+    SystemHandlerFailed,
+)
+
+_log = logging.getLogger(__name__)
 
 E = TypeVar("E", bound=Event)
 
@@ -38,32 +57,78 @@ E = TypeVar("E", bound=Event)
 # in its base-`Event` form; `subscribe` bridges the generic call site to it.
 Handler = Callable[[Event], Awaitable[None]]
 
+# Sensible defaults for a subscriber that does not state otherwise (SDS §3.5.5).
+DEFAULT_MAXSIZE = 100
+
+
+class OverflowPolicy(Enum):
+    """What a subscriber's bounded queue does when it is full (SDS §3.5.5).
+
+    ``BLOCK`` is a member so it can be *named and rejected*: blocking would propagate
+    backpressure into the audio path, the one place §2.8.1 has no slack, so
+    :meth:`AsyncioEventBus.subscribe` raises on it.
+    """
+
+    DROP_OLDEST = "drop_oldest"  # latest wins; stale frames are worthless
+    DROP_NEWEST = "drop_newest"  # preserve the beginning of an incident
+    BLOCK = "block"  # forbidden — rejected at registration
+
+
+class _TimeSource(Protocol):
+    """The minimum the bus needs to stamp the ``system.handler_failed`` events it
+    builds: wall time (for humans) and monotonic time (for latency math).
+
+    Private and structural on purpose. AVID-11's ``Clock`` port (SDS §9.3) exposes
+    exactly these two methods (plus ``sleep``), so it satisfies this protocol without
+    change — at which point this stand-in is deleted and the ``clock`` parameter is
+    typed as ``Clock``.
+    """
+
+    def now(self) -> int: ...  # epoch seconds
+
+    def monotonic_ns(self) -> int: ...
+
+
+class _SystemClock:
+    """Real-time default for :class:`_TimeSource`. Named ``_SystemClock`` (not
+    ``Real*``) so it stays clear of the P3 composition-root grep; ``main.py`` will
+    inject the real ``Clock`` adapter here in AVID-11."""
+
+    def now(self) -> int:
+        return int(time.time())
+
+    def monotonic_ns(self) -> int:
+        return time.monotonic_ns()
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Subscription:
-    """A single subscriber's declaration: *this* handler wants *this* event type.
+    """A single subscriber's declaration: *this* handler wants *this* event type,
+    with *this* backpressure behaviour.
 
     Returned by :meth:`AsyncioEventBus.subscribe` and — once services exist
     (SDS §9.2) — what ``Service.subscriptions()`` declares for the composition
     root to register. ``name`` is mandatory so the §9.1.5 drift check can see the
     subscriber (an anonymous lambda would be invisible to it).
-
-    AVID-10 will add ``policy`` and ``maxsize`` for backpressure.
     """
 
     event_type: type[Event]
     handler: Handler
     name: str
+    policy: OverflowPolicy
+    maxsize: int
 
 
 @dataclass(slots=True)
 class _Runner:
-    """Bus-internal runtime state for one :class:`Subscription`: its inbox queue
-    and the worker task draining it. Not part of the public contract."""
+    """Bus-internal runtime state for one :class:`Subscription`: its inbox queue, the
+    worker task draining it, and how many events its queue has dropped. Not part of the
+    public contract."""
 
     subscription: Subscription
     queue: asyncio.Queue[Event]
     task: asyncio.Task[None] | None = None
+    overflow_count: int = 0
 
 
 class AsyncioEventBus:
@@ -77,13 +142,16 @@ class AsyncioEventBus:
     the §9.1.5 drift check (SDS §3.5.2).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: _TimeSource | None = None) -> None:
         # The declaration graph: event type -> its subscriptions. Walked by the
         # §9.1.5 drift generator (later); the source of truth for who listens.
         self._subs: dict[type[Event], list[Subscription]] = {}
         # Built at start(): event type -> its runners, for O(1) dispatch.
         self._dispatch: dict[type[Event], list[_Runner]] = {}
         self._runners: list[_Runner] = []
+        # Stamps the handler_failed events the bus itself builds. AVID-11 injects the
+        # real Clock port here; the default reads the system clock.
+        self._clock: _TimeSource = clock or _SystemClock()
         self._started = False
         self._stopped = False
 
@@ -93,11 +161,16 @@ class AsyncioEventBus:
         handler: Callable[[E], Awaitable[None]],
         *,
         name: str,
+        policy: OverflowPolicy = OverflowPolicy.DROP_OLDEST,
+        maxsize: int = DEFAULT_MAXSIZE,
     ) -> Subscription:
         """Register *handler* for *event_type*. ``name`` is mandatory (SDS §9.1.5).
 
-        Raises :class:`RuntimeError` if called after :meth:`start` (subscription
-        is static, SDS §3.5.2) and :class:`ValueError` if ``name`` is empty.
+        *policy* and *maxsize* set this subscriber's backpressure (SDS §3.5.5).
+
+        Raises :class:`RuntimeError` if called after :meth:`start` (subscription is
+        static, SDS §3.5.2); :class:`ValueError` if ``name`` is empty, ``maxsize`` is
+        not positive, or ``policy`` is :attr:`OverflowPolicy.BLOCK` (forbidden).
         """
         if self._started:
             raise RuntimeError(
@@ -110,6 +183,14 @@ class AsyncioEventBus:
                 "subscribe(name=...) must be a non-empty string: the drift check "
                 "identifies subscribers by name (SDS §9.1.5)"
             )
+        if policy is OverflowPolicy.BLOCK:
+            raise ValueError(
+                "OverflowPolicy.BLOCK is forbidden (SDS §3.5.5): blocking would "
+                "propagate backpressure into the audio path. Use DROP_OLDEST or "
+                "DROP_NEWEST."
+            )
+        if maxsize < 1:
+            raise ValueError(f"maxsize must be >= 1, got {maxsize}")
         subscription = Subscription(
             event_type=event_type,
             # A `Callable[[E], ...]` handler is safe to invoke with an instance of
@@ -117,6 +198,8 @@ class AsyncioEventBus:
             # bridges that invariance. Dispatch only ever passes it matching events.
             handler=cast(Handler, handler),
             name=name,
+            policy=policy,
+            maxsize=maxsize,
         )
         self._subs.setdefault(event_type, []).append(subscription)
         return subscription
@@ -124,6 +207,7 @@ class AsyncioEventBus:
     async def start(self) -> None:
         """Freeze the subscriber graph and spawn one worker task per subscription.
 
+        Each worker gets a **bounded** queue (``maxsize`` per subscriber, SDS §3.5.5).
         Must run inside the event loop that will carry the workers.
         """
         if self._started:
@@ -132,7 +216,9 @@ class AsyncioEventBus:
         for event_type, subscriptions in self._subs.items():
             runners: list[_Runner] = []
             for subscription in subscriptions:
-                queue: asyncio.Queue[Event] = asyncio.Queue()
+                queue: asyncio.Queue[Event] = asyncio.Queue(
+                    maxsize=subscription.maxsize
+                )
                 runner = _Runner(subscription=subscription, queue=queue)
                 runner.task = asyncio.create_task(
                     self._worker(runner), name=f"eventbus:{subscription.name}"
@@ -144,33 +230,110 @@ class AsyncioEventBus:
     async def publish(self, event: Event) -> None:
         """Fire-and-forget: enqueue *event* for each matching subscriber, return.
 
-        Returns once the event is **queued, not handled** (SDS §3.5.2): the
-        display renderer must never be in the latency path of speech. Dispatch is
-        by the event's *exact* runtime type — no subclass fan-out — so the
-        subscriber graph stays explicit (SDS §9.1.5).
+        Returns once the event is **queued, not handled** (SDS §3.5.2): the display
+        renderer must never be in the latency path of speech. Dispatch is by the
+        event's *exact* runtime type — no subclass fan-out — so the subscriber graph
+        stays explicit (SDS §9.1.5).
         """
         if not self._started:
             raise RuntimeError("cannot publish() before start()")
-        runners = self._dispatch.get(type(event))
-        if not runners:
-            return
-        for runner in runners:
-            # Unbounded queue in AVID-9: put_nowait cannot overflow. AVID-10 bounds
-            # it and applies the per-subscriber overflow policy here.
+        self._enqueue(event)
+
+    def _enqueue(self, event: Event) -> None:
+        """Put *event* onto each matching subscriber's bounded queue, applying that
+        subscriber's overflow policy. Synchronous — runs atomically w.r.t. the workers
+        in the single-threaded loop, so ``get_nowait``/``put_nowait`` never race.
+
+        Shared by :meth:`publish` and :meth:`_emit_handler_failed`; the latter is why
+        this is factored out of ``publish`` (it must not re-run the started-check).
+        """
+        for runner in self._dispatch.get(type(event), ()):
+            try:
+                runner.queue.put_nowait(event)
+            except asyncio.QueueFull:
+                self._overflow(runner, event)
+
+    def _overflow(self, runner: _Runner, event: Event) -> None:
+        """Handle a full queue for *runner* per its policy, then report the drop
+        loudly (SDS §3.5.5): bump the counter and republish ``system.handler_failed``
+        with ``reason="queue_overflow"``. Silent drops are a debugging catastrophe."""
+        if runner.subscription.policy is OverflowPolicy.DROP_OLDEST:
+            # Evict the stale head to make room for the fresh event (latest wins).
+            runner.queue.get_nowait()
             runner.queue.put_nowait(event)
+        # DROP_NEWEST: the incoming event is simply discarded (queue unchanged).
+        runner.overflow_count += 1
+        _log.warning(
+            "event bus: queue overflow for subscriber %r on %s (corr=%s), policy=%s; "
+            "dropped one event (overflow_count=%d)",
+            runner.subscription.name,
+            type(event).__name__,
+            event.correlation_id,
+            runner.subscription.policy.name,
+            runner.overflow_count,
+        )
+        self._emit_handler_failed(runner, event, REASON_QUEUE_OVERFLOW, exc=None)
 
     async def _worker(self, runner: _Runner) -> None:
         """Drain one subscriber's queue in FIFO order, awaiting its handler.
 
         One worker per subscriber gives concurrency *across* subscribers and
-        ordered-per-publisher delivery *within* one (SDS §3.5.4). No ``try`` here:
-        failure isolation is AVID-10 (see module docstring).
+        ordered-per-publisher delivery *within* one (SDS §3.5.4). A raising handler is
+        logged, swallowed, and republished as ``system.handler_failed`` (SDS §3.5.2);
+        the worker keeps draining. ``CancelledError`` (from :meth:`stop`) is *not*
+        caught by ``except Exception``, so it still ends the task cleanly.
         """
         queue = runner.queue
         handler = runner.subscription.handler
         while True:
             event = await queue.get()
-            await handler(event)
+            try:
+                await handler(event)
+            except Exception as exc:  # noqa: BLE001 — isolation is the whole point (§3.5.2)
+                _log.warning(
+                    "event bus: subscriber %r failed handling %s (corr=%s): %r",
+                    runner.subscription.name,
+                    type(event).__name__,
+                    event.correlation_id,
+                    exc,
+                    exc_info=exc,
+                )
+                self._emit_handler_failed(
+                    runner, event, REASON_HANDLER_RAISED, exc=repr(exc)
+                )
+
+    def _emit_handler_failed(
+        self, runner: _Runner, failed: Event, reason: str, *, exc: str | None
+    ) -> None:
+        """Republish a subscriber's failure as ``system.handler_failed`` (SDS §9.1.3).
+
+        **The loop guard:** if *runner* is itself a ``system.handler_failed``
+        subscriber, we log and return without emitting — publishing another would be an
+        infinite loop (SDS §9.1.3). Otherwise the bus mints the event (its own
+        ``event_id``/timestamps via the injected clock), propagating the failed event's
+        ``correlation_id`` so the failure stays pinned to its turn.
+        """
+        if runner.subscription.event_type is SystemHandlerFailed:
+            _log.error(
+                "event bus: the system.handler_failed subscriber %r itself failed "
+                "(reason=%s); not re-emitting to avoid an infinite loop",
+                runner.subscription.name,
+                reason,
+            )
+            return
+        self._enqueue(
+            SystemHandlerFailed(
+                event_id=uuid4(),
+                correlation_id=failed.correlation_id,
+                timestamp_ms=self._clock.now() * 1000,
+                monotonic_ns=self._clock.monotonic_ns(),
+                source="EventBus",
+                handler=runner.subscription.name,
+                event_type=type(failed).__name__,
+                reason=reason,
+                exc=exc,
+            )
+        )
 
     async def stop(self) -> None:
         """Cancel every worker and await it. Idempotent."""
