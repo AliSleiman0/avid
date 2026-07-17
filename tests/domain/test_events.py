@@ -103,7 +103,7 @@ def test_is_slotted() -> None:
 
 def test_is_kw_only() -> None:
     with pytest.raises(TypeError):
-        Event(uuid4(), uuid4(), 1, 2, "test")  # type: ignore[misc]
+        Event(uuid4(), uuid4(), 1, 2, "test")  # type: ignore[call-arg]
 
 
 # --- the naming validator ---------------------------------------------------
@@ -157,3 +157,19 @@ def test_subclass_with_bad_name_raises_at_class_creation() -> None:
         class Bad(Event):
             name: ClassVar[str] = "display.set_emotion"
             x: int
+
+
+def test_slotted_subclass_does_not_break_on_python_311() -> None:
+    """Regression guard (issue #27): defining an ``Event`` subclass must not raise on
+    Python 3.11. ``slots=True`` recreates ``Event``, and a zero-arg ``super()`` in
+    ``__init_subclass__`` would then read a stale ``__class__`` cell and raise
+    ``TypeError`` on 3.11 (fixed on CPython 3.12). This whole module already imports a
+    slotted subclass (``SystemHandlerFailed``), so on 3.11 the bug shows up at *import*;
+    this test states the guarantee where a reader can see it."""
+
+    @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+    class StateTransitioned(Event):
+        name: ClassVar[str] = "state.transitioned"
+
+    assert issubclass(StateTransitioned, Event)
+    assert StateTransitioned.name == "state.transitioned"

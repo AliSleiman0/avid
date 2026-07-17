@@ -92,7 +92,12 @@ class Event:
     name: ClassVar[str]
 
     def __init_subclass__(cls, **kwargs: object) -> None:
-        super().__init_subclass__(**kwargs)
+        # Resolve the base explicitly, not via zero-arg ``super()``: ``slots=True``
+        # makes ``@dataclass`` *recreate* ``Event``, orphaning the ``__class__`` cell a
+        # bare ``super()`` reads — which raises ``TypeError`` on Python 3.11 (the Pi's
+        # interpreter, ADR-008). CPython fixed the cell on 3.12; naming ``Event`` keeps
+        # it correct on both. See issue #27.
+        super(Event, cls).__init_subclass__(**kwargs)
         declared = cls.__dict__.get("name")
         if isinstance(declared, str):
             validate_event_name(declared)
