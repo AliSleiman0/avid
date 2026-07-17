@@ -14,12 +14,28 @@ from avid.domain.events import (
     SystemHandlerFailed,
     validate_event_name,
 )
+from avid.domain.state import (
+    EVENT_TYPES,
+    TRANSITION_TABLE,
+    IllegalTransition,
+    RobotState,
+    Trigger,
+    next_state,
+)
 
 __all__ = [
+    # Event envelope (AVID-6)
     "EVENT_DOMAINS",
     "REASON_HANDLER_RAISED",
     "REASON_QUEUE_OVERFLOW",
     "Event",
     "SystemHandlerFailed",
     "validate_event_name",
+    # RobotState (AVID-7)
+    "EVENT_TYPES",
+    "TRANSITION_TABLE",
+    "IllegalTransition",
+    "RobotState",
+    "Trigger",
+    "next_state",
 ]
