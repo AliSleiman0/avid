@@ -736,6 +736,8 @@ Enforcement (P8): CI runs the whole test suite with `PYTHONASYNCIODEBUG=1` and t
 
 The HAL is the reason G6 is achievable. Every physical device is behind a `Protocol` in `robot/core/ports.py`. The Protocol is defined by *what the application needs*, never by what the device offers — that inversion is the entire value.
 
+> As implemented (AVID-11), every HAL port is decorated `@runtime_checkable` — the composition root and the contract suite assert an object is port-shaped. `isinstance` verifies member *presence* only; the type checker enforces the signatures below.
+
 ```python
 class Camera(Protocol):
     async def start(self) -> None: ...

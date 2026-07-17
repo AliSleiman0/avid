@@ -6,5 +6,34 @@ in ``ports.py`` (AVID-11). Depends on ``domain`` only; never imports
 """
 
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy, Subscription
+from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
+from avid.core.ports import (
+    Camera,
+    Clock,
+    Display,
+    EventBus,
+    Microphone,
+    Servo,
+    Speaker,
+)
 
-__all__ = ["AsyncioEventBus", "OverflowPolicy", "Subscription"]
+__all__ = [
+    # Event bus (AVID-9/10)
+    "AsyncioEventBus",
+    "OverflowPolicy",
+    "Subscription",
+    # Port Protocols (AVID-11)
+    "Camera",
+    "Clock",
+    "Display",
+    "EventBus",
+    "Microphone",
+    "Servo",
+    "Speaker",
+    # HAL value types (AVID-11)
+    "AudioChunk",
+    "Axis",
+    "CameraCaps",
+    "DisplayFrame",
+    "Frame",
+]
