@@ -32,6 +32,16 @@ dev = [
 # `async def test_*` run without a per-test decorator (AVID-9's bus tests).
 asyncio_mode = "auto"
 
+[tool.coverage.report]
+# Protocol/overload method bodies are never executed (they are `...`), so they
+# read as uncovered and would sink pure-interface modules like core/ports.py
+# below the DoD's 90%. Exclude bare `...` stubs and TYPE_CHECKING-only blocks
+# (AVID-11).
+exclude_also = [
+    "^\\s*\\.\\.\\.$",
+    "if TYPE_CHECKING:",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

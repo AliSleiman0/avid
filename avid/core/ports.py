@@ -1,0 +1,169 @@
+"""Port contracts — what the application needs from the physical world (AVID-11).
+
+The inner half of the hexagonal boundary (ADR-003). Each ``Protocol`` here is
+defined by *what the application needs*, never by what a device offers — that
+inversion is the whole value (SDS §3.9.1). Adapters in ``avid.adapters`` satisfy
+these structurally; ``main.py`` alone wires which one (P2, P3).
+
+Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
+:class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
+:class:`Speaker`. ``Embedder`` and ``VoiceActivityDetector`` (SDS §9.3) land with
+their adapters in a later issue.
+
+Every port is ``@runtime_checkable`` (AVID-11 acceptance). Note that
+``isinstance`` against a runtime-checkable ``Protocol`` verifies member *presence*,
+not signatures — the type checker enforces the shapes; the decorator lets the
+composition root and tests assert an object is port-shaped at all.
+
+The value types crossing these boundaries live in :mod:`avid.core.hal`. Imports
+point only within ``core`` and to ``domain`` (P1): ``ports`` reads
+:class:`~avid.core.event_bus.Subscription` from the concrete bus module, which
+never imports back — the dependency is one-directional, no cycle.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+from avid.core.event_bus import E, Subscription
+from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
+from avid.domain import Event
+
+
+@runtime_checkable
+class EventBus(Protocol):
+    """The bus as its publishers and subscribers need it (SDS §3.5.2).
+
+    The concrete :class:`~avid.core.event_bus.AsyncioEventBus` satisfies this
+    without change; application code depends on this port, not the class (P2).
+    """
+
+    async def publish(self, event: Event) -> None:
+        """Fire-and-forget: returns once the event is queued, not once handled.
+        Never raises because a subscriber failed (SDS §3.5.2)."""
+        ...
+
+    def subscribe(
+        self,
+        event_type: type[E],
+        handler: Callable[[E], Awaitable[None]],
+        *,
+        name: str,
+    ) -> Subscription:
+        """Register a handler for one event type. ``name`` is mandatory: it is
+        how the §9.1.5 subscriber-graph/drift check sees the subscriber (an
+        anonymous lambda would be invisible to it)."""
+        ...
+
+
+@runtime_checkable
+class Clock(Protocol):
+    """Time, injected so it can be faked (SDS §9.3).
+
+    Two readings, matching the :class:`~avid.domain.Event` envelope's two time
+    fields: wall-clock for humans, monotonic for arithmetic. Never subtract wall
+    time (SDS §9.1.1). ``FakeClock`` (AVID-12) drives ``sleep`` so time-dependent
+    behaviour is a millisecond test, not a morning's wait.
+    """
+
+    def now(self) -> int:
+        """Epoch **seconds**, wall clock — for logs and persistence (SDS §8.2)."""
+        ...
+
+    def monotonic_ns(self) -> int:
+        """``time.monotonic_ns()`` — for latency math (SDS §9.1.1)."""
+        ...
+
+    async def sleep(self, seconds: float) -> None:
+        """The injectable, fakeable replacement for ``asyncio.sleep``."""
+        ...
+
+
+@runtime_checkable
+class Camera(Protocol):
+    """A source of frames (SDS §3.9.1)."""
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    async def capture(self) -> Frame:
+        """Latest frame. Never blocks the loop; may return a repeat frame."""
+        ...
+
+    @property
+    def capabilities(self) -> CameraCaps:
+        """What this camera can do, for negotiation (SDS §3.9.3) — so services
+        adapt to the rig they were given rather than assuming one."""
+        ...
+
+
+@runtime_checkable
+class Servo(Protocol):
+    """Actuation, defined so the gesture engine stays axis-agnostic (SDS §3.9.1)."""
+
+    async def move_to(
+        self, channel: int, angle_deg: float, *, duration_ms: int
+    ) -> None:
+        """Move ``channel`` smoothly to ``angle_deg`` over ``duration_ms``.
+
+        Clamping ``angle_deg`` to the configured safe limits is the **adapter's**
+        job, not the caller's (SDS §3.9.1): the safety limit is a property of the
+        physical linkage, so the invariant belongs at the lowest layer that can
+        enforce it universally. The move MUST be cancellable — a preempting
+        gesture cancels this task.
+        """
+        ...
+
+    async def relax(self, channel: int) -> None:
+        """De-energize the channel. Prevents servo buzz and heat when idle."""
+        ...
+
+    @property
+    def axes(self) -> tuple[Axis, ...]:
+        """The axes this rig exposes, for negotiation (SDS §3.9.3 / ADR-009)."""
+        ...
+
+
+@runtime_checkable
+class Display(Protocol):
+    """A surface for the robot's face (SDS §3.9.1)."""
+
+    async def render(self, frame: DisplayFrame) -> None:
+        """Show a **frame**, not a screen. The port never promised a
+        framebuffer — only pixels — so a real adapter can render offscreen and
+        push RGB565 over ``spidev`` while a fake writes a PNG (AVID-11)."""
+        ...
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        """``(width, height)`` in pixels."""
+        ...
+
+
+@runtime_checkable
+class Microphone(Protocol):
+    """A stream of captured audio (SDS §3.9.1)."""
+
+    def stream(self) -> AsyncIterator[AudioChunk]:
+        """Yield audio chunks as they are captured."""
+        ...
+
+
+@runtime_checkable
+class Speaker(Protocol):
+    """Audio output, including barge-in (SDS §3.9.1)."""
+
+    async def play(self, chunk: AudioChunk) -> None:
+        """Play one chunk of synthesized audio."""
+        ...
+
+    async def play_file(self, path: Path) -> None:
+        """Play a WAV from disk — the degraded-mode canned-response bank."""
+        ...
+
+    async def stop(self) -> None:
+        """Stop immediately. On the port so barge-in is genuinely instant."""
+        ...
