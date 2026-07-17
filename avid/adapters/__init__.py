@@ -10,9 +10,12 @@ idiomatic name, matching SDS §9.3, AVID-12's acceptance criteria, and the bus's
 """
 
 from avid.adapters.clock import FakeClock, SystemClock
+from avid.adapters.display import FakeDisplay
 
 __all__ = [
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",
+    # Display (AVID-13)
+    "FakeDisplay",
 ]
