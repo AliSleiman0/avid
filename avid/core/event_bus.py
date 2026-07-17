@@ -23,11 +23,15 @@ Two reliability properties live here (SDS §3.5.2, §3.5.5):
 that fails must not spawn another — that is an infinite loop, guarded explicitly in
 :meth:`AsyncioEventBus._emit_handler_failed`.
 
-Still deferred (to keep the blast radius small): the ``EventBus`` **Protocol** and the
-real ``Clock`` port live in ``core/ports.py`` as of **AVID-11**. Until then the bus
-stamps the ``system.handler_failed`` events it builds via an injected, ``Clock``-shaped
-time source (:class:`_TimeSource`), defaulting to :class:`_SystemClock`. AVID-11's real
-``Clock`` port satisfies :class:`_TimeSource` structurally and drops in unchanged.
+The ``EventBus`` **Protocol** and the real ``Clock`` port now live in ``core/ports.py``
+(**AVID-11**), and the ``Clock`` adapters ``SystemClock``/``FakeClock`` in
+``adapters/clock.py`` (**AVID-12**). The bus stamps the ``system.handler_failed`` events
+it builds via an injected time source: :class:`_TimeSource`, a deliberately *minimal*
+internal Protocol (``now`` + ``monotonic_ns`` only — the bus never sleeps), defaulting to
+:class:`_SystemClock`. It stays minimal on purpose (interface segregation) and cannot be
+replaced by the ``Clock`` port itself, because ``core`` may not import ``adapters`` (P1);
+the real ``Clock`` adapters satisfy :class:`_TimeSource` structurally, so the composition
+root injects one here unchanged.
 """
 
 from __future__ import annotations
@@ -78,10 +82,13 @@ class _TimeSource(Protocol):
     """The minimum the bus needs to stamp the ``system.handler_failed`` events it
     builds: wall time (for humans) and monotonic time (for latency math).
 
-    Private and structural on purpose. AVID-11's ``Clock`` port (SDS §9.3) exposes
-    exactly these two methods (plus ``sleep``), so it satisfies this protocol without
-    change — at which point this stand-in is deleted and the ``clock`` parameter is
-    typed as ``Clock``.
+    Private and structural on purpose, and kept minimal by design: the ``Clock`` port
+    (SDS §9.3) adds ``sleep``, but the bus never sleeps, so depending on the full port
+    here would over-couple it (interface segregation). ``Clock``'s adapters —
+    :class:`~avid.adapters.clock.SystemClock` and
+    :class:`~avid.adapters.clock.FakeClock` (AVID-12) — expose ``now``/``monotonic_ns``,
+    so each satisfies this protocol structurally and the composition root injects one via
+    ``clock=`` unchanged.
     """
 
     def now(self) -> int: ...  # epoch seconds
@@ -91,8 +98,8 @@ class _TimeSource(Protocol):
 
 class _SystemClock:
     """Real-time default for :class:`_TimeSource`. Named ``_SystemClock`` (not
-    ``Real*``) so it stays clear of the P3 composition-root grep; ``main.py`` will
-    inject the real ``Clock`` adapter here in AVID-11."""
+    ``Real*``) so it stays clear of the P3 composition-root grep; the composition root
+    (AVID-14) will inject the real :class:`~avid.adapters.clock.SystemClock` here."""
 
     def now(self) -> int:
         return int(time.time())
@@ -149,8 +156,8 @@ class AsyncioEventBus:
         # Built at start(): event type -> its runners, for O(1) dispatch.
         self._dispatch: dict[type[Event], list[_Runner]] = {}
         self._runners: list[_Runner] = []
-        # Stamps the handler_failed events the bus itself builds. AVID-11 injects the
-        # real Clock port here; the default reads the system clock.
+        # Stamps the handler_failed events the bus itself builds. The composition root
+        # (AVID-14) injects the real SystemClock here; the default reads the system clock.
         self._clock: _TimeSource = clock or _SystemClock()
         self._started = False
         self._stopped = False
