@@ -89,6 +89,17 @@ def test_hardening_present() -> None:
     assert _SERVICE["StateDirectory"] == "robot"
 
 
+def test_pi_profile_writes_only_to_writable_paths() -> None:
+    # ProtectSystem=strict makes the code tree read-only, so every path the app
+    # writes at runtime must be absolute and outside /opt/avid — otherwise the app
+    # can't boot under the unit (this is exactly the FakeDisplay crash AVID-39 hit).
+    # StateDirectory=robot backs /var/lib/robot, so both live there.
+    pi = tomllib.loads(_PI_CONFIG_PATH.read_text(encoding="utf-8"))
+    for path in (pi["display"]["frames_dir"], pi["memory"]["db_path"]):
+        assert path.startswith("/var/lib/robot"), path
+    assert _SERVICE["StateDirectory"] == "robot"
+
+
 def test_no_secret_baked_in() -> None:
     # P7 / SECURITY.md: the API key is injected at runtime (EnvironmentFile), never
     # written into the unit. Documentation comments naming the variable are fine —

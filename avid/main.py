@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 
 from avid import __version__
 
@@ -60,7 +61,9 @@ def _build_display(config: Config) -> Display:
     """
     match config.adapters.display:
         case "fake":
-            return FakeDisplay()
+            # frames_dir is injected (P7): the default repo-relative scratch dir on a
+            # laptop, but a writable StateDirectory path under the Pi's read-only unit.
+            return FakeDisplay(out_dir=Path(config.display.frames_dir))
         case other:  # pragma: no cover - guards a not-yet-built adapter
             raise NotImplementedError(
                 f"display adapter {other!r} is not available yet — only 'fake' is "

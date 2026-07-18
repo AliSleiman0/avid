@@ -51,6 +51,20 @@ class AdaptersConfig(_Section):
     notifier: Literal["systemd", "fake"] = "fake"
 
 
+class DisplayConfig(_Section):
+    """Fake-display output (SDS §3.11.3 hardening).
+
+    ``frames_dir`` is where the ``FakeDisplay`` writes its PNGs. It defaults to a
+    repo-relative scratch dir for the laptop/sim profile, but under the Pi's
+    ``ProtectSystem=strict`` unit the code tree is read-only, so ``config/pi.toml``
+    points this at the service's writable ``StateDirectory`` (``/var/lib/robot``).
+    Injected like ``[memory] db_path`` — the adapter never reaches for a path itself
+    (P7). Only consumed when ``[adapters] display = "fake"``.
+    """
+
+    frames_dir: str = ".artifacts/frames"
+
+
 class TurnDetectionConfig(_Section):
     """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails)."""
 
@@ -176,6 +190,7 @@ class Config(_Section):
     """
 
     adapters: AdaptersConfig = AdaptersConfig()
+    display: DisplayConfig = DisplayConfig()
     ai: AiConfig = AiConfig()
     gate: GateConfig = GateConfig()
     memory: MemoryConfig = MemoryConfig()
