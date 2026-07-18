@@ -39,6 +39,17 @@ forbidden_modules =
 # The domain is pure: stdlib plus pydantic only (CLAUDE.md §2). If you want
 # `import numpy` here, the logic belongs in a service or an adapter.
 
+[importlinter:contract:affect-state-orthogonality]
+name = Affect and RobotState are orthogonal (AVID-8; SDS §3.10.1)
+type = independence
+modules =
+    avid.domain.affect
+    avid.domain.state
+# Emotional state (Affect) and operational state (RobotState) are deliberately
+# decoupled (SDS §3.10.1, CLAUDE.md §5). Neither module may import the other;
+# conflating them is the most common design error in this class of project. This
+# makes the "nothing in domain/ couples them" rule mechanical, not review-hope.
+
 # service-independence (P5): no module reaches through another — `ai` may not import
 # `motion`; cross-module effect happens via the bus. There are no service modules yet
 # (M0.md §"Not in M0, deliberately"); uncomment one line per service as it arrives.
