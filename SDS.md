@@ -977,7 +977,7 @@ What WebSocket costs us, stated plainly so it isn't a surprise in M5: **with Web
 # adapters/realtime/session.py — the shape, not the code
 
 SESSION_CONFIG = {
-    "model": "gpt-realtime-2.1-mini-2026-07-06",   # PINNED. See §6.10.
+    "model": "gpt-realtime-mini-2025-12-15",   # PINNED. See §6.10.
     "instructions": composed_instruction_block,     # §6.4 — STATIC for session life
     "audio": {
         "input": {
@@ -2164,7 +2164,7 @@ realtime   = "openai"           # | "replay"
 notifier   = "systemd"          # | "fake" — sd_notify supervision (§3.11.3)
 
 [ai]
-model            = "gpt-realtime-2.1-mini-2026-07-06"   # PINNED. §6.10.
+model            = "gpt-realtime-mini-2025-12-15"   # PINNED. §6.10.
 voice            = "cedar"
 max_output_tokens = 512                                  # §6.10 guardrail
 personality      = "config/personality/default.toml"     # §6.5

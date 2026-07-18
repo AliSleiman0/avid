@@ -15,7 +15,7 @@ speaker    = "fake"
 realtime   = "replay"           # replay recorded sessions — no OpenAI connection
 
 [ai]
-model             = "gpt-realtime-2.1-mini-2026-07-06"   # PINNED. §6.10.
+model             = "gpt-realtime-mini-2025-12-15"   # PINNED. §6.10.
 voice             = "cedar"
 max_output_tokens = 512                                  # §6.10 guardrail
 personality       = "config/personality/default.toml"    # §6.5

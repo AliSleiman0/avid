@@ -67,7 +67,7 @@ class AiConfig(_Section):
     (SDS §6.10). Swapping model or voice touches this section only.
     """
 
-    model: str = "gpt-realtime-2.1-mini-2026-07-06"
+    model: str = "gpt-realtime-mini-2025-12-15"
     voice: str = "cedar"
     max_output_tokens: int = 512
     personality: str = "config/personality/default.toml"
