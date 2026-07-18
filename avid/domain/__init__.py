@@ -12,6 +12,8 @@ from avid.domain.events import (
     REASON_QUEUE_OVERFLOW,
     Event,
     SystemHandlerFailed,
+    SystemShuttingDown,
+    SystemStarted,
     validate_event_name,
 )
 from avid.domain.state import (
@@ -30,6 +32,8 @@ __all__ = [
     "REASON_QUEUE_OVERFLOW",
     "Event",
     "SystemHandlerFailed",
+    "SystemShuttingDown",
+    "SystemStarted",
     "validate_event_name",
     # RobotState (AVID-7)
     "EVENT_TYPES",
