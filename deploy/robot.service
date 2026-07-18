@@ -1,0 +1,47 @@
+[Unit]
+Description=Pico (Avid) companion robot
+Documentation=https://github.com/AliSleiman0/avid
+# M1 is offline (all-fake adapters, realtime=replay) so loopback is enough. Switch
+# to network-online.target at M2, when the Realtime WSS connection matters.
+After=network.target
+# Never give up restarting. SDS §3.12.3: nothing but a bad API key at boot is
+# allowed to stop the robot; disabling the start-rate limiter honours that.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=robot
+Group=robot
+WorkingDirectory=/opt/avid
+ExecStart=/opt/avid/.venv/bin/python -m avid --config /etc/robot/config.toml
+Restart=always
+RestartSec=5
+# Half the WatchdogSec so WATCHDOG=1 pings twice per period. Must stay consistent
+# with config/pi.toml [systemd] watchdog_interval_s = 15.0 (enforced in CI by
+# tests/deploy/test_robot_service.py).
+WatchdogSec=30
+SyslogIdentifier=avid
+# Optional (leading '-'); M1 needs no key. At M2 put OPENAI_API_KEY in this file,
+# root-owned 0600 — never in the unit or in config.toml (P7 / SECURITY.md).
+EnvironmentFile=-/etc/robot/robot.env
+
+# --- Hardening (SDS §3.11.3) ---
+# AF_UNIX for sd_notify to $NOTIFY_SOCKET; AF_INET/AF_INET6 for the loopback
+# health server (127.0.0.1:8787). Nothing else is needed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Creates /var/lib/robot (owned by the service user) for the on-device SQLite DB
+# — config/pi.toml [memory] db_path = /var/lib/robot/robot.db. Written at M2+.
+StateDirectory=robot
+
+[Install]
+WantedBy=multi-user.target
