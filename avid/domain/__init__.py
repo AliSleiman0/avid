@@ -6,6 +6,7 @@ No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``Affect`` (AVID-8).
 """
 
+from avid.domain.affect import Affect, AffectChanged, AffectTier
 from avid.domain.events import (
     EVENT_DOMAINS,
     REASON_HANDLER_RAISED,
@@ -26,6 +27,10 @@ from avid.domain.state import (
 )
 
 __all__ = [
+    # Affect (AVID-8)
+    "Affect",
+    "AffectChanged",
+    "AffectTier",
     # Event envelope (AVID-6)
     "EVENT_DOMAINS",
     "REASON_HANDLER_RAISED",
