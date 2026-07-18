@@ -63,7 +63,7 @@ device on a trusted network — but "trusted" is not "careless."
 
 ## 6. Dependencies & supply chain (ADR-008, SDS §3.11.2, §7.4)
 
-- The AI model is **pinned**: `gpt-realtime-2.1-mini-2026-07-06`. No floating tags.
+- The AI model is **pinned**: `gpt-realtime-mini-2025-12-15`. No floating tags.
 - `picamera2` is an **optional dependency group**, imported only inside its one
   `Real*Camera` adapter — it never touches the laptop dev/CI environment.
 - The Pi environment is pinned via a **Pi-specific lock**; `uv.lock` is committed.

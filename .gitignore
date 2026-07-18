@@ -40,3 +40,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# SPK-1 spike: regenerable TTS audio cache
+spikes/**/audio_cache/

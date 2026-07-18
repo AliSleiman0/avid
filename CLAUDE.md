@@ -90,7 +90,7 @@ service works in terms of domain events, never a vendor's message shapes.
 
 - **Swapping model or voice is a config edit**, not code — `[ai] model`, `[ai]
   voice`, `[adapters] realtime = "openai" | "replay"` (SDS §9.6). Model names are
-  pinned to dated snapshots (`gpt-realtime-2.1-mini-2026-07-06`) because the
+  pinned to dated snapshots (`gpt-realtime-mini-2025-12-15`) because the
   Realtime family churns fast (SDS §6.10 volatility warning).
 - **The adapter is the blast radius.** If OpenAI changes the Realtime API, exactly
   one adapter changes (risk R-10, PMP §9.2). The `RealtimeClient` adapter →
