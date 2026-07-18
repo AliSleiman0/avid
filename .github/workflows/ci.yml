@@ -22,7 +22,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v8.3.2
         with:
           enable-cache: true
@@ -61,7 +61,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v8.3.2
         with:
           enable-cache: true
@@ -70,7 +70,7 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} pytest --cov
       - name: upload FakeDisplay frames
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frames-py${{ matrix.python-version }}
           path: .artifacts/frames/
@@ -83,7 +83,7 @@ jobs:
     env:
       PYTHONASYNCIODEBUG: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v8.3.2
         with:
           enable-cache: true
