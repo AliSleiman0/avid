@@ -5,6 +5,7 @@ in ``ports.py`` (AVID-11). Depends on ``domain`` only; never imports
 ``avid.adapters`` (P1, P5).
 """
 
+from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy, Subscription
 from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
 from avid.core.ports import (
@@ -18,6 +19,9 @@ from avid.core.ports import (
 )
 
 __all__ = [
+    # Configuration (AVID-14)
+    "Config",
+    "load_config",
     # Event bus (AVID-9/10)
     "AsyncioEventBus",
     "OverflowPolicy",

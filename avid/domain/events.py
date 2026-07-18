@@ -111,6 +111,34 @@ REASON_QUEUE_OVERFLOW = "queue_overflow"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SystemStarted(Event):
+    """The composition root finished wiring and the bus is live (SDS §9.1.3).
+
+    Published by the Lifecycle once, at boot; it is the ``SYSTEM_STARTED`` trigger that
+    drives ``BOOTING -> IDLE`` (``domain/state.py``). ``adapters`` is a health map —
+    which ports came up — so subscribers can decide whether to enter DEGRADED.
+    """
+
+    name: ClassVar[str] = "system.started"
+
+    adapters: dict[str, bool]  # adapter name -> healthy; the boot health snapshot
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SystemShuttingDown(Event):
+    """A graceful shutdown has begun (SDS §9.1.3): SIGTERM, or an internal stop.
+
+    Published by the Lifecycle so every service can release its resources within
+    systemd's stop timeout. ``system.shutting_down`` is a whitelisted name (it is not
+    past tense); the P4 validator permits it via ``_NAME_EXCEPTIONS``.
+    """
+
+    name: ClassVar[str] = "system.shutting_down"
+
+    reason: str  # e.g. "signal" (SIGTERM/SIGINT) or an internal cause
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SystemHandlerFailed(Event):
     """The bus's only self-referential event (SDS §9.1.3): a subscriber either raised
     (§3.5.2) or overflowed its bounded queue (§3.5.5). Published *by the EventBus
