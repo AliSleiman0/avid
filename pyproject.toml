@@ -29,13 +29,44 @@ dev = [
     # Architecture enforcement (P1/P2/P5, AVID-3). Console entry point is
     # `lint-imports`; the contracts live in `.importlinter` at the repo root.
     "import-linter>=2",
+    # Format/lint/types gates (AVID-2, run in CI by AVID-4). Minimal rule set
+    # here; widen under AVID-2 if needed.
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 [tool.pytest.ini_options]
 # `async def test_*` run without a per-test decorator (AVID-9's bus tests).
 asyncio_mode = "auto"
 
+[tool.ruff]
+# ADR-008: the Pi runs 3.11, so lint against 3.11 semantics (flags 3.12+ idioms).
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# Ruff's defaults (E4/E7/E9 + F) plus the three that earn their keep: I (import
+# order), and the two the docs call out — ASYNC (blocking-call detection, P8) and
+# DTZ (naive-datetime, guards the Event envelope's wall-vs-monotonic rule).
+# Deliberately NOT full `E`: E501 line length is the formatter's job (`ruff
+# format`), which already governs code lines; enforcing it in lint would only
+# flag long prose in comments/docstrings. Widen under AVID-2 if warranted.
+extend-select = ["I", "ASYNC", "DTZ"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["avid"]
+
+[tool.coverage.run]
+# DoD is "≥90% non-adapter": adapters are proven by contract tests (P6), not by
+# line coverage, so they are omitted from the gate (AVID-4).
+source = ["avid"]
+omit = ["avid/adapters/*"]
+
 [tool.coverage.report]
+# Fail the run below the DoD's 90% (AVID-4 makes the prose bar mechanical).
+fail_under = 90
 # Protocol/overload method bodies are never executed (they are `...`), so they
 # read as uncovered and would sink pure-interface modules like core/ports.py
 # below the DoD's 90%. Exclude bare `...` stubs and TYPE_CHECKING-only blocks
