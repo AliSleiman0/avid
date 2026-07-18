@@ -36,6 +36,22 @@ def test_api_key_read_from_env_as_secretstr(monkeypatch: pytest.MonkeyPatch) -> 
     assert config.openai_api_key.get_secret_value() == _SECRET
 
 
+def test_missing_notify_socket_leaves_it_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    config = load_config(_SIM_TOML)
+    assert config.notify_socket is None
+
+
+def test_notify_socket_injected_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # systemd's $NOTIFY_SOCKET handoff is injected like the key (AVID-38, P7).
+    monkeypatch.setenv("NOTIFY_SOCKET", "/run/systemd/notify")
+    config = load_config(_SIM_TOML)
+    assert config.notify_socket == "/run/systemd/notify"
+    assert config.systemd.watchdog_interval_s == 15.0  # schema default
+
+
 def test_secret_never_appears_in_repr_or_str(monkeypatch: pytest.MonkeyPatch) -> None:
     # P7 / SDS §9.6: print(config) must show `**********`, never the key.
     monkeypatch.setenv("OPENAI_API_KEY", _SECRET)

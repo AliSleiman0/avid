@@ -144,6 +144,42 @@ class Display(Protocol):
 
 
 @runtime_checkable
+class ServiceNotifier(Protocol):
+    """The process supervisor, as the lifecycle needs it (AVID-38, SDS §3.11.3).
+
+    ``Type=notify`` supervision inverted into a port: the application announces its
+    own liveness rather than the supervisor probing it. Three facts, in the order the
+    run loop states them — up, still-alive, going-down — so a wedged loop that stops
+    pinging is restarted (the watchdog), not left dead until someone notices.
+
+    The real adapter (:class:`~avid.adapters.notifier.SystemdNotifier`) speaks the
+    ``sd_notify`` datagram protocol to ``$NOTIFY_SOCKET``; the fake
+    (:class:`~avid.adapters.notifier.FakeServiceNotifier`) records the calls and *is*
+    the simulator (P6). Off systemd — the laptop profile — the fake is wired and the
+    supervisor simply does not exist, so nothing is lost.
+
+    All three are ``async`` for a uniform port, though the real send is a single
+    non-blocking datagram: notifications are best-effort, never a reason to block the
+    loop (P8) or to raise into it (SDS §3.12.3 — nothing but a bad key at boot stops
+    the robot).
+    """
+
+    async def ready(self) -> None:
+        """Announce ``READY=1`` — the app has reached IDLE and is serving."""
+        ...
+
+    async def watchdog(self) -> None:
+        """Send one ``WATCHDOG=1`` keep-alive. The loop pings on an interval shorter
+        than the unit's ``WatchdogSec``; a missed ping is how a wedged loop is caught."""
+        ...
+
+    async def stopping(self) -> None:
+        """Announce ``STOPPING=1`` — a deliberate shutdown, so the restart policy
+        distinguishes it from a crash."""
+        ...
+
+
+@runtime_checkable
 class Microphone(Protocol):
     """A stream of captured audio (SDS §3.9.1)."""
 

@@ -11,6 +11,8 @@ idiomatic name, matching SDS §9.3, AVID-12's acceptance criteria, and the bus's
 
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay
+from avid.adapters.health import HealthServer
+from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
 
 __all__ = [
     # Clock (AVID-12)
@@ -18,4 +20,9 @@ __all__ = [
     "SystemClock",
     # Display (AVID-13)
     "FakeDisplay",
+    # ServiceNotifier (AVID-38)
+    "FakeServiceNotifier",
+    "SystemdNotifier",
+    # Local control API (AVID-40)
+    "HealthServer",
 ]

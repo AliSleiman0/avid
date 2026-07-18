@@ -894,6 +894,8 @@ systemd
 
 `Type=notify` with an `sd_notify` watchdog ping from the loop: if the event loop wedges, systemd restarts us. Cheap insurance against the exact failure that would otherwise mean a dead robot until you notice.
 
+Supervision is a port, not a bare syscall: the run loop announces `ready()` on reaching IDLE, pings `watchdog()` on `[systemd] watchdog_interval_s`, and announces `stopping()` on shutdown, all through the `ServiceNotifier` protocol (`core/ports.py`). The real adapter (`SystemdNotifier`) writes `READY=1`/`WATCHDOG=1`/`STOPPING=1` to `$NOTIFY_SOCKET`; the fake records the calls and *is* the simulator (P6), so the laptop profile — `notifier = "fake"`, no supervisor — runs the identical sequence. CI proves the whole handshake end-to-end against a stand-in socket (`tests/e2e/test_supervision.py`); the physical restart-on-kill is a Pi demo (M1 gate).
+
 ## 3.12 Cross-cutting concerns
 
 ### 3.12.2 Observability
@@ -2159,6 +2161,7 @@ display    = "pygame_hdmi"      # | "fake" | "png_sequence"
 microphone = "alsa"             # | "fake"
 speaker    = "alsa"             # | "fake"
 realtime   = "openai"           # | "replay"
+notifier   = "systemd"          # | "fake" — sd_notify supervision (§3.11.3)
 
 [ai]
 model            = "gpt-realtime-2.1-mini-2026-07-06"   # PINNED. §6.10.
@@ -2202,9 +2205,12 @@ axes       = ["pan"]            # ADR-009 — 1 or 2. Capability-negotiated (§3
 [api]
 bind = "127.0.0.1"              # asserted at startup. §9.5.
 port = 8787
+
+[systemd]                       # §3.11.3 — supervision knobs (Type=notify)
+watchdog_interval_s = 15.0      # WATCHDOG=1 ping cadence; ≈ WatchdogSec / 2
 ```
 
-Secrets are **not here**. `OPENAI_API_KEY` is read from the environment exactly once, in `main.py`, and injected as a value. It never appears in a config file, a log line, or a repr. Pydantic `SecretStr`, so an accidental `print(config)` prints `**********`.
+Secrets are **not here**. `OPENAI_API_KEY` is read from the environment exactly once, in `core/config.py`, and injected as a value. It never appears in a config file, a log line, or a repr. Pydantic `SecretStr`, so an accidental `print(config)` prints `**********`. systemd's `$NOTIFY_SOCKET` handoff is injected the same way — read once alongside the key, `None` off a `Type=notify` unit — because it too is a runtime value, not an authored setting.
 
 The `[adapters]` block is the whole of §3.11.1's development story. `uv run robot --config config/sim.toml` is a running robot on a laptop, no hardware, no network. Same binary, same code path, different six lines of TOML. That is what G6 means and it is why the HAL exists.
 

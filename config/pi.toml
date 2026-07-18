@@ -1,0 +1,66 @@
+# config/pi.toml — the Raspberry Pi profile at M1 (SDS §3.11.1, §9.6).
+#
+# The same binary as config/sim.toml; only a few strings differ (§9.6). At M1 the Pi
+# "boots to app": systemd starts it, it reaches IDLE, a watchdog restarts it if it
+# wedges. The device adapters are still all-fake — real camera/servo/audio/display land
+# with their hardware issues at M2+ — so the ONLY differences from sim here are the two
+# that make it a supervised process: notifier = "systemd" and the [systemd] watchdog.
+#
+# The secret is NOT here — OPENAI_API_KEY is read from the environment, once, at the
+# composition root. $NOTIFY_SOCKET is likewise injected by systemd at runtime (§3.11.3).
+
+[adapters]                      # ← the entire sim/real switch (§3.9.2, §3.11.1)
+camera     = "fake"             # real picamera2 lands at M2 (SPK-5 / AVID-43)
+servo      = "fake"
+display    = "fake"
+microphone = "fake"
+speaker    = "fake"
+realtime   = "replay"           # replay recorded sessions — no OpenAI connection
+notifier   = "systemd"          # ← sd_notify to $NOTIFY_SOCKET (§3.11.3, AVID-38)
+
+[ai]
+model             = "gpt-realtime-2.1-mini-2026-07-06"   # PINNED. §6.10.
+voice             = "cedar"
+max_output_tokens = 512                                  # §6.10 guardrail
+personality       = "config/personality/default.toml"    # §6.5
+
+[ai.turn_detection]
+type                = "server_vad"
+threshold           = 0.5
+prefix_padding_ms   = 300
+silence_duration_ms = 500
+
+[gate]                          # §6.3 / ADR-007
+vad_model            = "silero_v5"
+ring_buffer_ms       = 300
+session_idle_close_s = 30
+
+[memory]
+db_path                = "/var/lib/robot/robot.db"   # on-device SQLite; local, never synced
+embedder               = "local_minilm"
+dimensions             = 384
+top_k                  = 5
+recency_half_life_days = 14.0                    # §7.7
+weights = { recency = 1.0, importance = 1.0, relevance = 1.0 }   # Park et al.
+
+[behavior]                      # §10.4
+quiet_hours                = { start = "22:00", end = "07:30" }
+timezone                   = "Asia/Beirut"
+global_cooldown_s          = 900
+daily_budget               = 5
+presence_window_s          = 300
+ambient_speech_threshold_s = 60
+ignore_streak_limit        = 3
+
+[vision]
+fps = 5                         # §2.7.1: ≤1 core
+
+[motion]
+axes = ["pan"]                  # ADR-009 — 1 or 2. Capability-negotiated (§3.9.3).
+
+[api]
+bind = "127.0.0.1"              # asserted loopback at load. §9.5.
+port = 8787
+
+[systemd]                       # §3.11.3 — supervision knobs (AVID-38)
+watchdog_interval_s = 15.0      # ping WATCHDOG=1 twice per WatchdogSec (unit: 30s)

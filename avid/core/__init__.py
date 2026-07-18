@@ -14,6 +14,7 @@ from avid.core.ports import (
     Display,
     EventBus,
     Microphone,
+    ServiceNotifier,
     Servo,
     Speaker,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "EventBus",
     "Microphone",
     "Servo",
+    "ServiceNotifier",
     "Speaker",
     # HAL value types (AVID-11)
     "AudioChunk",

@@ -19,11 +19,17 @@ from avid import __version__
 
 # The one place Fake*/System* adapters are constructed (P3). CI greps for these
 # outside main.py and test fixtures.
-from avid.adapters import FakeDisplay, SystemClock
+from avid.adapters import (
+    FakeDisplay,
+    FakeServiceNotifier,
+    HealthServer,
+    SystemClock,
+    SystemdNotifier,
+)
 from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.ports import Display
+from avid.core.ports import Display, ServiceNotifier
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,21 +68,44 @@ def _build_display(config: Config) -> Display:
             )
 
 
+def _build_notifier(config: Config) -> ServiceNotifier:
+    """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
+
+    ``systemd`` gets the real sd_notify adapter, fed the ``$NOTIFY_SOCKET`` address the
+    config injected from the env (P7); ``fake`` gets the recording simulator — the
+    laptop default, where no supervisor exists.
+    """
+    match config.adapters.notifier:
+        case "fake":
+            return FakeServiceNotifier()
+        case "systemd":
+            return SystemdNotifier(address=config.notify_socket)
+
+
 async def _run(config: Config) -> int:
     """Build the adapters and bus, then hand off to the lifecycle.
 
-    This is the P3 site: :class:`SystemClock` and the display adapter are constructed
-    here and nowhere else. The real clock is injected into the bus, retiring its private
-    ``_SystemClock`` default.
+    This is the P3 site: :class:`SystemClock`, the display, the notifier, and the
+    control-API server are constructed here and nowhere else. The real clock is injected
+    into the bus, retiring its private ``_SystemClock`` default.
     """
     clock = SystemClock()
     display = _build_display(config)
+    notifier = _build_notifier(config)
+    health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
-    adapter_health = {"clock": True, "display": True}
+    adapter_health = {"clock": True, "display": True, "notifier": True, "health": True}
     # ``display`` is constructed to realize the switch and appear in the health map;
     # rendering to it is ExpressionService's job in a later issue.
     _ = display
-    return await lifecycle.run(bus=bus, clock=clock, adapter_health=adapter_health)
+    return await lifecycle.run(
+        bus=bus,
+        clock=clock,
+        adapter_health=adapter_health,
+        notifier=notifier,
+        health=health,
+        watchdog_interval_s=config.systemd.watchdog_interval_s,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
