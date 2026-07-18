@@ -21,7 +21,6 @@ from avid.domain import (
     SystemHandlerFailed,
 )
 
-
 # --- test events -----------------------------------------------------------
 # Two distinct concrete event types with valid (P4) catalog names. The bus
 # routes by type, not name; the names only need to pass validation.

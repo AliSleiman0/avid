@@ -1,0 +1,92 @@
+name: CI
+
+# AVID-4: every DoD gate, machine-checked, on push to main and every PR. Runs on
+# Linux (the Pi target is Linux; ADR-008). The matrix exercises BOTH 3.11 (the Pi's
+# system Python) and 3.13 (dev) — bug #27 shipped because the 3.11 leg, though
+# documented, was never actually run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Format, lint, types, architecture, and the P3/P7 purity greps. Single
+  # interpreter — these are source-level checks, not runtime behaviour.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --dev --frozen
+      - name: ruff format
+        run: uv run ruff format --check .
+      - name: ruff check
+        run: uv run ruff check .
+      - name: mypy (strict)
+        run: uv run mypy avid
+      - name: import-linter (P1/P5)
+        run: uv run lint-imports
+      - name: P3 — composition-root purity
+        # No Real*/Fake* is constructed outside main.py and adapters/. A match here
+        # means an adapter leaked into the domain/core/services layers.
+        run: |
+          if grep -rEn --include='*.py' '\b(Real|Fake)[A-Za-z0-9_]*\(' avid/domain avid/core avid/services; then
+            echo "::error::P3 violation — Real*/Fake* constructed outside main.py / adapters/"
+            exit 1
+          fi
+      - name: P7 — config purity
+        # Config is injected, never read: no os.environ / os.getenv anywhere in
+        # avid/ except core/config.py.
+        run: |
+          if grep -rEn --include='*.py' 'os\.(environ|getenv)' avid | grep -v 'avid/core/config.py'; then
+            echo "::error::P7 violation — os.environ/os.getenv outside core/config.py"
+            exit 1
+          fi
+
+  # The suite on both interpreters, with the ≥90% non-adapter coverage gate
+  # (fail_under lives in pyproject [tool.coverage.report]).
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --dev --frozen --python ${{ matrix.python-version }}
+      - name: pytest + coverage
+        run: uv run --python ${{ matrix.python-version }} pytest --cov
+      - name: upload FakeDisplay frames
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: frames-py${{ matrix.python-version }}
+          path: .artifacts/frames/
+          if-no-files-found: ignore
+
+  # P8: the suite under asyncio debug. tests/conftest.py arms on PYTHONASYNCIODEBUG
+  # and fails the run on any slow-callback warning > 50 ms (blocking I/O on the loop).
+  async-debug:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONASYNCIODEBUG: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --dev --frozen
+      - name: pytest under asyncio debug (slow-callback > 50 ms fails)
+        run: uv run pytest

@@ -129,7 +129,10 @@ class FakeClock:
         Strictly forward: if that time-of-day is already at or behind *now*, it rolls to
         the next day — so ``advance_to`` can never move time backward.
         """
-        target_time = datetime.strptime(
+        # noqa: DTZ007 — parses a time-of-day only; sole use is the hour/minute/
+        # second fields, applied below to the tz-aware `current`. The naive value
+        # never stands for an instant, so attaching a tzinfo here would mislead.
+        target_time = datetime.strptime(  # noqa: DTZ007
             wall, "%H:%M:%S" if wall.count(":") == 2 else "%H:%M"
         )
         current = datetime.fromtimestamp(self.now(), tz=self._tz)
