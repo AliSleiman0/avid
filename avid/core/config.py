@@ -45,6 +45,10 @@ class AdaptersConfig(_Section):
     microphone: Literal["alsa", "fake"] = "fake"
     speaker: Literal["alsa", "fake"] = "fake"
     realtime: Literal["openai", "replay"] = "replay"
+    # The process supervisor (AVID-38). ``systemd`` speaks sd_notify to
+    # ``$NOTIFY_SOCKET``; ``fake`` records the calls and is the laptop default — the
+    # same binary runs supervised on the Pi and unsupervised on a laptop (§3.11.3).
+    notifier: Literal["systemd", "fake"] = "fake"
 
 
 class TurnDetectionConfig(_Section):
@@ -149,12 +153,26 @@ class ApiConfig(_Section):
         return value
 
 
+class SystemdConfig(_Section):
+    """systemd supervision knobs (AVID-38, SDS §3.11.3).
+
+    ``watchdog_interval_s`` is how often the loop pings ``WATCHDOG=1``; it must be
+    comfortably shorter than the unit's ``WatchdogSec`` (convention: half), so a
+    single missed ping does not trip a restart but a wedged loop reliably does. Only
+    consumed when ``[adapters] notifier = "systemd"``.
+    """
+
+    watchdog_interval_s: float = 15.0
+
+
 class Config(_Section):
     """The whole configuration, frozen (SDS §9.6).
 
-    Built by :func:`load_config`. ``openai_api_key`` is **not** read from the TOML — it
-    is injected from the environment as a :class:`~pydantic.SecretStr`, so an accidental
-    ``print(config)`` shows ``**********`` and never the key (P7, SDS §9.6).
+    Built by :func:`load_config`. ``openai_api_key`` and ``notify_socket`` are **not**
+    read from the TOML — they are injected from the environment (the key as a
+    :class:`~pydantic.SecretStr`, so an accidental ``print(config)`` shows
+    ``**********`` and never the key), because both are runtime handoffs, not authored
+    settings (P7, SDS §9.6).
     """
 
     adapters: AdaptersConfig = AdaptersConfig()
@@ -165,7 +183,11 @@ class Config(_Section):
     vision: VisionConfig = VisionConfig()
     motion: MotionConfig = MotionConfig()
     api: ApiConfig = ApiConfig()
+    systemd: SystemdConfig = SystemdConfig()
     openai_api_key: SecretStr | None = Field(default=None)
+    # systemd's ``$NOTIFY_SOCKET`` handoff (AVID-38), injected from the env like the
+    # key. ``None`` off systemd — the real notifier then no-ops (SDS §3.11.3).
+    notify_socket: str | None = Field(default=None)
 
 
 def load_config(path: str | Path) -> Config:
@@ -180,8 +202,12 @@ def load_config(path: str | Path) -> Config:
     """
     with Path(path).open("rb") as handle:
         data = tomllib.load(handle)
-    # The sole ``os.environ`` read in the codebase (P7). Absent is fine.
+    # The sole ``os.environ`` reads in the codebase (P7). Both are runtime handoffs,
+    # absent off their context: no key on the laptop, no socket off systemd.
     key = os.environ.get("OPENAI_API_KEY")
     if key:
         data["openai_api_key"] = key
+    notify_socket = os.environ.get("NOTIFY_SOCKET")
+    if notify_socket:
+        data["notify_socket"] = notify_socket
     return Config.model_validate(data)

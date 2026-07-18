@@ -55,6 +55,11 @@ extend-select = ["I", "ASYNC", "DTZ"]
 
 [tool.mypy]
 python_version = "3.11"
+# Type-check against the deployment platform (ADR-008: the Pi runs Linux; CI is
+# Linux-only). Pinning it keeps a dev on Windows/macOS honest — POSIX-only stdlib
+# (e.g. socket.AF_UNIX, used by the systemd notifier) resolves the same as in CI,
+# so no platform-specific `# type: ignore` drifts in or out between machines.
+platform = "linux"
 strict = true
 files = ["avid"]
 
