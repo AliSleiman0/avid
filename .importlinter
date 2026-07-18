@@ -1,0 +1,54 @@
+# Architecture enforcement (SDS §3.2, §3.4; principles P1, P2, P5). AVID-3.
+#
+# Run: `uv run lint-imports`. This is the load-bearing gate — reviewers get tired,
+# import-linter does not (CONTRIBUTING §"CI quality gates"). Until CI (AVID-4)
+# lands it is hand-run alongside the other quality gates.
+
+[importlinter]
+root_package = avid
+# Required so the domain-purity forbidden contract can graph imports that leave
+# avid (numpy, openai, …). Without it, external forbidden modules are invisible.
+include_external_packages = True
+
+[importlinter:contract:layers]
+name = Dependencies point inward only (P1, P5)
+type = layers
+layers =
+    avid.main
+    avid.adapters
+    avid.services
+    avid.core
+    avid.domain
+# A higher layer may import a lower one; never the reverse. This single contract
+# also enforces P2 — services / core / domain cannot import avid.adapters, because
+# adapters sits above them. If you are fighting this, logic is in the wrong layer:
+# move the logic, do not weaken the rule.
+
+[importlinter:contract:domain-purity]
+name = Domain imports nothing heavy or third-party (P1)
+type = forbidden
+source_modules =
+    avid.domain
+forbidden_modules =
+    numpy
+    pygame
+    sqlite3
+    asyncio
+    openai
+    cv2
+# The domain is pure: stdlib plus pydantic only (CLAUDE.md §2). If you want
+# `import numpy` here, the logic belongs in a service or an adapter.
+
+# service-independence (P5): no module reaches through another — `ai` may not import
+# `motion`; cross-module effect happens via the bus. There are no service modules yet
+# (M0.md §"Not in M0, deliberately"); uncomment one line per service as it arrives.
+# [importlinter:contract:service-independence]
+# name = Services do not import each other (P5)
+# type = independence
+# modules =
+#     avid.services.ai
+#     avid.services.audio
+#     avid.services.vision
+#     avid.services.motion
+#     avid.services.behavior
+#     avid.services.memory

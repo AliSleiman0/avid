@@ -26,6 +26,9 @@ dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "pytest-asyncio>=0.23",
+    # Architecture enforcement (P1/P2/P5, AVID-3). Console entry point is
+    # `lint-imports`; the contracts live in `.importlinter` at the repo root.
+    "import-linter>=2",
 ]
 
 [tool.pytest.ini_options]
