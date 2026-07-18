@@ -74,12 +74,9 @@ class SystemdNotifier:
         self._target = b"\0" + address[1:].encode() if address[0] == "@" else address
         # SOCK_DGRAM + non-blocking: sd_notify is connectionless and must not stall the
         # loop (P8). AF_UNIX is Linux/POSIX; this adapter is only built there (the Pi),
-        # never in the Windows sim, so referencing it lazily here is safe. The ignore is
-        # because mypy checks against win32, where the stdlib stub omits AF_UNIX.
-        self._sock = socket.socket(
-            socket.AF_UNIX,  # type: ignore[attr-defined]  # POSIX-only; Pi-only adapter
-            socket.SOCK_DGRAM,
-        )
+        # never in the Windows sim, so referencing it lazily here is safe (mypy checks
+        # against the Linux target — see [tool.mypy] platform — so AF_UNIX resolves).
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self._sock.setblocking(False)
 
     async def ready(self) -> None:
