@@ -1,19 +1,22 @@
 # Gate demos
 
-One recording per milestone gate (PMP §5.1, §10.2). A milestone is "done done" only
-when its gate demo is committed here — not when the code merges (CONTRIBUTING §DoD).
+The proof, per milestone, that the gate actually held (PMP §5.1, §10.2) — insurance
+against R-03 (motivation decay), the top of the risk register.
 
-These are unfakeable proof against R-03 (motivation decay), the top of the risk
-register: in month eight, this folder is what proves the work was real.
+On this **solo** build the proof is the **runnable gate script below plus its permanent
+CI test**, not a screen recording. A video recording (`m<n>.mp4`) is welcome here but
+**optional and waived by default** — a test that re-proves the gate on every push is
+stronger than a clip, and cheaper for a solo maintainer to keep honest.
 
-## M0 — Walking Skeleton (`m0.mp4`)
+## M0 — Walking Skeleton
 
 **Gate:** an event published in a test travels through the bus to a fake display, which
 asserts a frame; `pytest` green on a laptop; `import-linter` fails a deliberate
 violation.
 
-The ~60-second take, recorded in order (prepend `export PATH="$HOME/.local/bin:$PATH"`
-first):
+**Permanent proof:** `tests/e2e/test_m0_gate.py` runs the bus → fake-display path on
+every push. **Recording:** waived (solo maintainer's call). Reproduce it live in ~60s
+(prepend `export PATH="$HOME/.local/bin:$PATH"` first):
 
 1. **Suite green on both interpreters** (the Pi target is 3.11; dev is 3.13):
    ```
