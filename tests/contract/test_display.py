@@ -52,14 +52,18 @@ def ihdr_dimensions(png: bytes) -> tuple[int, int]:
 def display(request: pytest.FixtureRequest, tmp_path: Path) -> Display:
     """Every Display adapter, real and fake, must satisfy the tests below (P6, SDS §14.4).
 
-    The ``"real"`` case skips off the Pi via :func:`skip_off_pi`; on the Pi it will
-    construct the real adapter. That adapter (``PygameDisplay``) lands in AVID-55, which
-    replaces the placeholder skip with its constructor — this is the seam AVID-50 lays.
+    The ``"real"`` case skips off the Pi via :func:`skip_off_pi`; on the Pi it constructs
+    :class:`~avid.adapters.display.FramebufferDisplay`, which writes XRGB8888 to the panel's
+    framebuffer device (AVID-55). ``/dev/fb0`` is the bring-up rig's SPI panel (headless, so
+    it grabbed index 0); the class is imported here, not at module scope, so this suite still
+    collects off-Pi where the fake alone runs.
     """
     if request.param == "fake":
         return FakeDisplay(out_dir=tmp_path)
     skip_off_pi()
-    pytest.skip("real Display adapter (PygameDisplay) lands in AVID-55")
+    from avid.adapters.display import FramebufferDisplay
+
+    return FramebufferDisplay(device="/dev/fb0", width=480, height=320)
 
 
 def test_adapter_satisfies_the_display_port(display: Display) -> None:

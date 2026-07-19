@@ -11,7 +11,7 @@ idiomatic name, matching SDS §9.3, AVID-12's acceptance criteria, and the bus's
 
 from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
-from avid.adapters.display import FakeDisplay
+from avid.adapters.display import FakeDisplay, FramebufferDisplay
 from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
@@ -34,8 +34,9 @@ __all__ = [
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",
-    # Display (AVID-13)
+    # Display (AVID-13 / AVID-55)
     "FakeDisplay",
+    "FramebufferDisplay",
     # ServiceNotifier (AVID-38)
     "FakeServiceNotifier",
     "SystemdNotifier",

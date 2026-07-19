@@ -19,9 +19,18 @@ realtime   = "replay"           # replay recorded sessions — no OpenAI connect
 notifier   = "systemd"          # ← sd_notify to $NOTIFY_SOCKET (§3.11.3, AVID-38)
 
 [display]
-# The code tree is read-only under the unit's ProtectSystem=strict, so the fake
-# display's PNGs go to the service's writable StateDirectory (/var/lib/robot), not
-# the repo-relative default. Injected, never reached for (P7). See deploy/robot.service.
+# The real framebuffer adapter lands with this milestone; display stays "fake" above until
+# the on-Pi contract run flips it (AVID-57), exactly as camera/servo/mic/speaker did. On the
+# bring-up rig the Elecrow 3.5" SPI ILI9486 (piscreen,drm overlay) surfaces as /dev/fb0 —
+# NOT fb1: this Pi is headless, so the SPI panel grabbed framebuffer index 0. It is 32bpp
+# XRGB8888. The `robot` nologin user is already in `video` (SupplementaryGroups from AVID-51),
+# so it can open /dev/fb0 under the read-only unit. Set `device` when flipping to framebuffer.
+device     = "/dev/fb0"         # framebuffer path — only the framebuffer adapter uses it
+width      = 480                # panel width  (§2.4) — both adapters report it as resolution
+height     = 320                # panel height (§2.4)
+# The code tree is read-only under the unit's ProtectSystem=strict, so the fake display's PNGs
+# go to the service's writable StateDirectory (/var/lib/robot), not the repo-relative default.
+# Injected, never reached for (P7). See deploy/robot.service.
 frames_dir = "/var/lib/robot/frames"
 
 [ai]
