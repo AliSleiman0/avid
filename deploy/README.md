@@ -100,14 +100,82 @@ cd /opt/avid && uv pip install -e .          # only if dependencies changed
 sudo systemctl restart robot
 ```
 
-## M2 readiness (not needed at M1)
+## Prove the HAL on the Pi (M2 gate — AVID-57)
+
+M2's exit criterion (PMP §5.2): *every port's real adapter passes the **identical**
+contract suite as its fake, on the physical Pi, none skipped, and each device is
+demonstrated.* This is the runbook; it closes milestone M2 and tags `v0.M2.0`.
+
+Nothing drives the devices at M2 (AudioService is M4, motion M9, etc.), so booting `avid`
+with real adapters only reaches IDLE — it moves nothing. The **contract suite is the
+exerciser** (it calls each port method on real hardware), and `docs/demos/hal_pi.py` gives
+a slow, watchable per-device demo for the evidence.
+
+### 1. Pre-flight — wire and detect each device
+
+| Device | Bring-up | Verify |
+|---|---|---|
+| **Camera** (OV5647 CSI) | ribbon seated in the **CAMERA/CSI** port, correct orientation | `dmesg \| grep ov5647` shows a clean probe (no `i2c ... -5`); `libcamera-hello --list-cameras` lists it. **If `-EIO`: swap the ribbon; still `-EIO` ⇒ RMA the sensor.** Then restore `camera_auto_detect=1` and drop any forced `dtoverlay=ov5647`. |
+| **Servo** (PCA9685) | ⚠️ **R-04: separate 5 V supply, common ground only — never the Pi 5 V pin.** A stall can brown out the Pi and corrupt the SD card. | `dtparam=i2c_arm=on` in `config.txt`; `i2cdetect -y 1` shows `0x40`. |
+| **Mic** (ReSpeaker) | HAT + `seeed-voicecard` driver | `arecord -l` lists it as a capture card. |
+| **Speaker** (MAX98357 I²S DAC) | its `dtoverlay` (e.g. `hifiberry-dac` / `max98357a`) | `aplay -l` lists it as a playback card. |
+| **Display** (ILI9486 SPI) | `dtoverlay=piscreen,drm` (already bring-up-verified) | `/dev/fb0` exists, 480×320 32bpp; running user is in `video`. |
+
+**ALSA `default` must route to both cards.** The contract fixtures pass `device="default"`
+for the mic *and* the speaker (not the `[microphone]/[speaker] device` config — that only
+feeds the composition root). So set `/etc/asound.conf` (or `~/.asoundrc`) so that `default`
+capture = the ReSpeaker and `default` playback = the MAX98357, or the audio `real` params
+will open the wrong card.
+
+### 2. Prepare the venv (do **not** rebuild it)
+
+The `/opt/avid` venv was created with `--system-site-packages` (for `picamera2`). A `uv run`
+can silently rebuild it *without* that flag and lose `picamera2`, so install **into** it by
+path — never `uv run` for this:
+
+```sh
+git -C /opt/avid pull                                   # merged main
+uv pip install -p /opt/avid/.venv/bin/python -e '.[pi]' pytest pytest-asyncio
+# .[pi] = adafruit-servokit + pyalsaaudio; picamera2 comes from --system-site-packages
+```
+
+### 3. The contract run (the acceptance criterion)
+
+On the Pi, `on_pi()` is true, so every `real` param activates automatically (`AVID_HARDWARE=1`
+is belt-and-suspenders):
+
+```sh
+cd /opt/avid
+AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 /opt/avid/.venv/bin/python -m pytest tests/contract/ -q
+```
+
+**Expected:** every `real` param passes alongside its fake, **none skipped**, no slow-callback
+> 50 ms. That is the M2 gate met.
+
+### 4. Physical demo (evidence)
+
+```sh
+/opt/avid/.venv/bin/python docs/demos/hal_pi.py --device all   # or --device servo, etc.
+```
+
+Watch/listen: the servo sweeps 0→90→0 then goes silent (relaxed); the panel cycles R/G/B/W;
+a 440 Hz tone plays and is cut mid-note by `stop()` (barge-in). Artifacts land in
+`docs/demos/hal_pi_out/` — `camera_frame.ppm` (open it), `mic_capture.wav` (play it back).
+Capture a photo/log/short clip as the gate evidence (issue or `docs/demos/`).
+
+### 5. Run the app with real adapters
+
+Flip the adapters in `/etc/robot/config.toml` (`camera = "picamera2"`, `servo = "pca9685"`,
+`microphone = "alsa"`, `speaker = "alsa"`, `display = "framebuffer"`), add
+`SupplementaryGroups=video gpio i2c audio` to the unit, then `sudo systemctl restart robot`
+and confirm `systemctl status robot` reaches `active (running)` (= IDLE) with `/health` ok.
+
+## Other M2 notes
 
 - **API key**: create `/etc/robot/robot.env`, `root:root`, `chmod 600`, containing
   `OPENAI_API_KEY=…`. It is already wired via `EnvironmentFile=-` in the unit — the
-  key never appears in the unit or in `config.toml` (P7 / SECURITY.md).
-- **Camera / servo**: add `SupplementaryGroups=video gpio` to the unit and flip
-  `camera = "picamera2"` (etc.) in `config.toml`. The venv already carries
-  `--system-site-packages`, so the apt `python3-picamera2` is visible.
+  key never appears in the unit or in `config.toml` (P7 / SECURITY.md). (Not needed while
+  `realtime = "replay"`.)
 - **Tighter sandbox**: `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`,
   and `IPAddressAllow=localhost` are deliberately deferred — validate they don't
   break sd_notify/asyncio before adding them.
