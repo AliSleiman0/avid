@@ -80,6 +80,31 @@ class CameraConfig(_Section):
     fps: int = 5
 
 
+class ServoConfig(_Section):
+    """Physical servo channel, injected into the servo adapter (P7, AVID-52).
+
+    Describes the *one* servo the M2 rig drives: which PCA9685 ``channel`` it is on, its
+    named axis, and the safe angular reach the adapter clamps to (SDS §3.9.1 — clamping is
+    the adapter's job). The pulse-width range and PWM ``freq_hz`` are the ``Pca9685Servo``
+    degree→pulse mapping for an SG90/MG90S (SDS §4.7); the ``FakeServo`` ignores them.
+    ⚠️ R-04 (PMP §9.2, SPK-4): the servo runs on a **separate 5 V rail, common ground only**,
+    never the Pi 5 V pin — a wiring assumption the adapter documents but cannot enforce.
+
+    ``[motion] axes`` is the *gesture* vocabulary (ADR-009), reconciled with this physical
+    channel by MotionService (M9); ``[servo]`` is the hardware. The adapter never reaches
+    for these itself — the composition root injects them.
+    """
+
+    channel: int = 0
+    name: str = "pan"
+    min_deg: float = 0.0
+    max_deg: float = 180.0
+    i2c_address: int = 0x40
+    min_pulse_us: int = 500
+    max_pulse_us: int = 2500
+    freq_hz: int = 50
+
+
 class TurnDetectionConfig(_Section):
     """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails)."""
 
@@ -207,6 +232,7 @@ class Config(_Section):
     adapters: AdaptersConfig = AdaptersConfig()
     display: DisplayConfig = DisplayConfig()
     camera: CameraConfig = CameraConfig()
+    servo: ServoConfig = ServoConfig()
     ai: AiConfig = AiConfig()
     gate: GateConfig = GateConfig()
     memory: MemoryConfig = MemoryConfig()

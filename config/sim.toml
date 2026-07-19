@@ -54,6 +54,16 @@ fps = 5                         # §2.7.1: ≤1 core
 [motion]
 axes = ["pan"]                  # ADR-009 — 1 or 2. Capability-negotiated (§3.9.3).
 
+[servo]                         # physical channel for the servo adapter (AVID-52)
+channel      = 0                # PCA9685 channel
+name         = "pan"            # axis name (reconciled with [motion] by M9)
+min_deg      = 0.0              # safe reach — the adapter clamps to it (§3.9.1)
+max_deg      = 180.0
+i2c_address  = 0x40             # PCA9685 default; only the pca9685 adapter uses it
+min_pulse_us = 500              # SG90/MG90S pulse range (§4.7)
+max_pulse_us = 2500
+freq_hz      = 50
+
 [api]
 bind = "127.0.0.1"              # asserted loopback at load. §9.5.
 port = 8787

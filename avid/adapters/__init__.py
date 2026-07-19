@@ -14,11 +14,15 @@ from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay
 from avid.adapters.health import HealthServer
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
+from avid.adapters.servo import FakeServo, Pca9685Servo
 
 __all__ = [
     # Camera (AVID-51)
     "FakeCamera",
     "Picamera2Camera",
+    # Servo (AVID-52)
+    "FakeServo",
+    "Pca9685Servo",
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",
