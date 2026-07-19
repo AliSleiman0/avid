@@ -64,6 +64,12 @@ min_pulse_us = 500              # SG90/MG90S pulse range (§4.7)
 max_pulse_us = 2500
 freq_hz      = 50
 
+[microphone]                    # audio capture params for the microphone adapter (AVID-53)
+device      = "default"         # ALSA device — only the alsa adapter uses it (the fake synthesizes)
+sample_rate = 16000             # 16 kHz — the Realtime/VAD input rate (§6.3)
+channels    = 1                 # mono capture
+chunk_ms    = 20                # frame size — the 20 ms mic-capture budget
+
 [api]
 bind = "127.0.0.1"              # asserted loopback at load. §9.5.
 port = 8787

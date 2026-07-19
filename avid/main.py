@@ -21,8 +21,10 @@ from avid import __version__
 # The one place Fake*/System* adapters are constructed (P3). CI greps for these
 # outside main.py and test fixtures.
 from avid.adapters import (
+    AlsaMicrophone,
     FakeCamera,
     FakeDisplay,
+    FakeMicrophone,
     FakeServiceNotifier,
     FakeServo,
     HealthServer,
@@ -35,7 +37,7 @@ from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
-from avid.core.ports import Camera, Display, ServiceNotifier, Servo
+from avid.core.ports import Camera, Display, Microphone, ServiceNotifier, Servo
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,6 +141,35 @@ def _build_servo(config: Config) -> Servo:
             )
 
 
+def _build_microphone(config: Config) -> Microphone:
+    """Select the ``Microphone`` adapter named by ``[adapters] microphone`` (AVID-53).
+
+    ``fake`` is the laptop/sim default — synthesized PCM, no hardware; ``alsa`` captures from
+    the ReSpeaker via ALSA (the ``alsaaudio`` import lives inside that adapter, pip-on-Pi only,
+    ADR-008). Both are handed the same capture params from ``[microphone]`` (P7), so the stream
+    contract behaves identically. Any other value fails loudly rather than silently doing nothing.
+    """
+    match config.adapters.microphone:
+        case "fake":
+            return FakeMicrophone(
+                sample_rate=config.microphone.sample_rate,
+                channels=config.microphone.channels,
+                chunk_ms=config.microphone.chunk_ms,
+            )
+        case "alsa":  # pragma: no cover - needs the Pi (M2 gate #57)
+            return AlsaMicrophone(
+                device=config.microphone.device,
+                sample_rate=config.microphone.sample_rate,
+                channels=config.microphone.channels,
+                chunk_ms=config.microphone.chunk_ms,
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"microphone adapter {other!r} is not available — only 'fake' and "
+                f"'alsa' exist (AVID-53)"
+            )
+
+
 def _build_notifier(config: Config) -> ServiceNotifier:
     """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
 
@@ -164,6 +195,7 @@ async def _run(config: Config) -> int:
     display = _build_display(config)
     camera = _build_camera(config)
     servo = _build_servo(config)
+    microphone = _build_microphone(config)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
@@ -172,16 +204,18 @@ async def _run(config: Config) -> int:
         "display": True,
         "camera": True,
         "servo": True,
+        "microphone": True,
         "notifier": True,
         "health": True,
     }
-    # ``display``, ``camera`` and ``servo`` are constructed to realize the switch and appear
-    # in the health map; rendering to the display is ExpressionService's job, driving the
-    # camera is the vision service's (M8), and moving the servo is MotionService's (M9) —
-    # all later issues.
+    # ``display``, ``camera``, ``servo`` and ``microphone`` are constructed to realize the
+    # switch and appear in the health map; rendering to the display is ExpressionService's job,
+    # driving the camera is the vision service's (M8), moving the servo is MotionService's (M9),
+    # and consuming the mic stream is AudioService/VAD's (M4) — all later issues.
     _ = display
     _ = camera
     _ = servo
+    _ = microphone
     return await lifecycle.run(
         bus=bus,
         clock=clock,

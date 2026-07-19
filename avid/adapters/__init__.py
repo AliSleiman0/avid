@@ -13,6 +13,7 @@ from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay
 from avid.adapters.health import HealthServer
+from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
 from avid.adapters.servo import FakeServo, Pca9685Servo
 
@@ -23,6 +24,9 @@ __all__ = [
     # Servo (AVID-52)
     "FakeServo",
     "Pca9685Servo",
+    # Microphone (AVID-53)
+    "FakeMicrophone",
+    "AlsaMicrophone",
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",

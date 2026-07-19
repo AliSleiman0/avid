@@ -105,6 +105,23 @@ class ServoConfig(_Section):
     freq_hz: int = 50
 
 
+class MicrophoneConfig(_Section):
+    """Audio capture parameters, injected into the microphone adapter (P7, AVID-53).
+
+    Describes the *one* capture stream the M2 rig opens: the ALSA ``device`` (the ReSpeaker),
+    the ``sample_rate`` and ``channels``, and the ``chunk_ms`` frame size. 16 kHz mono is the
+    rate the Realtime API and the local VAD expect (§6.3); ``chunk_ms`` matches the 20 ms
+    mic-capture budget (§... — "Mic capture → frame available | 20 ms"). Only the ``alsa``
+    adapter reads ``device``; the ``FakeMicrophone`` synthesizes. The adapter never reaches for
+    these itself — the composition root injects them.
+    """
+
+    device: str = "default"
+    sample_rate: int = 16000
+    channels: int = 1
+    chunk_ms: int = 20
+
+
 class TurnDetectionConfig(_Section):
     """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails)."""
 
@@ -233,6 +250,7 @@ class Config(_Section):
     display: DisplayConfig = DisplayConfig()
     camera: CameraConfig = CameraConfig()
     servo: ServoConfig = ServoConfig()
+    microphone: MicrophoneConfig = MicrophoneConfig()
     ai: AiConfig = AiConfig()
     gate: GateConfig = GateConfig()
     memory: MemoryConfig = MemoryConfig()
