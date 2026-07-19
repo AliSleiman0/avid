@@ -70,6 +70,13 @@ platform = "linux"
 strict = true
 files = ["avid"]
 
+# picamera2/libcamera are apt-only, unstubbed, and absent off the Pi (ADR-008, SPK-5).
+# Imported lazily only inside Picamera2Camera; this override lets mypy resolve that
+# import as Any instead of erroring, without a per-line `# type: ignore` (AVID-51).
+[[tool.mypy.overrides]]
+module = ["picamera2.*", "libcamera.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 # DoD is "≥90% non-adapter": adapters are proven by contract tests (P6), not by
 # line coverage, so they are omitted from the gate (AVID-4).

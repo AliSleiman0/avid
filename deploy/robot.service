@@ -39,6 +39,10 @@ ProtectKernelModules=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The `robot` nologin user needs the `video` group to open the CSI camera device
+# (/dev/video*, /dev/media*) and `gpio` for the servos — PrivateDevices is left off so
+# those /dev nodes are reachable, and group membership is the gate (AVID-51 camera, M2).
+SupplementaryGroups=video gpio
 # Creates /var/lib/robot (owned by the service user) for the on-device SQLite DB
 # — config/pi.toml [memory] db_path = /var/lib/robot/robot.db. Written at M2+.
 StateDirectory=robot

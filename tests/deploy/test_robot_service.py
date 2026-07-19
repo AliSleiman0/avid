@@ -89,6 +89,15 @@ def test_hardening_present() -> None:
     assert _SERVICE["StateDirectory"] == "robot"
 
 
+def test_camera_device_access_granted() -> None:
+    # The nologin `robot` user can only open the CSI camera (/dev/video*) if it is in
+    # the `video` group; PrivateDevices must stay off so the node is reachable at all.
+    # Without this the app can't reach IDLE with camera="picamera2" (AVID-51).
+    groups = _SERVICE["SupplementaryGroups"].split()
+    assert "video" in groups
+    assert "PrivateDevices" not in _SERVICE
+
+
 def test_pi_profile_writes_only_to_writable_paths() -> None:
     # ProtectSystem=strict makes the code tree read-only, so every path the app
     # writes at runtime must be absolute and outside /opt/avid — otherwise the app
