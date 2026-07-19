@@ -54,6 +54,12 @@ fps = 5                         # §2.7.1: ≤1 core
 [motion]
 axes = ["pan"]                  # ADR-009 — 1 or 2. Capability-negotiated (§3.9.3).
 
+[display]                       # panel geometry + sinks for the display adapter (AVID-13/55)
+frames_dir  = ".artifacts/frames"   # where FakeDisplay writes its eyeball-able PNGs (§3.9.2)
+device      = "/dev/fb0"        # framebuffer path — only the framebuffer adapter uses it
+width       = 480               # panel width  (§2.4) — both adapters report it as resolution
+height      = 320               # panel height (§2.4)
+
 [servo]                         # physical channel for the servo adapter (AVID-52)
 channel      = 0                # PCA9685 channel
 name         = "pan"            # axis name (reconciled with [motion] by M9)

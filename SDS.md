@@ -576,7 +576,7 @@ A queue hitting its bound publishes `system.handler_failed` with a `queue_overfl
 │              │    │                      │    │                     │
 │  EventBus    │◄───┤ ConversationService  ├───►│ RealtimeClient      │
 │  StateMgr    │◄───┤ MemoryService        ├───►│ SqliteFactRepo      │
-│  Config      │◄───┤ AffectService        │    │ PygameDisplay       │
+│  Config      │◄───┤ AffectService        │    │ FramebufferDisplay  │
 │  Lifecycle   │◄───┤ PresenceService      ├───►│ Picamera2Camera     │
 │              │◄───┤ ExpressionService    ├───►│ Pca9685Servo        │
 │              │◄───┤ BehaviorService      │    │ RespeakerMic        │
@@ -717,7 +717,7 @@ Blocking calls get a thread. Non-negotiable list:
 |---|---|---|
 | `cv2` / MediaPipe inference | CPU-bound, releases GIL | `run_in_executor`, dedicated single-thread pool, ≤5 fps |
 | Picamera2 capture | Blocking C call | Same pool as above |
-| Pygame `flip()` | Blocks on vsync | Dedicated render thread, communicates via a 1-slot mailbox |
+| Framebuffer write (`FramebufferDisplay`) | Blocking device write | `asyncio.to_thread` per `render`; XRGB8888 straight to `/dev/fbN` (AVID-55). *Face rendering still targets Pygame in `ExpressionService` (§3.6.1); only the panel push changed — the SPI ILI9486 panel is a DRM framebuffer, not an HDMI Pygame surface, so there is no `flip()` vsync to offload.* |
 | SQLite writes | Disk fsync on a slow SD card | `asyncio.to_thread`, serialized through one writer |
 | I2C to PCA9685 | Blocking syscall, sub-ms | `asyncio.to_thread`; short enough to be uncontroversial |
 | ALSA read/write | Blocking | Dedicated capture and playback threads with ring buffers |
@@ -886,7 +886,7 @@ systemd
         └── python -m robot --config /etc/robot/config.toml
               ├── main loop (asyncio)
               ├── thread: vision executor
-              ├── thread: pygame render
+              ├── thread: framebuffer write (display)
               ├── thread: audio capture
               ├── thread: audio playback
               └── thread: sqlite writer
@@ -2157,7 +2157,7 @@ P7: **configuration is injected, never read.** No module calls `os.environ`. Eve
 [adapters]                      # ← the entire sim/real switch (§3.9.2, §3.11.1)
 camera     = "picamera2"        # | "fake"
 servo      = "pca9685"          # | "fake"
-display    = "pygame_hdmi"      # | "fake" | "png_sequence"
+display    = "framebuffer"      # | "fake" | "png_sequence"  (AVID-55: raw XRGB8888 to /dev/fbN)
 microphone = "alsa"             # | "fake"
 speaker    = "alsa"             # | "fake"
 realtime   = "openai"           # | "replay"

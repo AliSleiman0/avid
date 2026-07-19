@@ -41,7 +41,7 @@ class AdaptersConfig(_Section):
 
     camera: Literal["picamera2", "fake"] = "fake"
     servo: Literal["pca9685", "fake"] = "fake"
-    display: Literal["pygame_hdmi", "fake", "png_sequence"] = "fake"
+    display: Literal["framebuffer", "fake", "png_sequence"] = "fake"
     microphone: Literal["alsa", "fake"] = "fake"
     speaker: Literal["alsa", "fake"] = "fake"
     realtime: Literal["openai", "replay"] = "replay"
@@ -52,17 +52,28 @@ class AdaptersConfig(_Section):
 
 
 class DisplayConfig(_Section):
-    """Fake-display output (SDS §3.11.3 hardening).
+    """Display output geometry and sinks, injected into the display adapter (P7, AVID-13/55).
 
     ``frames_dir`` is where the ``FakeDisplay`` writes its PNGs. It defaults to a
     repo-relative scratch dir for the laptop/sim profile, but under the Pi's
     ``ProtectSystem=strict`` unit the code tree is read-only, so ``config/pi.toml``
-    points this at the service's writable ``StateDirectory`` (``/var/lib/robot``).
-    Injected like ``[memory] db_path`` — the adapter never reaches for a path itself
-    (P7). Only consumed when ``[adapters] display = "fake"``.
+    points this at the service's writable ``StateDirectory`` (``/var/lib/robot``), like
+    ``[memory] db_path`` — the adapter never reaches for a path itself.
+
+    ``device``/``width``/``height`` describe the real panel the ``FramebufferDisplay``
+    drives (AVID-55). ``device`` is a framebuffer path, **injected and never a hardcoded
+    index**: the bring-up Elecrow 3.5″ SPI ILI9486 (``piscreen,drm`` overlay) surfaces as
+    ``/dev/fb0`` on this headless Pi, but with HDMI attached it would not, so assuming an
+    index is a bug. The panel is **32bpp XRGB8888** (bring-up verified), so the adapter
+    fixes that output format and takes ``stride = width*4``; geometry defaults to the
+    480×320 of SDS §2.4. Only the ``framebuffer`` adapter reads ``device``; the fake reads
+    ``frames_dir``. Both take ``width``/``height`` as their :attr:`resolution`.
     """
 
     frames_dir: str = ".artifacts/frames"
+    device: str = "/dev/fb0"
+    width: int = 480
+    height: int = 320
 
 
 class CameraConfig(_Section):

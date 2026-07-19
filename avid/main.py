@@ -29,6 +29,7 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FramebufferDisplay,
     HealthServer,
     Pca9685Servo,
     Picamera2Camera,
@@ -70,20 +71,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _build_display(config: Config) -> Display:
-    """Select the ``Display`` adapter named by ``[adapters] display`` (the sim/real switch).
+    """Select the ``Display`` adapter named by ``[adapters] display`` (AVID-14/55).
 
-    At M0 only the fake exists; the real HDMI/PNG adapters land with their hardware
-    issues. Any other value fails loudly rather than silently doing nothing.
+    ``fake`` is the laptop/sim default — writes eyeball-able PNGs to ``[display] frames_dir``,
+    no hardware; ``framebuffer`` pushes XRGB8888 to the Pi panel's framebuffer device (the
+    file handle lives inside that adapter, opened lazily on-Pi). Both take the same injected
+    ``[display]`` geometry as their :attr:`resolution` (P7). Any other value fails loudly
+    rather than silently doing nothing.
     """
+    resolution = (config.display.width, config.display.height)
     match config.adapters.display:
         case "fake":
             # frames_dir is injected (P7): the default repo-relative scratch dir on a
             # laptop, but a writable StateDirectory path under the Pi's read-only unit.
-            return FakeDisplay(out_dir=Path(config.display.frames_dir))
-        case other:  # pragma: no cover - guards a not-yet-built adapter
+            return FakeDisplay(
+                out_dir=Path(config.display.frames_dir), resolution=resolution
+            )
+        case "framebuffer":  # pragma: no cover - needs the Pi (M2 gate #57)
+            return FramebufferDisplay(
+                device=config.display.device,
+                width=config.display.width,
+                height=config.display.height,
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
-                f"display adapter {other!r} is not available yet — only 'fake' is "
-                f"implemented at M0 (AVID-14)"
+                f"display adapter {other!r} is not available — only 'fake' and "
+                f"'framebuffer' exist (AVID-55)"
             )
 
 
