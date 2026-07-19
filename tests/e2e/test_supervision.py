@@ -38,8 +38,33 @@ _PI_TOML = _REPO_ROOT / "config" / "pi.toml"
 # port does not clash with tests/e2e/test_boot.py's own short-lived server.
 _HEALTH_URL = "http://127.0.0.1:8787/health"
 
+# pi.toml points its writable state (FakeDisplay frames, the SQLite db) at systemd's
+# StateDirectory, which the unit creates under ProtectSystem=strict on the Pi. A CI runner
+# has no write access there, so the child would crash in FakeDisplay's mkdir before it ever
+# reached IDLE. We stand in for StateDirectory with a tmp dir (AVID-59).
+_STATE_DIR = "/var/lib/robot"
+
 _BOOT_TIMEOUT_S = 15.0
 _STOP_TIMEOUT_S = 10.0
+
+
+def _pi_config_with_writable_state(tmp_path: Path) -> Path:
+    """Return a tmp copy of ``pi.toml`` with its StateDirectory relocated under *tmp_path*.
+
+    Everything else is byte-for-byte ``pi.toml`` — crucially ``notifier = "systemd"``, the
+    supervision path this test exists to prove. Only the ``/var/lib/robot`` prefix (the
+    frames dir, the db path) is redirected to a writable dir, exactly as systemd's
+    ``StateDirectory`` provides one on the Pi (AVID-59).
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    text = _PI_TOML.read_text(encoding="utf-8")
+    assert _STATE_DIR in text, (
+        f"pi.toml no longer references {_STATE_DIR!r}; update this StateDirectory shim"
+    )
+    config = tmp_path / "pi-ci.toml"
+    config.write_text(text.replace(_STATE_DIR, state.as_posix()), encoding="utf-8")
+    return config
 
 
 def _recv_until(sock: socket.socket, expected: bytes, timeout: float) -> bool:
@@ -82,8 +107,9 @@ def test_boot_reaches_idle_notifies_serves_health_and_stops_cleanly(
 
     # Inherit the env (so PYTHONASYNCIODEBUG reaches the child on CI) plus the socket.
     env = {**os.environ, "NOTIFY_SOCKET": str(sock_path)}
+    config = _pi_config_with_writable_state(tmp_path)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "avid", "--config", str(_PI_TOML)],
+        [sys.executable, "-m", "avid", "--config", str(config)],
         cwd=_REPO_ROOT,
         env=env,
         stdout=subprocess.DEVNULL,
