@@ -70,6 +70,12 @@ sample_rate = 16000             # 16 kHz — the Realtime/VAD input rate (§6.3)
 channels    = 1                 # mono capture
 chunk_ms    = 20                # frame size — the 20 ms mic-capture budget
 
+[speaker]                       # audio playback params for the speaker adapter (AVID-54)
+device      = "default"         # ALSA device — only the alsa adapter uses it (the fake writes WAVs)
+sample_rate = 24000             # 24 kHz — the Realtime output rate (§6.2.4), NOT the mic's 16 kHz
+channels    = 1                 # mono playback
+wav_dir     = ".artifacts/speaker"  # where FakeSpeaker writes its eyeball-able WAVs (§3.9.2)
+
 [api]
 bind = "127.0.0.1"              # asserted loopback at load. §9.5.
 port = 8787

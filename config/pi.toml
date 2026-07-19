@@ -87,6 +87,17 @@ sample_rate = 16000             # 16 kHz — the Realtime/VAD input rate (§6.3)
 channels    = 1                 # mono capture
 chunk_ms    = 20                # frame size — the 20 ms mic-capture budget
 
+[speaker]                       # audio playback params for the speaker adapter (AVID-54)
+# The real alsa adapter lands with this milestone; speaker stays "fake" above until the on-Pi
+# contract run flips it (AVID-57), exactly as camera/servo/mic did. device is the MAX98357 I2S
+# DAC's ALSA name (e.g. "plughw:CARD=MAX98357A") — set it when flipping to alsa on the Pi.
+device      = "default"         # ALSA device — only the alsa adapter uses it
+sample_rate = 24000             # 24 kHz — the Realtime output rate (§6.2.4), NOT the mic's 16 kHz
+channels    = 1                 # mono playback
+# The code tree is read-only under the unit's ProtectSystem=strict, so the fake speaker's WAVs
+# go to the service's writable StateDirectory (/var/lib/robot), like [display] frames_dir.
+wav_dir     = "/var/lib/robot/speaker"
+
 [api]
 bind = "127.0.0.1"              # asserted loopback at load. §9.5.
 port = 8787
