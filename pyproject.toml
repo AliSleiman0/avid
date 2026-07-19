@@ -38,6 +38,13 @@ dev = [
 [tool.pytest.ini_options]
 # `async def test_*` run without a per-test decorator (AVID-9's bus tests).
 asyncio_mode = "auto"
+# AVID-50: the `hardware` mark tags the real-adapter half of a port contract. It runs
+# only on the Pi (SDS §14.4) and is skipped off-hardware via tests/contract/_hardware.py's
+# on_pi(). Registered here so `-m "not hardware"` / `-m hardware` are first-class and the
+# mark raises no unknown-marker warning.
+markers = [
+    "hardware: the real-adapter half of a port contract; runs only on the Pi (SDS §14.4), skipped off-hardware via on_pi().",
+]
 
 [tool.ruff]
 # ADR-008: the Pi runs 3.11, so lint against 3.11 semantics (flags 3.12+ idioms).

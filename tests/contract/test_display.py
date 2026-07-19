@@ -21,6 +21,8 @@ from avid.adapters.display import FakeDisplay
 from avid.core.hal import DisplayFrame
 from avid.core.ports import Display
 
+from ._hardware import FAKE_REAL_PARAMS, skip_off_pi
+
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -46,11 +48,18 @@ def ihdr_dimensions(png: bytes) -> tuple[int, int]:
 # --- shared contract: every Display adapter must satisfy it -----------------
 
 
-@pytest.fixture(params=["FakeDisplay"])
+@pytest.fixture(params=FAKE_REAL_PARAMS)
 def display(request: pytest.FixtureRequest, tmp_path: Path) -> Display:
-    if request.param == "FakeDisplay":
+    """Every Display adapter, real and fake, must satisfy the tests below (P6, SDS §14.4).
+
+    The ``"real"`` case skips off the Pi via :func:`skip_off_pi`; on the Pi it will
+    construct the real adapter. That adapter (``PygameDisplay``) lands in AVID-55, which
+    replaces the placeholder skip with its constructor — this is the seam AVID-50 lays.
+    """
+    if request.param == "fake":
         return FakeDisplay(out_dir=tmp_path)
-    raise AssertionError(f"unknown display adapter {request.param!r}")
+    skip_off_pi()
+    pytest.skip("real Display adapter (PygameDisplay) lands in AVID-55")
 
 
 def test_adapter_satisfies_the_display_port(display: Display) -> None:

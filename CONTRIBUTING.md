@@ -107,6 +107,7 @@ done.
 | Config purity | grep for `os.environ` outside `core/config.py` (P7) |
 | Unit tests | `pytest` on **3.11** and **3.13** |
 | Contract tests | `pytest -m contract` |
+| HAL real/fake matrix | one suite per port; fakes run everywhere, real adapters run on the Pi only (`on_pi()`, SDS §14.4). Force real locally: `AVID_HARDWARE=1 pytest -m hardware`; skip it: `pytest -m "not hardware"` (AVID-50) |
 | Async debug | `PYTHONASYNCIODEBUG=1 pytest` (slow-callback > 50 ms fails, P8) |
 | Coverage | `pytest --cov`, **≥ 90% non-adapter** |
 | Event-catalog drift | generated subscriber graph vs. SDS §9.1 |
