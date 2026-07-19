@@ -21,8 +21,9 @@ venv/
 coverage.xml
 htmlcov/
 
-# Runtime artifacts (FakeDisplay frames, etc.)
+# Runtime artifacts (FakeDisplay frames, hal_pi.py bench evidence, etc.)
 .artifacts/
+docs/demos/hal_pi_out/
 
 # Databases (on-device memory — never committed)
 *.db

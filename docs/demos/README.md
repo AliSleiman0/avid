@@ -42,3 +42,33 @@ every push. **Recording:** waived (solo maintainer's call). Reproduce it live in
    ```
 
 Tagged `v0.M0.0`.
+
+## M2 — HAL real
+
+**Gate (PMP §5.2):** every port's real adapter passes the **identical** contract suite as its
+fake, on the physical Pi, none skipped; camera, servo, mic, speaker, and display each
+demonstrated on the bench.
+
+**Permanent proof:** the port contract suites (`tests/contract/`) run their `real` params on
+the Pi — the same assertions the fakes pass. That is the abstraction proving itself, and it
+re-runs on every on-Pi check, not a one-off. **Recording:** waived (solo maintainer); a
+photo/log/clip of the bench demo is the human evidence.
+
+Reproduce it on the Pi (full runbook, incl. wiring + ALSA routing, in `deploy/README.md` →
+"Prove the HAL on the Pi"):
+
+1. **Every real adapter passes its contract, none skipped:**
+   ```
+   cd /opt/avid
+   AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 /opt/avid/.venv/bin/python -m pytest tests/contract/ -q
+   ```
+2. **Each device does something observable** — the bench exerciser (no driving service exists
+   until M4+, so this stands in):
+   ```
+   /opt/avid/.venv/bin/python docs/demos/hal_pi.py --device all
+   ```
+   Servo sweeps 0→90→0 then relaxes silent; the panel cycles R/G/B/W; a tone plays and is cut
+   mid-note by `stop()` (barge-in). Artifacts (`camera_frame.ppm`, `mic_capture.wav`) land in
+   `docs/demos/hal_pi_out/` — open/play them.
+
+Tagged `v0.M2.0`.
