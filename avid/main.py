@@ -21,16 +21,18 @@ from avid import __version__
 # The one place Fake*/System* adapters are constructed (P3). CI greps for these
 # outside main.py and test fixtures.
 from avid.adapters import (
+    FakeCamera,
     FakeDisplay,
     FakeServiceNotifier,
     HealthServer,
+    Picamera2Camera,
     SystemClock,
     SystemdNotifier,
 )
 from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.ports import Display, ServiceNotifier
+from avid.core.ports import Camera, Display, ServiceNotifier
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,6 +73,34 @@ def _build_display(config: Config) -> Display:
             )
 
 
+def _build_camera(config: Config) -> Camera:
+    """Select the ``Camera`` adapter named by ``[adapters] camera`` (AVID-51).
+
+    ``fake`` is the laptop/sim default — synthetic frames, no hardware; ``picamera2`` is
+    the real Pi sensor (the ``picamera2`` import lives inside that adapter, apt/optional,
+    ADR-008). Capture geometry is injected from ``[camera]`` (P7). Any other value fails
+    loudly rather than silently doing nothing.
+    """
+    match config.adapters.camera:
+        case "fake":
+            return FakeCamera(
+                width=config.camera.width,
+                height=config.camera.height,
+                fps=config.camera.fps,
+            )
+        case "picamera2":  # pragma: no cover - needs the Pi (M2 gate #57)
+            return Picamera2Camera(
+                width=config.camera.width,
+                height=config.camera.height,
+                fps=config.camera.fps,
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"camera adapter {other!r} is not available — only 'fake' and "
+                f"'picamera2' exist (AVID-51)"
+            )
+
+
 def _build_notifier(config: Config) -> ServiceNotifier:
     """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
 
@@ -94,13 +124,22 @@ async def _run(config: Config) -> int:
     """
     clock = SystemClock()
     display = _build_display(config)
+    camera = _build_camera(config)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
-    adapter_health = {"clock": True, "display": True, "notifier": True, "health": True}
-    # ``display`` is constructed to realize the switch and appear in the health map;
-    # rendering to it is ExpressionService's job in a later issue.
+    adapter_health = {
+        "clock": True,
+        "display": True,
+        "camera": True,
+        "notifier": True,
+        "health": True,
+    }
+    # ``display`` and ``camera`` are constructed to realize the switch and appear in the
+    # health map; rendering to the display is ExpressionService's job and driving the
+    # camera is the vision service's (M8) — both later issues.
     _ = display
+    _ = camera
     return await lifecycle.run(
         bus=bus,
         clock=clock,

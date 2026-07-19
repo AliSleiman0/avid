@@ -65,6 +65,21 @@ class DisplayConfig(_Section):
     frames_dir: str = ".artifacts/frames"
 
 
+class CameraConfig(_Section):
+    """Camera capture geometry, injected into the camera adapter (P7, AVID-51).
+
+    ``width``/``height``/``fps`` become the adapter's :class:`~avid.core.hal.CameraCaps`:
+    the ``FakeCamera`` sizes its synthetic frames to them, and ``Picamera2Camera``
+    configures the real sensor's main stream to match. Defaults are the 640×480 the Pi
+    Camera v1 (ov5647) captured in SPK-5 (#43); ``fps`` matches ``[vision] fps``. The
+    adapter never reaches for these itself — the composition root injects them.
+    """
+
+    width: int = 640
+    height: int = 480
+    fps: int = 5
+
+
 class TurnDetectionConfig(_Section):
     """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails)."""
 
@@ -191,6 +206,7 @@ class Config(_Section):
 
     adapters: AdaptersConfig = AdaptersConfig()
     display: DisplayConfig = DisplayConfig()
+    camera: CameraConfig = CameraConfig()
     ai: AiConfig = AiConfig()
     gate: GateConfig = GateConfig()
     memory: MemoryConfig = MemoryConfig()
