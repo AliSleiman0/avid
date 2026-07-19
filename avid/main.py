@@ -24,7 +24,9 @@ from avid.adapters import (
     FakeCamera,
     FakeDisplay,
     FakeServiceNotifier,
+    FakeServo,
     HealthServer,
+    Pca9685Servo,
     Picamera2Camera,
     SystemClock,
     SystemdNotifier,
@@ -32,7 +34,8 @@ from avid.adapters import (
 from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.ports import Camera, Display, ServiceNotifier
+from avid.core.hal import Axis
+from avid.core.ports import Camera, Display, ServiceNotifier, Servo
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,6 +104,41 @@ def _build_camera(config: Config) -> Camera:
             )
 
 
+def _build_servo(config: Config) -> Servo:
+    """Select the ``Servo`` adapter named by ``[adapters] servo`` (AVID-52).
+
+    ``fake`` is the laptop/sim default — a recorded movement trace, no hardware; ``pca9685``
+    is the real PCA9685 over I2C (the servo-lib import lives inside that adapter, apt/pip on
+    the Pi only, ADR-008). Both are handed the same single ``Axis`` built from ``[servo]``
+    (P7), so clamp/cancel/relax behave identically. Any other value fails loudly rather than
+    silently doing nothing.
+    """
+    axes = (
+        Axis(
+            name=config.servo.name,
+            channel=config.servo.channel,
+            min_deg=config.servo.min_deg,
+            max_deg=config.servo.max_deg,
+        ),
+    )
+    match config.adapters.servo:
+        case "fake":
+            return FakeServo(axes=axes)
+        case "pca9685":  # pragma: no cover - needs the Pi (M2 gate #57)
+            return Pca9685Servo(
+                axes=axes,
+                i2c_address=config.servo.i2c_address,
+                min_pulse_us=config.servo.min_pulse_us,
+                max_pulse_us=config.servo.max_pulse_us,
+                freq_hz=config.servo.freq_hz,
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"servo adapter {other!r} is not available — only 'fake' and "
+                f"'pca9685' exist (AVID-52)"
+            )
+
+
 def _build_notifier(config: Config) -> ServiceNotifier:
     """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
 
@@ -125,6 +163,7 @@ async def _run(config: Config) -> int:
     clock = SystemClock()
     display = _build_display(config)
     camera = _build_camera(config)
+    servo = _build_servo(config)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
@@ -132,14 +171,17 @@ async def _run(config: Config) -> int:
         "clock": True,
         "display": True,
         "camera": True,
+        "servo": True,
         "notifier": True,
         "health": True,
     }
-    # ``display`` and ``camera`` are constructed to realize the switch and appear in the
-    # health map; rendering to the display is ExpressionService's job and driving the
-    # camera is the vision service's (M8) — both later issues.
+    # ``display``, ``camera`` and ``servo`` are constructed to realize the switch and appear
+    # in the health map; rendering to the display is ExpressionService's job, driving the
+    # camera is the vision service's (M8), and moving the servo is MotionService's (M9) —
+    # all later issues.
     _ = display
     _ = camera
+    _ = servo
     return await lifecycle.run(
         bus=bus,
         clock=clock,

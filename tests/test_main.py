@@ -15,10 +15,17 @@ from avid.adapters import (
     FakeCamera,
     FakeDisplay,
     FakeServiceNotifier,
+    FakeServo,
     SystemdNotifier,
 )
 from avid.core.config import load_config
-from avid.main import _build_camera, _build_display, _build_notifier, main
+from avid.main import (
+    _build_camera,
+    _build_display,
+    _build_notifier,
+    _build_servo,
+    main,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SIM_TOML = _REPO_ROOT / "config" / "sim.toml"
@@ -35,6 +42,13 @@ def test_build_camera_selects_fake() -> None:
     # is proven by the on-hardware contract run (AVID-51).
     config = load_config(_SIM_TOML)
     assert isinstance(_build_camera(config), FakeCamera)
+
+
+def test_build_servo_selects_fake() -> None:
+    # sim.toml (and pi.toml) set servo = "fake"; the pca9685 branch needs the Pi and is
+    # proven by the on-hardware contract run (AVID-52 / #57).
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_servo(config), FakeServo)
 
 
 def test_build_notifier_selects_fake_for_sim() -> None:
@@ -69,6 +83,7 @@ def test_main_wires_and_delegates_to_lifecycle(
         "clock": True,
         "display": True,
         "camera": True,
+        "servo": True,
         "notifier": True,
         "health": True,
     }
