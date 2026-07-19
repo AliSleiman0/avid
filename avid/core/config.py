@@ -122,6 +122,23 @@ class MicrophoneConfig(_Section):
     chunk_ms: int = 20
 
 
+class SpeakerConfig(_Section):
+    """Audio playback parameters, injected into the speaker adapter (P7, AVID-54).
+
+    Describes the *one* playback stream the M2 rig opens: the ALSA ``device`` (the MAX98357 I2S
+    DAC), and the ``sample_rate``/``channels`` at which ``play`` streams. 24 kHz mono is the rate
+    the Realtime API *emits* (SDS §6.2.4, "PCM16 24 kHz mono 16-bit") — distinct from the mic's
+    16 kHz *capture* rate. ``wav_dir`` is where the ``FakeSpeaker`` writes its eyeball-able WAVs
+    (SDS §3.9.2), parallel to ``[display] frames_dir``; only the ``alsa`` adapter reads
+    ``device``. The adapter never reaches for these itself — the composition root injects them.
+    """
+
+    device: str = "default"
+    sample_rate: int = 24000
+    channels: int = 1
+    wav_dir: str = ".artifacts/speaker"
+
+
 class TurnDetectionConfig(_Section):
     """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails)."""
 
@@ -251,6 +268,7 @@ class Config(_Section):
     camera: CameraConfig = CameraConfig()
     servo: ServoConfig = ServoConfig()
     microphone: MicrophoneConfig = MicrophoneConfig()
+    speaker: SpeakerConfig = SpeakerConfig()
     ai: AiConfig = AiConfig()
     gate: GateConfig = GateConfig()
     memory: MemoryConfig = MemoryConfig()

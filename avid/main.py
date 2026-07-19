@@ -22,11 +22,13 @@ from avid import __version__
 # outside main.py and test fixtures.
 from avid.adapters import (
     AlsaMicrophone,
+    AlsaSpeaker,
     FakeCamera,
     FakeDisplay,
     FakeMicrophone,
     FakeServiceNotifier,
     FakeServo,
+    FakeSpeaker,
     HealthServer,
     Pca9685Servo,
     Picamera2Camera,
@@ -37,7 +39,14 @@ from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
-from avid.core.ports import Camera, Display, Microphone, ServiceNotifier, Servo
+from avid.core.ports import (
+    Camera,
+    Display,
+    Microphone,
+    ServiceNotifier,
+    Servo,
+    Speaker,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -170,6 +179,33 @@ def _build_microphone(config: Config) -> Microphone:
             )
 
 
+def _build_speaker(config: Config) -> Speaker:
+    """Select the ``Speaker`` adapter named by ``[adapters] speaker`` (AVID-54).
+
+    ``fake`` is the laptop/sim default — records what it plays and writes eyeball-able WAVs to
+    ``[speaker] wav_dir``, no hardware; ``alsa`` plays to the MAX98357 I2S DAC via ALSA (the
+    ``alsaaudio`` import lives inside that adapter, pip-on-Pi only, ADR-008). Both are handed the
+    same playback params from ``[speaker]`` (P7), so the play/stop contract behaves identically.
+    Any other value fails loudly rather than silently doing nothing.
+    """
+    match config.adapters.speaker:
+        case "fake":
+            # wav_dir is injected (P7): the repo-relative scratch dir on a laptop, but the Pi's
+            # writable StateDirectory under its read-only unit (like [display] frames_dir).
+            return FakeSpeaker(out_dir=Path(config.speaker.wav_dir))
+        case "alsa":  # pragma: no cover - needs the Pi (M2 gate #57)
+            return AlsaSpeaker(
+                device=config.speaker.device,
+                sample_rate=config.speaker.sample_rate,
+                channels=config.speaker.channels,
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"speaker adapter {other!r} is not available — only 'fake' and "
+                f"'alsa' exist (AVID-54)"
+            )
+
+
 def _build_notifier(config: Config) -> ServiceNotifier:
     """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
 
@@ -196,6 +232,7 @@ async def _run(config: Config) -> int:
     camera = _build_camera(config)
     servo = _build_servo(config)
     microphone = _build_microphone(config)
+    speaker = _build_speaker(config)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
@@ -205,17 +242,20 @@ async def _run(config: Config) -> int:
         "camera": True,
         "servo": True,
         "microphone": True,
+        "speaker": True,
         "notifier": True,
         "health": True,
     }
-    # ``display``, ``camera``, ``servo`` and ``microphone`` are constructed to realize the
-    # switch and appear in the health map; rendering to the display is ExpressionService's job,
-    # driving the camera is the vision service's (M8), moving the servo is MotionService's (M9),
-    # and consuming the mic stream is AudioService/VAD's (M4) — all later issues.
+    # ``display``, ``camera``, ``servo``, ``microphone`` and ``speaker`` are constructed to
+    # realize the switch and appear in the health map; rendering to the display is
+    # ExpressionService's job, driving the camera is the vision service's (M8), moving the servo
+    # is MotionService's (M9), and consuming the mic / driving the speaker is AudioService's
+    # (M4) — all later issues.
     _ = display
     _ = camera
     _ = servo
     _ = microphone
+    _ = speaker
     return await lifecycle.run(
         bus=bus,
         clock=clock,

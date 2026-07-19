@@ -16,6 +16,7 @@ from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
 from avid.adapters.servo import FakeServo, Pca9685Servo
+from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
 
 __all__ = [
     # Camera (AVID-51)
@@ -27,6 +28,9 @@ __all__ = [
     # Microphone (AVID-53)
     "FakeMicrophone",
     "AlsaMicrophone",
+    # Speaker (AVID-54)
+    "FakeSpeaker",
+    "AlsaSpeaker",
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",
