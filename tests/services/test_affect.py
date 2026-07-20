@@ -81,7 +81,7 @@ class Rig(NamedTuple):
 @pytest.fixture
 async def rig() -> AsyncIterator[Rig]:
     """A started bus with the service's *declared* subscriptions registered by the caller —
-    the same two steps ``main.py`` will take in #73."""
+    the same two steps ``main._wire_services`` takes (AVID-73)."""
     clock = FakeClock()
     bus = AsyncioEventBus()
     service = AffectService(bus=bus, clock=clock)
@@ -101,7 +101,8 @@ async def rig() -> AsyncIterator[Rig]:
 
 def _register(bus: AsyncioEventBus, service: AffectService) -> None:
     """Register what the service *declared*. This is the composition root's job (SDS §9.2);
-    the test does it here because #73 has not written it yet."""
+    kept here so this suite stays independent of ``main._wire_services``, which does the
+    same thing for the real binary (AVID-73) and is tested in ``tests/test_main.py``."""
     for sub in service.subscriptions():
         bus.subscribe(
             sub.event_type,

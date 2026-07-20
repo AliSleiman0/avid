@@ -13,7 +13,7 @@ assignments and let C do the copying. A per-pixel Python loop over a 480×320 RG
 (460,800 bytes) costs ~100 ms — it would blow both the O4 150 ms budget and P8's 50 ms
 slow-callback gate. Span fills cost well under a millisecond.
 
-It lives in ``core`` rather than ``services`` deliberately: AVID-73 activates the P5
+It lives in ``core`` rather than ``services`` deliberately: AVID-73 activated the P5
 ``service-independence`` contract, and a shared drawing module sitting among the services
 would entangle it for no benefit. Here it sits beside :class:`~avid.core.hal.DisplayFrame`,
 which is what it returns, and ``core -> domain`` is the direction the layers contract wants.

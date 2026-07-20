@@ -128,7 +128,7 @@ class _Collector:
 
 
 class Rig(NamedTuple):
-    """Everything a test needs, wired the way the composition root will wire it in #73."""
+    """Everything a test needs, wired the way ``main._wire_services`` wires it (AVID-73)."""
 
     service: ExpressionService
     bus: AsyncioEventBus
@@ -139,7 +139,8 @@ class Rig(NamedTuple):
 
 def _register(bus: AsyncioEventBus, service: ExpressionService) -> None:
     """Register what the service *declared*. This is the composition root's job (SDS §9.2);
-    the test does it here because #73 has not written it yet."""
+    kept here so this suite stays independent of ``main._wire_services``, which does the
+    same thing for the real binary (AVID-73) and is tested in ``tests/test_main.py``."""
     for sub in service.subscriptions():
         bus.subscribe(
             sub.event_type,

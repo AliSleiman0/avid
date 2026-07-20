@@ -42,6 +42,7 @@ from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
 from avid.core.ports import (
     Camera,
+    Clock,
     Display,
     Microphone,
     ServiceNotifier,
@@ -49,6 +50,7 @@ from avid.core.ports import (
     Speaker,
 )
 from avid.core.state_manager import StateManager
+from avid.services import AffectService, ExpressionService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -234,6 +236,45 @@ def _build_notifier(config: Config) -> ServiceNotifier:
             return SystemdNotifier(address=config.notify_socket)
 
 
+def _wire_services(*, bus: AsyncioEventBus, clock: Clock, display: Display) -> None:
+    """Construct the services and register what they *declared* (SDS §9.2).
+
+    The inversion is the point: a service says what it wants to hear via
+    ``subscriptions()``; the composition root decides whether to grant it. That is what
+    keeps the subscriber graph static and knowable for §9.1.5's drift check, and it is why
+    this loop lives here rather than inside each service.
+
+    **Ordering is load-bearing — call this before** :func:`lifecycle.run`. That function
+    opens ``async with bus:``, which calls ``bus.start()``, and
+    :meth:`AsyncioEventBus.subscribe` raises ``RuntimeError`` once started: subscription is
+    static-at-composition by design (P3, SDS §3.5.2). Register, then run. Moving this call
+    below the handoff turns a boot into a crash.
+
+    Both services are typed on the **ports** (``EventBus``/``Clock``/``Display``), never on
+    a concrete adapter (P2) — which is what lets the identical wiring drive ``FakeDisplay``
+    on a laptop and ``FramebufferDisplay`` on the Pi from one config literal.
+
+    Returns ``None``, and drops both local references on purpose. Every ``Subscription``
+    holds a **bound method**, which holds its instance alive for the life of the bus — so
+    there is nothing here to keep. Neither service is started or stopped: both are purely
+    reactive with no owned task (SDS §9.2's ``start``/``stop`` are no-ops on both). The
+    lifecycle-managed-service question is deferred to M4's ``AudioService``, which will own
+    a real stream loop and is the right occasion to add both a ``Service`` Protocol and a
+    ``services=`` parameter to ``lifecycle.run`` — deliberately, not by omission.
+    """
+    affect = AffectService(bus=bus, clock=clock)
+    expression = ExpressionService(bus=bus, display=display, clock=clock)
+    for service in (affect, expression):
+        for sub in service.subscriptions():
+            bus.subscribe(
+                sub.event_type,
+                sub.handler,
+                name=sub.name,
+                policy=sub.policy,
+                maxsize=sub.maxsize,
+            )
+
+
 async def _run(config: Config) -> int:
     """Build the adapters and bus, then hand off to the lifecycle.
 
@@ -263,12 +304,15 @@ async def _run(config: Config) -> int:
         "notifier": True,
         "health": True,
     }
-    # ``display``, ``camera``, ``servo``, ``microphone`` and ``speaker`` are constructed to
-    # realize the switch and appear in the health map; rendering to the display is
-    # ExpressionService's job, driving the camera is the vision service's (M8), moving the servo
-    # is MotionService's (M9), and consuming the mic / driving the speaker is AudioService's
-    # (M4) — all later issues.
-    _ = display
+    # The services, and their subscriptions, BEFORE the lifecycle starts the bus — see
+    # ``_wire_services`` for why that order is not negotiable. This is the line that makes
+    # the display a face rather than a health-map entry.
+    _wire_services(bus=bus, clock=clock, display=display)
+    # ``camera``, ``servo``, ``microphone`` and ``speaker`` are still constructed only to
+    # realize the switch and appear in the health map: driving the camera is the vision
+    # service's job (M8), moving the servo is MotionService's (M9), and consuming the mic /
+    # driving the speaker is AudioService's (M4) — all later issues. ``display`` has left
+    # this list as of AVID-73; ExpressionService owns it now.
     _ = camera
     _ = servo
     _ = microphone

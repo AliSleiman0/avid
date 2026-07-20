@@ -58,8 +58,12 @@ class ExpressionService:
     """Renders the current affect to the display, and says nothing about it.
 
     Shaped to SDS §9.2 (``name`` / ``start`` / ``stop`` / ``subscriptions``) — the same shape
-    ``AffectService`` takes, so #73 can declare a ``Service`` Protocol that both satisfy
-    structurally with no edit to either.
+    ``AffectService`` takes. No ``Service`` Protocol names that shape yet: AVID-73 wired both
+    into the composition root and deliberately did **not** add one, because neither service
+    owns a background task, so neither needs ``start``/``stop`` called at all. M4's
+    ``AudioService`` will own a real stream loop, and that is the occasion to declare the
+    Protocol and give ``lifecycle.run`` a ``services=`` parameter. Structural typing means
+    both of these will satisfy it with no edit here.
 
     Depends on the :class:`~avid.core.ports.EventBus`, :class:`~avid.core.ports.Display` and
     :class:`~avid.core.ports.Clock` **Protocols**, never a concrete adapter (P2) — which is
@@ -122,8 +126,8 @@ class ExpressionService:
         the wrong face is worse than one rendering the same face twice.
 
         Note both services subscribe to ``state.transitioned`` independently and neither knows
-        the other exists. That is P5 working as intended, and #73 turns on the contract that
-        proves it.
+        the other exists. That is P5 working as intended, and the ``service-independence``
+        contract (activated in AVID-73) is what proves it mechanically.
 
         DROP_OLDEST because the latest affect is the only one worth rendering (SDS §9.1.3): a
         backlog of stale faces is worse than no backlog.
