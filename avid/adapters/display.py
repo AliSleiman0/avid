@@ -108,6 +108,11 @@ class FakeDisplay:
         self._resolution = resolution
         # Written paths, in render order — the assertable record of what the face did.
         self.frames: list[Path] = []
+        # The frame *objects*, same order. Kept alongside the paths because identity is a
+        # different question from appearance: a caller that caches its frames wants to assert
+        # *which* cached frame was pushed, and comparing decoded pixels would both be slower
+        # and drift into the visual assertions SDS §14.8 rules out (AVID-72).
+        self.rendered: list[DisplayFrame] = []
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -132,6 +137,7 @@ class FakeDisplay:
         png = _encode_png(frame)
         await asyncio.to_thread(path.write_bytes, png)
         self.frames.append(path)
+        self.rendered.append(frame)
 
 
 def _to_xrgb8888(frame: DisplayFrame) -> bytes:
