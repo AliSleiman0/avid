@@ -21,8 +21,12 @@ the machine evaluates the guard before attempting it.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum, auto
 from types import MappingProxyType
+from typing import ClassVar
+
+from avid.domain.events import Event
 
 
 class RobotState(Enum):
@@ -128,3 +132,33 @@ def next_state(current: RobotState, trigger: Trigger) -> RobotState:
         return TRANSITION_TABLE[(current, trigger)]
     except KeyError:
         raise IllegalTransition(current, trigger) from None
+
+
+# ``StateTransitioned`` lives HERE, not in ``events.py``, and moving it would break the
+# build — please read this before "tidying" it (AVID-69).
+#
+# The event has to name ``RobotState`` and ``Trigger`` to type its payload. If it lived in
+# ``events.py``, that module would import this one, creating the chain
+# ``affect.py -> events.py -> state.py``. The ``affect-state-orthogonality`` contract in
+# ``.importlinter`` is an *independence* contract, and those catch **indirect** chains, not
+# just direct imports — so that chain fails CI even though ``affect.py`` never names
+# ``state``. Defining the event beside the types it carries keeps ``state.py -> events.py``
+# a one-way edge, exactly as ``AffectChanged`` sits in ``affect.py`` for the same reason.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StateTransitioned(Event):
+    """The operational state machine moved (SDS §9.1.3). Published by ``StateManager``.
+
+    A **fact**, past tense (P4): the transition has already happened and ``to`` is already
+    the current state by the time this is on the bus. Subscribers react; nobody vetoes.
+
+    Carries ``trigger`` as the :class:`Trigger` enum rather than its name, so a subscriber
+    can ``match`` on it exhaustively under ``mypy --strict`` instead of re-parsing a string
+    (the §9.1.3 catalog row was corrected to match — AVID-69). Queue policy is DROP_OLDEST:
+    only the latest state is worth acting on.
+    """
+
+    name: ClassVar[str] = "state.transitioned"
+
+    from_: RobotState  # trailing underscore: ``from`` is a keyword (SDS §9.1.3)
+    to: RobotState  # already current when this publishes
+    trigger: Trigger  # what drove it — the §3.10.3 "Event" column

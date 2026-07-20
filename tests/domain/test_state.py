@@ -8,7 +8,9 @@ are illegal state transitions.
 
 from __future__ import annotations
 
+import dataclasses
 from itertools import product
+from uuid import uuid4
 
 import pytest
 
@@ -17,9 +19,27 @@ from avid.domain import (
     TRANSITION_TABLE,
     IllegalTransition,
     RobotState,
+    StateTransitioned,
     Trigger,
     next_state,
+    validate_event_name,
 )
+
+
+def make_state_transitioned(**overrides: object) -> StateTransitioned:
+    fields: dict[str, object] = {
+        "event_id": uuid4(),
+        "correlation_id": uuid4(),
+        "timestamp_ms": 1,
+        "monotonic_ns": 2,
+        "source": "StateManager",
+        "from_": RobotState.BOOTING,
+        "to": RobotState.IDLE,
+        "trigger": Trigger.SYSTEM_STARTED,
+    }
+    fields.update(overrides)
+    return StateTransitioned(**fields)  # type: ignore[arg-type]
+
 
 # Derived from the table itself so there is exactly one source of truth: every documented
 # transition becomes a parametrised case, and nothing can be tested that isn't in the table.
@@ -112,3 +132,58 @@ def test_robotstate_has_exactly_the_seven_documented_members() -> None:
         "SLEEPING",
         "DEGRADED",
     }
+
+
+# --- the state.transitioned event (AVID-69) ---------------------------------
+
+
+def test_state_transitioned_carries_from_to_and_trigger() -> None:
+    e = make_state_transitioned(
+        from_=RobotState.SPEAKING,
+        to=RobotState.LISTENING,
+        trigger=Trigger.AUDIO_SPEECH_STARTED,
+    )
+    assert e.name == "state.transitioned"
+    assert e.from_ is RobotState.SPEAKING
+    assert e.to is RobotState.LISTENING
+    assert e.trigger is Trigger.AUDIO_SPEECH_STARTED
+
+
+def test_state_transitioned_is_frozen_slotted_kw_only() -> None:
+    e = make_state_transitioned()
+    assert not hasattr(e, "__dict__")  # slotted
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        e.to = RobotState.DEGRADED  # type: ignore[misc]
+    with pytest.raises(TypeError):  # kw-only: positional construction rejected
+        StateTransitioned(  # type: ignore[call-arg]
+            uuid4(),
+            uuid4(),
+            1,
+            2,
+            "s",
+            RobotState.BOOTING,
+            RobotState.IDLE,
+            Trigger.SYSTEM_STARTED,
+        )
+
+
+def test_state_transitioned_name_validates() -> None:
+    """Its declared name passes the P4 validator (already run at class creation)."""
+    validate_event_name(StateTransitioned.name)
+
+
+def test_state_transitioned_carries_the_trigger_enum_not_its_name() -> None:
+    """The §9.1.3 payload was corrected from ``trigger: str`` to ``trigger: Trigger``
+    (AVID-69) so subscribers can ``match`` exhaustively instead of re-parsing a string.
+    The dotted catalog name is still one attribute away for logs."""
+    e = make_state_transitioned(trigger=Trigger.CONVERSATION_SESSION_LOST)
+    assert isinstance(e.trigger, Trigger)
+    assert e.trigger.value == "conversation.session_lost"
+
+
+def test_state_transitioned_pairs_are_legal_by_construction() -> None:
+    """Every documented row can be expressed as an event — the catalog payload and the
+    §3.10.3 table agree on their vocabulary."""
+    for frm, trigger, to in TRANSITION_CASES:
+        e = make_state_transitioned(from_=frm, to=to, trigger=trigger)
+        assert next_state(e.from_, e.trigger) == e.to

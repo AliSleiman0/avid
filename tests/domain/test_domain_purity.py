@@ -10,6 +10,8 @@ import ast
 import sys
 from pathlib import Path
 
+import grimp
+
 DOMAIN_DIR = Path(__file__).resolve().parents[2] / "avid" / "domain"
 ALLOWED_THIRD_PARTY = {"pydantic"}
 
@@ -48,3 +50,25 @@ def test_domain_layer_imports_are_pure() -> None:
                     f"{path.name}: forbidden import {module!r} "
                     f"— domain allows only the stdlib and pydantic (P1)"
                 )
+
+
+def test_affect_has_no_import_chain_to_state() -> None:
+    """``affect.py`` must not reach ``state.py`` **even indirectly** (AVID-69, SDS §3.10.1).
+
+    ``test_affect.py`` checks affect's own import statements; this checks the whole
+    *chain*, which is what the ``affect-state-orthogonality`` import-linter contract
+    actually enforces (independence contracts catch transitive paths). It is the test that
+    makes ``state.py``'s placement comment for ``StateTransitioned`` load-bearing: move that
+    class into ``events.py`` and the chain ``affect -> events -> state`` appears here, in a
+    failure that names the rule, rather than only in a CI lint someone might not run.
+    """
+    graph = grimp.build_graph("avid")
+    assert not graph.chain_exists(
+        importer="avid.domain.affect",
+        imported="avid.domain.state",
+        as_packages=False,
+    ), (
+        "avid.domain.affect can now reach avid.domain.state — most likely because an "
+        "event naming RobotState/Trigger was moved into events.py, which affect.py "
+        "imports. Keep StateTransitioned in state.py (SDS §3.10.1, AVID-69)."
+    )

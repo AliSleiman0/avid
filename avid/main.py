@@ -48,6 +48,7 @@ from avid.core.ports import (
     Servo,
     Speaker,
 )
+from avid.core.state_manager import StateManager
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -249,6 +250,9 @@ async def _run(config: Config) -> int:
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
+    # The one state machine (SDS §3.8.4). Built here so every future service shares this
+    # instance rather than growing a private copy — the lifecycle drives it to IDLE.
+    state = StateManager(bus=bus, clock=clock)
     adapter_health = {
         "clock": True,
         "display": True,
@@ -272,6 +276,7 @@ async def _run(config: Config) -> int:
     return await lifecycle.run(
         bus=bus,
         clock=clock,
+        state=state,
         adapter_health=adapter_health,
         notifier=notifier,
         health=health,

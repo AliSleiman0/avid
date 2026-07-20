@@ -2,10 +2,10 @@
 
 The composition root (``avid/main.py``) builds the adapters and the bus, then hands
 them here. This module owns the run loop: it starts the bus, publishes
-``system.started`` (which drives ``BOOTING -> IDLE``), waits for a shutdown signal,
-publishes ``system.shutting_down``, and returns an exit code. It never constructs an
-adapter (P3) and never imports ``avid.adapters`` (P1/P5) — it depends only on the bus,
-the ``Clock`` port, and the domain.
+``system.started``, drives the injected ``StateManager`` ``BOOTING -> IDLE``, waits for a
+shutdown signal, publishes ``system.shutting_down``, and returns an exit code. It never
+constructs an adapter (P3) and never imports ``avid.adapters`` (P1/P5) — it depends only on
+the bus, the ``StateManager``, the ``Clock`` port, and the domain.
 """
 
 from __future__ import annotations
@@ -15,17 +15,17 @@ import contextlib
 import logging
 import signal
 from collections.abc import Mapping
-from typing import Protocol, TypedDict
-from uuid import UUID, uuid4
+from typing import Protocol
+from uuid import uuid4
 
+from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.ports import Clock, ServiceNotifier
+from avid.core.state_manager import StateManager
 from avid.domain import (
-    RobotState,
     SystemShuttingDown,
     SystemStarted,
     Trigger,
-    next_state,
 )
 
 _log = logging.getLogger("avid.lifecycle")
@@ -45,31 +45,6 @@ class ControlSurface(Protocol):
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
-
-
-class _Envelope(TypedDict):
-    """The five base :class:`~avid.domain.Event` fields, sampled per publish."""
-
-    event_id: UUID
-    correlation_id: UUID
-    timestamp_ms: int
-    monotonic_ns: int
-    source: str
-
-
-def _envelope(*, clock: Clock, correlation_id: UUID) -> _Envelope:
-    """Stamp a fresh event envelope from *clock* (SDS §9.1.1).
-
-    Wall clock for humans, monotonic for arithmetic — ``now()`` is epoch seconds, so
-    milliseconds is ``* 1000``.
-    """
-    return _Envelope(
-        event_id=uuid4(),
-        correlation_id=correlation_id,
-        timestamp_ms=clock.now() * 1000,
-        monotonic_ns=clock.monotonic_ns(),
-        source=_SOURCE,
-    )
 
 
 def _install_signal_handlers(shutdown: asyncio.Event) -> None:
@@ -109,6 +84,7 @@ async def run(
     *,
     bus: AsyncioEventBus,
     clock: Clock,
+    state: StateManager,
     adapter_health: Mapping[str, bool],
     notifier: ServiceNotifier,
     health: ControlSurface | None = None,
@@ -119,8 +95,9 @@ async def run(
     """Run the robot until a shutdown signal, then exit cleanly.
 
     Starts *bus* and the *health* control surface, publishes ``system.started`` (with
-    the *adapter_health* snapshot), reaches ``IDLE`` via the domain transition,
-    announces ``READY=1`` through *notifier*, then pings ``WATCHDOG=1`` every
+    the *adapter_health* snapshot), drives *state* ``BOOTING -> IDLE`` (which publishes
+    ``state.transitioned``), announces ``READY=1`` through *notifier* — in that order, so
+    nothing is told the robot is up before it actually is — then pings ``WATCHDOG=1`` every
     *watchdog_interval_s* while it waits for SIGTERM/SIGINT (or *shutdown* being set —
     the test seam). On shutdown it announces ``STOPPING=1``, publishes
     ``system.shutting_down``, stops the health surface, and returns ``0``.
@@ -141,12 +118,17 @@ async def run(
         try:
             await bus.publish(
                 SystemStarted(
-                    **_envelope(clock=clock, correlation_id=boot_id),
+                    **envelope(clock=clock, correlation_id=boot_id, source=_SOURCE),
                     adapters=dict(adapter_health),
                 )
             )
-            state = next_state(RobotState.BOOTING, Trigger.SYSTEM_STARTED)
-            _log.info("reached %s [correlation_id=%s]", state.name, boot_id)
+            # BOOTING -> IDLE. The manager owns the state and publishes
+            # ``state.transitioned``; boot_id carries through both events so one grep on it
+            # reconstructs the boot (SDS §3.12.2).
+            reached = await state.transition(
+                Trigger.SYSTEM_STARTED, correlation_id=boot_id
+            )
+            _log.info("reached %s [correlation_id=%s]", reached.name, boot_id)
             await notifier.ready()
             if ready is not None:
                 ready.set()
@@ -175,7 +157,11 @@ async def run(
                 _log.info("shutting down [correlation_id=%s]", shutdown_id)
                 await bus.publish(
                     SystemShuttingDown(
-                        **_envelope(clock=clock, correlation_id=shutdown_id),
+                        **envelope(
+                            clock=clock,
+                            correlation_id=shutdown_id,
+                            source=_SOURCE,
+                        ),
                         reason="signal",
                     )
                 )

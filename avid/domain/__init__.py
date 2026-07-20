@@ -22,6 +22,7 @@ from avid.domain.state import (
     TRANSITION_TABLE,
     IllegalTransition,
     RobotState,
+    StateTransitioned,
     Trigger,
     next_state,
 )
@@ -40,11 +41,12 @@ __all__ = [
     "SystemShuttingDown",
     "SystemStarted",
     "validate_event_name",
-    # RobotState (AVID-7)
+    # RobotState (AVID-7); state.transitioned (AVID-69)
     "EVENT_TYPES",
     "TRANSITION_TABLE",
     "IllegalTransition",
     "RobotState",
+    "StateTransitioned",
     "Trigger",
     "next_state",
 ]

@@ -165,11 +165,16 @@ def test_slotted_subclass_does_not_break_on_python_311() -> None:
     ``__init_subclass__`` would then read a stale ``__class__`` cell and raise
     ``TypeError`` on 3.11 (fixed on CPython 3.12). This whole module already imports a
     slotted subclass (``SystemHandlerFailed``), so on 3.11 the bug shows up at *import*;
-    this test states the guarantee where a reader can see it."""
+    this test states the guarantee where a reader can see it.
+
+    Declared locally on purpose — the guarantee is about *defining* a subclass, so it has
+    to happen inside the test. It used to be named ``StateTransitioned``; that is a real
+    class now (AVID-69, ``avid/domain/state.py``), so this probe got a neutral name to
+    keep exactly one ``StateTransitioned`` in the repo."""
 
     @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-    class StateTransitioned(Event):
-        name: ClassVar[str] = "state.transitioned"
+    class _SlotsProbe(Event):
+        name: ClassVar[str] = "system.probed"
 
-    assert issubclass(StateTransitioned, Event)
-    assert StateTransitioned.name == "state.transitioned"
+    assert issubclass(_SlotsProbe, Event)
+    assert _SlotsProbe.name == "system.probed"
