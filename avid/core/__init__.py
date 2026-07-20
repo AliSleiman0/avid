@@ -7,6 +7,7 @@ in ``ports.py`` (AVID-11). Depends on ``domain`` only; never imports
 
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy, Subscription
+from avid.core.faces import render_face
 from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
 from avid.core.ports import (
     Camera,
@@ -42,4 +43,6 @@ __all__ = [
     "CameraCaps",
     "DisplayFrame",
     "Frame",
+    # Face composition (AVID-70)
+    "render_face",
 ]
