@@ -22,7 +22,7 @@ import pytest
 from avid.adapters.clock import FakeClock
 from avid.core.event_bus import AsyncioEventBus
 from avid.domain import Affect, AffectChanged, RobotState, StateTransitioned, Trigger
-from avid.services.affect import _TIER1, AffectService
+from avid.services.affect import AffectService
 
 # A publish reaches its subscriber in a couple of scheduler turns; a whole second is a
 # generous ceiling that still fails fast if the bus ever wedges.
@@ -131,40 +131,6 @@ def _transitioned(
         to=to,
         trigger=Trigger.SYSTEM_STARTED,
     )
-
-
-# --- AC-2: the Tier-1 map ------------------------------------------------------------------
-
-
-def test_tier1_covers_the_robot_state_enum_exactly() -> None:
-    """Exhaustive on purpose, the same bargain ``test_no_undocumented_transitions`` makes: a
-    new ``RobotState`` without a face fails here, in milliseconds, rather than raising inside
-    a bus handler on the Pi. There is no default entry precisely so this test is load-bearing.
-    """
-    assert set(_TIER1) == set(RobotState)
-
-
-@pytest.mark.parametrize(
-    ("state", "expected"),
-    [
-        (RobotState.IDLE, Affect.IDLE),
-        (RobotState.LISTENING, Affect.LISTENING),
-        (RobotState.THINKING, Affect.THINKING),
-        (RobotState.SPEAKING, Affect.SPEAKING),
-        (RobotState.SLEEPING, Affect.SLEEPING),
-        (RobotState.BOOTING, Affect.IDLE),
-        (RobotState.DEGRADED, Affect.IDLE),
-    ],
-)
-def test_each_state_maps_to_its_documented_face(
-    state: RobotState, expected: Affect
-) -> None:
-    """Spelled out row by row so a reviewer can diff the table against SDS §6.8 directly."""
-    assert _TIER1[state] is expected
-
-
-def test_tier1_values_are_all_real_affects() -> None:
-    assert all(isinstance(value, Affect) for value in _TIER1.values())
 
 
 # --- AC-1: ports only, declarations only ---------------------------------------------------

@@ -22,11 +22,11 @@ stale. That clearing is what stops the robot grinning through "I've finished spe
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from types import MappingProxyType
+from collections.abc import Sequence
 from typing import cast
 from uuid import UUID
 
+from avid.core.affect_map import baseline_affect
 from avid.core.envelope import envelope
 from avid.core.event_bus import (
     DEFAULT_MAXSIZE,
@@ -39,41 +39,11 @@ from avid.domain import (
     Affect,
     AffectChanged,
     AffectTier,
-    RobotState,
     StateTransitioned,
 )
 
 # The component name stamped on the events this module publishes (SDS §9.1.3).
 _SOURCE = "AffectService"
-
-
-# The Tier-1 map: operational state in, baseline face out (SDS §6.8).
-#
-# This is the one place in the project where ``RobotState`` meets ``Affect``, and a *service*
-# is exactly the layer allowed to hold it. The ``affect-state-orthogonality`` contract is an
-# independence contract scoped to ``avid.domain.affect`` <-> ``avid.domain.state``: it keeps
-# the two *domain* modules from knowing about each other, so the coupling has nowhere to hide
-# down there. Up here it is explicit, tabulated, and exhaustively tested — which is the
-# difference between a documented mapping and the combinatorial mess §3.10.1 warns about.
-#
-# Frozen via MappingProxyType to match ``TRANSITION_TABLE`` (``domain/state.py``): a normative
-# table is a normative table wherever it lives.
-_TIER1: Mapping[RobotState, Affect] = MappingProxyType(
-    {
-        RobotState.IDLE: Affect.IDLE,
-        RobotState.LISTENING: Affect.LISTENING,
-        RobotState.THINKING: Affect.THINKING,
-        RobotState.SPEAKING: Affect.SPEAKING,
-        RobotState.SLEEPING: Affect.SLEEPING,
-        # BOOTING has no face of its own — IDLE is the honest baseline for "not yet doing
-        # anything", and the boot transition to IDLE then suppresses as a no-op (AC-4).
-        RobotState.BOOTING: Affect.IDLE,
-        # DEGRADED stays composed rather than SAD (SDS §6.9). A robot that looks sad about
-        # its own outage is telling the user something about the outage, not about them —
-        # the degraded *behaviour* communicates the fault; the face should not editorialise.
-        RobotState.DEGRADED: Affect.IDLE,
-    }
-)
 
 
 class AffectService:
@@ -149,15 +119,12 @@ class AffectService:
     async def _on_state_transitioned(self, event: StateTransitioned) -> None:
         """Tier 1: the operational state moved, so the baseline moves and the overlay dies.
 
-        ``_TIER1[event.to]`` indexes directly — no ``.get(..., IDLE)`` default. A new
-        ``RobotState`` without a mapping must ``KeyError`` loudly rather than silently wearing
-        the IDLE face forever; the exhaustive test over ``RobotState`` is what makes that a
-        build failure instead of a 1 a.m. discovery. (The bus swallows and republishes a
-        raising handler as ``system.handler_failed``, so even in production this is loud
-        rather than fatal.)
+        The table itself lives in ``core/affect_map.py`` rather than here: ``ExpressionService``
+        needs the same mapping to render the Tier-1 face directly, and one service importing
+        another is a P5 violation (AVID-72). See that module for the full reasoning.
         """
         async with self._lock:
-            self._baseline = _TIER1[event.to]
+            self._baseline = baseline_affect(event.to)
             self._overlay = None
             await self._publish(tier=1, correlation_id=event.correlation_id)
 

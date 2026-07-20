@@ -5,6 +5,7 @@ in ``ports.py`` (AVID-11). Depends on ``domain`` only; never imports
 ``avid.adapters`` (P1, P5).
 """
 
+from avid.core.affect_map import TIER1, baseline_affect
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy, Subscription
 from avid.core.faces import render_face
@@ -45,4 +46,7 @@ __all__ = [
     "Frame",
     # Face composition (AVID-70)
     "render_face",
+    # The Tier-1 state-to-face map (AVID-72), shared by AffectService and ExpressionService
+    "TIER1",
+    "baseline_affect",
 ]

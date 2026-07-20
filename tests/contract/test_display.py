@@ -106,6 +106,36 @@ async def test_each_render_writes_a_new_numbered_file(tmp_path: Path) -> None:
         assert path.exists()
 
 
+async def test_rendered_records_the_frame_objects_in_order(tmp_path: Path) -> None:
+    """``rendered`` answers "which frame", ``frames`` answers "which file" (AVID-72).
+
+    Identity, not equality: a caller that precomputes and caches its frames needs to prove the
+    *cached* object reached the port, which decoded pixels could never distinguish from an
+    identical-looking rebuild.
+    """
+    display = FakeDisplay(out_dir=tmp_path)
+    first, second = make_frame(width=2, height=2), make_frame(width=3, height=1)
+    await display.render(first)
+    await display.render(second)
+
+    assert display.rendered[0] is first
+    assert display.rendered[1] is second
+    assert len(display.rendered) == len(display.frames)
+
+
+async def test_a_rejected_frame_is_recorded_nowhere(tmp_path: Path) -> None:
+    """The two records stay in lockstep: a frame that failed to encode was never shown, so it
+    belongs in neither list."""
+    display = FakeDisplay(out_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot encode format"):
+        await display.render(
+            DisplayFrame(pixels=b"\x00\x00", width=1, height=1, format="RGB565")
+        )
+
+    assert display.rendered == []
+    assert display.frames == []
+
+
 async def test_written_file_is_a_wellformed_png(tmp_path: Path) -> None:
     """Structural, not pixel-exact (§14.8): it is a valid PNG whose IHDR matches the
     frame. What the face looks like is a human's job, not an assertion's."""
