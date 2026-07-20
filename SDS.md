@@ -1995,8 +1995,12 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
-| `affect.changed` | `affect: Affect`, `tier: 1 \| 2`, `previous: Affect` | AffectService | ExpressionService, MotionService | **DROP_OLDEST** |
-| `state.transitioned` | `from_: RobotState`, `to: RobotState`, `trigger: Trigger` | StateManager | ExpressionService, AffectService, BehaviorService, Observability | DROP_OLDEST |
+| `affect.changed` | `affect: Affect`, `tier: 1 \| 2`, `previous: Affect` | AffectService | **ExpressionService** ✅, MotionService (M9) | **DROP_OLDEST** |
+| `state.transitioned` | `from_: RobotState`, `to: RobotState`, `trigger: Trigger` | StateManager | **ExpressionService** ✅, **AffectService** ✅, BehaviorService (M6), Observability (M10) | DROP_OLDEST |
+
+✅ marks a subscriber that is **registered in the composition root today** (AVID-73); the rest are planned, with the milestone that lands them. The distinction matters for §9.1.5: a drift check written now would flag every unmarked entry as missing, which is a gap in the *schedule*, not a defect in the code — so the generator must diff against live registrations, not against the full aspirational catalog. This is the only table in §9.1.3 annotated so far, because it is the only one whose subscribers have started to exist.
+
+Note also the naming: this catalog names **services**, while `subscribe(..., name=...)` takes the *subscription* name, which is `<Service>.<event>` — `AffectService.state_transitioned`, `ExpressionService.affect_changed`, `ExpressionService.state_transitioned`. One service appears once per event it subscribes to. §9.1.5's generator therefore maps a service to a *set* of dotted names, and must not expect a 1:1 match against this column.
 
 `affect.changed` is the fan-out that justified the bus in the first place (§3.5.1): one publish, the face changes *and* the servo nods, and `AffectService` has never heard of either. Adding an LED at Phase 11 is a new subscriber and zero edits upstream.
 

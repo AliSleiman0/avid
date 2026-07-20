@@ -57,16 +57,26 @@ modules =
 # conflating them is the most common design error in this class of project. This
 # makes the "nothing in domain/ couples them" rule mechanical, not review-hope.
 
-# service-independence (P5): no module reaches through another — `ai` may not import
-# `motion`; cross-module effect happens via the bus. There are no service modules yet
-# (M0.md §"Not in M0, deliberately"); uncomment one line per service as it arrives.
-# [importlinter:contract:service-independence]
-# name = Services do not import each other (P5)
-# type = independence
-# modules =
-#     avid.services.ai
-#     avid.services.audio
-#     avid.services.vision
-#     avid.services.motion
-#     avid.services.behavior
-#     avid.services.memory
+[importlinter:contract:service-independence]
+name = Services do not import each other (P5)
+type = independence
+modules =
+    avid.services.affect
+    avid.services.expression
+# P5: no module reaches through another — cross-module effect happens via the bus,
+# never an import. Dormant since M0 for want of real service modules; activated by
+# AVID-73 now that two exist. **Add one line per service as it arrives** (M4 audio,
+# M6 behavior, M8 vision, M9 motion, memory) — a service missing from this list is
+# unguarded, and the list is the only thing that makes P5 mechanical.
+#
+# Why this passes today, which is not an accident: both services need the Tier-1
+# RobotState->Affect table, and AVID-72 moved it OUT of `services/affect.py` into
+# `core/affect_map.py` precisely so they could share it without an edge between them.
+# It cannot live in `domain/` either — `affect-state-orthogonality` above forbids a
+# domain module knowing both halves. If a future change "tidies" that table back into
+# a service, this contract is what breaks, and the fix is to move the shared thing
+# down a layer, never to import sideways.
+#
+# Note this is an INDEPENDENCE contract, so it catches INDIRECT chains too: a shared
+# helper that itself imports a service would couple them just as surely as a direct
+# import, and would fail here.

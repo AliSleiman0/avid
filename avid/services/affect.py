@@ -50,9 +50,11 @@ class AffectService:
     """Blends SDS §6.8's two affect tiers and publishes a single ``affect.changed``.
 
     Shaped to SDS §9.2 (``name`` / ``start`` / ``stop`` / ``subscriptions``) without yet
-    naming a ``Service`` Protocol — a Protocol with one implementer is a guess about the
-    second. Structural typing means #73 can declare it once ``ExpressionService`` exists and
-    both satisfy it with no edit here.
+    naming a ``Service`` Protocol. ``ExpressionService`` now shares that shape, but AVID-73
+    still declined to declare the Protocol: neither service owns a background task, so
+    ``lifecycle.run`` never needs to start or stop them, and a Protocol nothing consumes is
+    ceremony. M4's ``AudioService`` brings the first real stream loop and with it the reason.
+    Structural typing means this class will satisfy it then with no edit here.
 
     Depends on the :class:`~avid.core.ports.EventBus` and :class:`~avid.core.ports.Clock`
     **Protocols**, never a concrete adapter (P2). Constructed once, in the composition root.

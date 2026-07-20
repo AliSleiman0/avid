@@ -12,7 +12,8 @@ the difference between a documented mapping and a combinatorial mess.
 It no longer lives in ``services/affect.py`` either, where it started life in AVID-71.
 ``ExpressionService`` needs the same map to render the Tier-1 face directly, and a service
 importing another service is a P5 violation — one the ``service-independence`` contract will
-fail on the moment #73 switches it on. Two copies would be worse: a normative table with a
+fail on (AVID-73 switched it on, and it passes precisely because of this move). Two copies
+would be worse: a normative table with a
 second, drifting edition is not normative. So it moved down a layer, where both services can
 depend on it without depending on each other.
 """
