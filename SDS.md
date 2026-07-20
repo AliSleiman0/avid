@@ -1996,7 +1996,7 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
 | `affect.changed` | `affect: Affect`, `tier: 1 \| 2`, `previous: Affect` | AffectService | ExpressionService, MotionService | **DROP_OLDEST** |
-| `state.transitioned` | `from_: RobotState`, `to: RobotState`, `trigger: str` | StateManager | ExpressionService, AffectService, BehaviorService, Observability | DROP_OLDEST |
+| `state.transitioned` | `from_: RobotState`, `to: RobotState`, `trigger: Trigger` | StateManager | ExpressionService, AffectService, BehaviorService, Observability | DROP_OLDEST |
 
 `affect.changed` is the fan-out that justified the bus in the first place (§3.5.1): one publish, the face changes *and* the servo nods, and `AffectService` has never heard of either. Adding an LED at Phase 11 is a new subscriber and zero edits upstream.
 
