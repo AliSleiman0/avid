@@ -4,3 +4,10 @@ Each service subscribes to events, calls ports, and publishes events — nothing
 else. Depends on ``domain`` and the ``core`` ports; knows nothing concrete and
 never imports ``avid.adapters`` (P2, P5).
 """
+
+from avid.services.affect import AffectService
+
+__all__ = [
+    # The affect decider (AVID-71)
+    "AffectService",
+]

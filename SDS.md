@@ -2101,7 +2101,7 @@ class Service(Protocol):
 
 `subscriptions()` returns declarations rather than performing registration. The service says what it wants; the composition root decides. That inversion is what keeps the subscriber graph static and knowable.
 
-Public methods beyond this Protocol exist only where §9.1.4 requires a direct call — `MemoryService.store_fact/retrieve/forget`, `StateManager.transition`. Everything else is bus-mediated.
+Public methods beyond this Protocol exist only where §9.1.4 requires a direct call — `MemoryService.store_fact/retrieve/forget`, `StateManager.transition`, `AffectService.set_affect`. Everything else is bus-mediated.
 
 ## 9.3 HAL ports
 
