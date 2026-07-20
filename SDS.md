@@ -63,6 +63,7 @@
  3.6.1 Component inventory
  3.6.2 Component interaction diagram
  3.6.3 Dependency graph and enforcement
+ 3.6.4 Face rendering — ADR-012
 3.7 Runtime views (sequence diagrams)
  3.7.1 Cold boot to idle
  3.7.2 Wake → listen → respond turn
@@ -445,6 +446,7 @@ Full text in Appendix A. Summary:
 | ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Proposed** — see §6.10 |
 | ADR-008 | Python 3.13 on PC, system Python 3.11 + `--system-site-packages` on Pi | **Proposed** — see §3.11 |
 | ADR-009 | Pan+tilt (2 servo) target, 1-servo fallback; gesture engine is axis-agnostic | **Proposed** — needs your call |
+| ADR-012 | Faces compose to RGB888 bytes in the stdlib; no drawing-library dependency | Accepted — see §3.6.4 |
 
 ## 3.4 Logical view — the layers
 
@@ -602,7 +604,24 @@ A queue hitting its bound publishes `system.handler_failed` with a `queue_overfl
 | `PresenceService` | Decide whether a human is present, with hysteresis. | — (polls camera port) | `vision.*` |
 | `BehaviorService` | Decide when the robot should speak first. | `vision.*`, `memory.*`, clock | `behavior.*` |
 
-Note `AffectService` and `ExpressionService` are separate. The temptation is to merge them. Don't: *deciding* to be happy is domain logic with unit tests; *drawing* a happy face is an adapter concern with a Pygame dependency. Merging them puts Pygame in the dependency chain of your emotion tests. That's exactly the mistake P1 exists to prevent.
+Note `AffectService` and `ExpressionService` are separate. The temptation is to merge them. Don't: *deciding* to be happy is domain logic with unit tests; *getting a happy face onto glass* ends in an adapter, and adapters carry device dependencies — a framebuffer, a panel driver, whatever the hardware of the day demands. Merging them puts that dependency in the chain of your emotion tests. That's exactly the mistake P1 exists to prevent. The split holds whatever the display backend is; see §3.6.4.
+
+### 3.6.4 Face rendering — ADR-012
+
+**Faces compose to `RGB888` bytes in the stdlib.** No drawing-library dependency.
+
+The `Display` port already draws the line this decision rests on: *"Show a **frame**, not a screen. The port never promised a framebuffer — only pixels"* (`core/ports.py`). `ExpressionService`'s job ends when an affect has become a buffer of pixels; carrying those pixels to glass is the adapter's problem. Composition is therefore backend-independent by construction, and the question "which drawing library?" is a question about *composition* only.
+
+At 480×320 the answer is: none. Faces are sprites, not vector art (§2.4 — "design for the pixel grid"), and composing sprites into a byte buffer is array arithmetic. This codebase has twice chosen the stdlib over a dependency for exactly this kind of work and both have held: AVID-13's PNG encoder (`zlib` + `struct`) and AVID-55's `_to_xrgb8888` channel reorder (extended slices, no numpy, no per-pixel loop). Runtime dependencies stay **`pydantic` alone**.
+
+Consequences, accepted:
+
+- Sprites are hand-composed `bytes`. There is no blitter, no alpha compositor, and no font engine unless we write one — which bounds how ornate a face can get, deliberately.
+- The domain-purity contract's `pygame` entry (`.importlinter`) becomes a standing rule rather than an aspiration.
+
+**This is not a bet against HDMI.** The panel we have today is an SPI ILI9486 DRM device, which is why `FramebufferDisplay` pushes XRGB8888 at `/dev/fbN` (AVID-55) and why a pygame `flip()` would have nothing to drive — but that is *evidence*, not the premise. Plug in an HDMI screen later and exactly one thing changes: a new adapter beside `FakeDisplay` and `FramebufferDisplay`, a new value in the `[adapters] display` literal, a case in `main._build_display`. Sprites, `ExpressionService`, and `AffectService` are untouched. If that adapter wants pygame or SDL, it takes it as an adapter-local optional dependency, the way `picamera2` and `pyalsaaudio` already do (§3.11.2) — nothing here forbids it. What this ADR forbids is a drawing library in the *composition* path, where the port guarantees it buys nothing.
+
+*Rejected: Pygame.* Three concrete costs, none of them paid for a feature we need. It would run **headless** (`SDL_VIDEODRIVER=dummy`) as a pure off-screen buffer against today's framebuffer target — the whole windowing and event layer, inert. It has **no honest home in the dependency groups**: not the `pi` extra, since the future simulator wants faces off-Pi too; not the main dependencies, since it is one backend's implementation detail. And it needs a **mypy override** to join the unstubbed-import block. A `zlib`-sized amount of stdlib code avoids all three.
 
 ## 3.7 Runtime views
 
@@ -717,7 +736,7 @@ Blocking calls get a thread. Non-negotiable list:
 |---|---|---|
 | `cv2` / MediaPipe inference | CPU-bound, releases GIL | `run_in_executor`, dedicated single-thread pool, ≤5 fps |
 | Picamera2 capture | Blocking C call | Same pool as above |
-| Framebuffer write (`FramebufferDisplay`) | Blocking device write | `asyncio.to_thread` per `render`; XRGB8888 straight to `/dev/fbN` (AVID-55). *Face rendering still targets Pygame in `ExpressionService` (§3.6.1); only the panel push changed — the SPI ILI9486 panel is a DRM framebuffer, not an HDMI Pygame surface, so there is no `flip()` vsync to offload.* |
+| Framebuffer write (`FramebufferDisplay`) | Blocking device write | `asyncio.to_thread` per `render`; XRGB8888 straight to `/dev/fbN` (AVID-55). *Composition is not on this list — `ExpressionService` builds frames in pure stdlib byte work (ADR-012, §3.6.4), so only the panel push offloads. The offload question is per-adapter: this panel is a DRM framebuffer with no `flip()` vsync to wait on, where an HDMI/SDL adapter would bring its own blocking present and earn its own row.* |
 | SQLite writes | Disk fsync on a slow SD card | `asyncio.to_thread`, serialized through one writer |
 | I2C to PCA9685 | Blocking syscall, sub-ms | `asyncio.to_thread`; short enough to be uncontroversial |
 | ALSA read/write | Blocking | Dedicated capture and playback threads with ring buffers |
@@ -854,7 +873,7 @@ The barge-in row is the one that will bite you. The user interrupting the robot 
 
 ### 3.11.1 Development topology (PC)
 
-Python 3.13, UV-managed venv, all Fake adapters, no hardware, no network required (Realtime client also has a fake that replays recorded sessions). `uv run robot --config config/sim.toml` gives a running robot on your laptop with a Pygame window standing in for the display.
+Python 3.13, UV-managed venv, all Fake adapters, no hardware, no network required (Realtime client also has a fake that replays recorded sessions). `uv run avid --config config/sim.toml` gives a running robot on your laptop, with `FakeDisplay` writing each frame as a PNG under `[display] frames_dir` in place of a panel (§3.9.2) — the face is a sequence of files you can flip through, not a window.
 
 ### 3.11.2 Target topology (Pi 5) — ADR-008
 
