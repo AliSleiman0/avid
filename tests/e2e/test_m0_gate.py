@@ -6,10 +6,11 @@ the real :class:`~avid.core.event_bus.AsyncioEventBus` to the real
 :class:`~avid.adapters.display.FakeDisplay` — no mocks, no stubs — publishes one
 event, and asserts a well-formed PNG frame landed on the other side.
 
-The renderer here is **demo-scoped**: at M0 nothing renders a face for real — that is
-``ExpressionService``'s job at M3+ (see ``avid/main.py``). This handler exists to prove
-the *mechanism* end to end, not to ship a feature. When ExpressionService arrives, the
-same path is exercised by its own tests and this gate stays as the milestone artifact.
+The renderer here is **demo-scoped**: at M0 nothing renders a face for real — that became
+``ExpressionService``'s job at M3 (wired in ``avid/main.py``, proven end to end by
+``tests/e2e/test_m3_gate.py``). This handler exists to prove the *mechanism*, not to ship a
+feature; now that the real path exists it is exercised by that gate and ExpressionService's
+own tests, and this M0 gate stays as its own milestone artifact.
 
 In-process and signal-free, so unlike ``tests/e2e/test_boot.py`` it runs on every
 platform including the Windows dev box. Draining is deterministic — the handler sets an
