@@ -38,6 +38,13 @@ forbidden_modules =
     cv2
 # The domain is pure: stdlib plus pydantic only (CLAUDE.md §2). If you want
 # `import numpy` here, the logic belongs in a service or an adapter.
+#
+# `pygame` is a standing rule, not an aspiration: ADR-012 (SDS §3.6.4) decided
+# faces compose to RGB888 bytes in the stdlib, so no drawing library belongs in
+# the composition path. Note the scope — `source_modules` is `avid.domain`, so
+# this forbids pygame *in the domain*, which holds regardless of backend. A
+# future HDMI/SDL display adapter may still take pygame as an adapter-local
+# optional dependency, exactly as `picamera2` and `pyalsaaudio` do today.
 
 [importlinter:contract:affect-state-orthogonality]
 name = Affect and RobotState are orthogonal (AVID-8; SDS §3.10.1)

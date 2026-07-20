@@ -54,9 +54,12 @@ in `domain/`, the logic belongs in a service or adapter.
 
 **Services** subscribe to events, call ports, publish events. A service that does
 anything else is misfiled. *Deciding* to be happy is domain logic with a unit
-test; *drawing* a happy face is an adapter concern with a Pygame dependency —
-keep `AffectService` and `ExpressionService` separate (SDS §3.6.1). That split is
-exactly what P1 exists to protect.
+test; *getting a happy face onto glass* ends in an adapter carrying a device
+dependency — keep `AffectService` and `ExpressionService` separate (SDS §3.6.1).
+That split is exactly what P1 exists to protect. Note the face itself is composed
+in the **stdlib** — `RGB888` bytes, no drawing library, runtime deps stay
+pydantic-only (ADR-012, SDS §3.6.4); the display *backend* behind the port stays
+free to change.
 
 ---
 
