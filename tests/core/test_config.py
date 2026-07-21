@@ -9,8 +9,10 @@ from pydantic import SecretStr, ValidationError
 
 from avid.core.config import AdaptersConfig, ApiConfig, Config, load_config
 
-# Repo root -> config/sim.toml, independent of the test runner's cwd.
-_SIM_TOML = Path(__file__).resolve().parents[2] / "config" / "sim.toml"
+# Repo root -> config/{sim,pi}.toml, independent of the test runner's cwd.
+_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+_SIM_TOML = _CONFIG_DIR / "sim.toml"
+_PI_TOML = _CONFIG_DIR / "pi.toml"
 
 _SECRET = "sk-not-a-real-key-1234567890"
 
@@ -19,8 +21,38 @@ def test_load_sim_toml_is_all_fake() -> None:
     config = load_config(_SIM_TOML)
     assert isinstance(config, Config)
     assert config.adapters.display == "fake"
+    assert config.adapters.vad == "fake"
     assert config.adapters.realtime == "replay"
     assert config.api.bind == "127.0.0.1"
+
+
+def test_audio_loop_config_loads_from_sim_toml() -> None:
+    # AVID-89 AC-3: the typed config the audio loop needs (local VAD threshold + turn-end
+    # debounce in [gate], the WAV-bank base dir in [cues]) parses from the sim profile.
+    config = load_config(_SIM_TOML)
+    assert config.adapters.vad == "fake"
+    assert config.gate.threshold == 0.5
+    assert config.gate.silence_hold_ms == 500
+    assert config.gate.ring_buffer_ms == 300  # reused by AudioService's pre-roll
+    assert config.cues.dir == "assets/cues"
+
+
+def test_audio_loop_config_defaults_on_bare_model() -> None:
+    # The schema defaults stand on their own, independent of any TOML.
+    config = Config()
+    assert config.adapters.vad == "fake"
+    assert config.gate.threshold == 0.5
+    assert config.gate.silence_hold_ms == 500
+    assert config.cues.dir == "assets/cues"
+
+
+def test_pi_toml_folds_the_confirmed_mic_device() -> None:
+    # AVID-89 AC-4: pi.toml carries the bring-up-verified USB mic device (NOT stock "default",
+    # which routes to the amp) so the M4 gate run (#91) is turnkey. Inert while vad/mic are fake.
+    config = load_config(_PI_TOML)
+    assert config.microphone.device == "plughw:CARD=Device,DEV=0"
+    assert config.adapters.vad == "fake"
+    assert config.cues.dir == "assets/cues"
 
 
 def test_missing_key_leaves_secret_none(monkeypatch: pytest.MonkeyPatch) -> None:

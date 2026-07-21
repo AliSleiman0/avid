@@ -15,6 +15,7 @@ servo      = "fake"
 display    = "fake"
 microphone = "fake"
 speaker    = "fake"
+vad        = "fake"             # real silero flips on with mic/speaker at the M4 gate (AVID-91)
 realtime   = "replay"           # replay recorded sessions — no OpenAI connection
 notifier   = "systemd"          # ← sd_notify to $NOTIFY_SOCKET (§3.11.3, AVID-38)
 
@@ -45,10 +46,17 @@ threshold           = 0.5
 prefix_padding_ms   = 300
 silence_duration_ms = 500
 
-[gate]                          # §6.3 / ADR-007
+[gate]                          # local VAD gate — §6.3 / ADR-007 (NOT [ai.turn_detection], the server VAD)
 vad_model            = "silero_v5"
-ring_buffer_ms       = 300
+threshold            = 0.5       # Silero speech-probability cutoff
+ring_buffer_ms       = 300       # pre-roll replayed at a turn's start
+silence_hold_ms      = 500       # silence run before a turn is declared over (debounce)
 session_idle_close_s = 30
+
+[cues]                          # degraded-mode WAV cue bank (AVID-80); consumed by M5's ConversationService
+# The clips are committed under the read-only code tree (assets/cues/, #88); readable under the
+# unit's ProtectSystem=strict, so this stays repo-relative (unlike the writable frames/wav dirs).
+dir = "assets/cues"
 
 [memory]
 db_path                = "/var/lib/robot/robot.db"   # on-device SQLite; local, never synced
@@ -88,10 +96,11 @@ max_pulse_us = 2500
 freq_hz      = 50
 
 [microphone]                    # audio capture params for the microphone adapter (AVID-53)
-# The real alsa adapter lands with this milestone; microphone stays "fake" above until the
-# on-Pi contract run flips it (AVID-57), exactly as camera/servo did. device is the ReSpeaker's
-# ALSA name (e.g. "plughw:CARD=seeed2micvoicec") — set it when flipping to alsa on the Pi.
-device      = "default"         # ALSA device — only the alsa adapter uses it
+# The real alsa adapter flips on with the mic HAL at the M4 gate (AVID-91); microphone stays
+# "fake" above until then. device is the bring-up-verified USB PnP mic's ALSA name — NOT stock
+# "default", which routes to the MAX98357 amp (avid-mic-hw-bringup). Folded here so the gate run
+# is turnkey; inert while the adapter is "fake". Mixer: AGC OFF, Mic gain 10/16, `alsactl store`d.
+device      = "plughw:CARD=Device,DEV=0"  # ALSA device — only the alsa adapter uses it
 sample_rate = 16000             # 16 kHz — the Realtime/VAD input rate (§6.3)
 channels    = 1                 # mono capture
 chunk_ms    = 20                # frame size — the 20 ms mic-capture budget

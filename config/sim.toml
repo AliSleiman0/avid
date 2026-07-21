@@ -12,6 +12,7 @@ servo      = "fake"
 display    = "fake"
 microphone = "fake"
 speaker    = "fake"
+vad        = "fake"             # scripted-timeline VAD simulator (silero is Pi-only, AVID-77)
 realtime   = "replay"           # replay recorded sessions — no OpenAI connection
 
 [ai]
@@ -26,10 +27,15 @@ threshold           = 0.5
 prefix_padding_ms   = 300
 silence_duration_ms = 500
 
-[gate]                          # §6.3 / ADR-007
+[gate]                          # local VAD gate — §6.3 / ADR-007 (NOT [ai.turn_detection], the server VAD)
 vad_model            = "silero_v5"
-ring_buffer_ms       = 300
+threshold            = 0.5       # Silero speech-probability cutoff
+ring_buffer_ms       = 300       # pre-roll replayed at a turn's start
+silence_hold_ms      = 500       # silence run before a turn is declared over (debounce)
 session_idle_close_s = 30
+
+[cues]                          # degraded-mode WAV cue bank (AVID-80); consumed by M5's ConversationService
+dir = "assets/cues"             # committed 24 kHz mono clips (#88)
 
 [memory]
 db_path                = ".artifacts/sim.db"    # on-device SQLite; local, never synced

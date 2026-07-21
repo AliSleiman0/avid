@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 from avid import __version__
@@ -29,10 +30,12 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
     Pca9685Servo,
     Picamera2Camera,
+    SileroVad,
     SystemClock,
     SystemdNotifier,
 )
@@ -45,12 +48,14 @@ from avid.core.ports import (
     Clock,
     Display,
     Microphone,
+    Service,
     ServiceNotifier,
     Servo,
     Speaker,
+    VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
-from avid.services import AffectService, ExpressionService
+from avid.services import AffectService, AudioService, ExpressionService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -222,6 +227,32 @@ def _build_speaker(config: Config) -> Speaker:
             )
 
 
+def _build_vad(config: Config) -> VoiceActivityDetector:
+    """Select the ``VoiceActivityDetector`` named by ``[adapters] vad`` (AVID-77).
+
+    ``fake`` is the laptop/sim default — a scripted speech/silence timeline, no model; ``silero``
+    runs Silero v5 via ONNX (the ``onnxruntime``/``numpy`` imports live lazily inside that adapter,
+    the Pi-only ``pi`` extra, ADR-008 — so ``main.py`` still imports off-Pi). The real gate is fed
+    the local speech-probability ``threshold`` from ``[gate]`` and the capture ``sample_rate`` from
+    ``[microphone]`` (P7). Any other value fails loudly rather than silently doing nothing.
+    """
+    match config.adapters.vad:
+        case "fake":
+            # default=False: no scripted timeline, so every frame reads as silence — the loop runs
+            # and gates cleanly to IDLE under fakes, minting no spurious turns. #90 drives a script.
+            return FakeVoiceActivityDetector()
+        case "silero":  # pragma: no cover - needs the Pi (M4 gate #91)
+            return SileroVad(
+                threshold=config.gate.threshold,
+                sample_rate=config.microphone.sample_rate,
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"vad adapter {other!r} is not available — only 'silero' and "
+                f"'fake' exist (AVID-77)"
+            )
+
+
 def _build_notifier(config: Config) -> ServiceNotifier:
     """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
 
@@ -236,8 +267,18 @@ def _build_notifier(config: Config) -> ServiceNotifier:
             return SystemdNotifier(address=config.notify_socket)
 
 
-def _wire_services(*, bus: AsyncioEventBus, clock: Clock, display: Display) -> None:
-    """Construct the services and register what they *declared* (SDS §9.2).
+def _wire_services(
+    *,
+    bus: AsyncioEventBus,
+    clock: Clock,
+    state: StateManager,
+    display: Display,
+    microphone: Microphone,
+    speaker: Speaker,
+    vad: VoiceActivityDetector,
+    config: Config,
+) -> Sequence[Service]:
+    """Construct the services, register what they *declared*, return the ones with an owned task.
 
     The inversion is the point: a service says what it wants to hear via
     ``subscriptions()``; the composition root decides whether to grant it. That is what
@@ -250,21 +291,35 @@ def _wire_services(*, bus: AsyncioEventBus, clock: Clock, display: Display) -> N
     static-at-composition by design (P3, SDS §3.5.2). Register, then run. Moving this call
     below the handoff turns a boot into a crash.
 
-    Both services are typed on the **ports** (``EventBus``/``Clock``/``Display``), never on
-    a concrete adapter (P2) — which is what lets the identical wiring drive ``FakeDisplay``
-    on a laptop and ``FramebufferDisplay`` on the Pi from one config literal.
+    Every service is typed on the **ports** (``EventBus``/``Clock``/``Display``/``Microphone``/
+    ``Speaker``/``VoiceActivityDetector``), never on a concrete adapter (P2) — which is what lets
+    the identical wiring drive the fakes on a laptop and the real HALs on the Pi from one config
+    literal. Config values (`[gate]`/`[microphone]`) are injected, never read by the service (P7).
 
-    Returns ``None``, and drops both local references on purpose. Every ``Subscription``
-    holds a **bound method**, which holds its instance alive for the life of the bus — so
-    there is nothing here to keep. Neither service is started or stopped: both are purely
-    reactive with no owned task (SDS §9.2's ``start``/``stop`` are no-ops on both). The
-    lifecycle-managed-service question is deferred to M4's ``AudioService``, which will own
-    a real stream loop and is the right occasion to add both a ``Service`` Protocol and a
-    ``services=`` parameter to ``lifecycle.run`` — deliberately, not by omission.
+    ``AffectService`` and ``ExpressionService`` are purely reactive — no owned task, ``start``/
+    ``stop`` are no-ops — so they are wired for their subscriptions and then dropped: every
+    ``Subscription`` holds a **bound method** that keeps its instance alive for the life of the
+    bus. ``AudioService`` is different: it owns a mic-consume loop (SDS §9.2), so it is **returned**
+    for :func:`lifecycle.run` to ``start``/``stop`` at the right points in the boot/shutdown order.
+    Its ``subscriptions()`` is empty at M4 (the ``conversation.*`` facts it will hear do not exist
+    until M5), so it registers nothing today — but it goes through the same loop so the day those
+    facts arrive is pure addition, not a wiring change.
     """
     affect = AffectService(bus=bus, clock=clock)
     expression = ExpressionService(bus=bus, display=display, clock=clock)
-    for service in (affect, expression):
+    audio = AudioService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        microphone=microphone,
+        speaker=speaker,
+        vad=vad,
+        ring_buffer_ms=config.gate.ring_buffer_ms,
+        sample_rate=config.microphone.sample_rate,
+        channels=config.microphone.channels,
+        silence_hold_ms=config.gate.silence_hold_ms,
+    )
+    for service in (affect, expression, audio):
         for sub in service.subscriptions():
             bus.subscribe(
                 sub.event_type,
@@ -273,6 +328,9 @@ def _wire_services(*, bus: AsyncioEventBus, clock: Clock, display: Display) -> N
                 policy=sub.policy,
                 maxsize=sub.maxsize,
             )
+    # Only the services with an owned task need lifecycle management; the two reactive ones
+    # are kept alive by their bound-method subscriptions above.
+    return (audio,)
 
 
 async def _run(config: Config) -> int:
@@ -288,6 +346,7 @@ async def _run(config: Config) -> int:
     servo = _build_servo(config)
     microphone = _build_microphone(config)
     speaker = _build_speaker(config)
+    vad = _build_vad(config)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
@@ -305,18 +364,25 @@ async def _run(config: Config) -> int:
         "health": True,
     }
     # The services, and their subscriptions, BEFORE the lifecycle starts the bus — see
-    # ``_wire_services`` for why that order is not negotiable. This is the line that makes
-    # the display a face rather than a health-map entry.
-    _wire_services(bus=bus, clock=clock, display=display)
-    # ``camera``, ``servo``, ``microphone`` and ``speaker`` are still constructed only to
-    # realize the switch and appear in the health map: driving the camera is the vision
-    # service's job (M8), moving the servo is MotionService's (M9), and consuming the mic /
-    # driving the speaker is AudioService's (M4) — all later issues. ``display`` has left
-    # this list as of AVID-73; ExpressionService owns it now.
+    # ``_wire_services`` for why that order is not negotiable. This is the line that makes the
+    # display a face and the mic/speaker/VAD an audio loop, rather than health-map entries. It
+    # returns the services with an owned task (AudioService) for the lifecycle to start/stop.
+    services = _wire_services(
+        bus=bus,
+        clock=clock,
+        state=state,
+        display=display,
+        microphone=microphone,
+        speaker=speaker,
+        vad=vad,
+        config=config,
+    )
+    # ``camera`` and ``servo`` are still constructed only to realize the switch and appear in the
+    # health map: driving the camera is the vision service's job (M8) and moving the servo is
+    # MotionService's (M9) — both later issues. ``display`` (AVID-73) and now ``microphone``/
+    # ``speaker``/``vad`` (AVID-89) have left this list; their services own them.
     _ = camera
     _ = servo
-    _ = microphone
-    _ = speaker
     return await lifecycle.run(
         bus=bus,
         clock=clock,
@@ -324,6 +390,7 @@ async def _run(config: Config) -> int:
         adapter_health=adapter_health,
         notifier=notifier,
         health=health,
+        services=services,
         watchdog_interval_s=config.systemd.watchdog_interval_s,
     )
 
