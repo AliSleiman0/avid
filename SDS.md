@@ -2189,6 +2189,7 @@ servo      = "pca9685"          # | "fake"
 display    = "framebuffer"      # | "fake" | "png_sequence"  (AVID-55: raw XRGB8888 to /dev/fbN)
 microphone = "alsa"             # | "fake"
 speaker    = "alsa"             # | "fake"
+vad        = "silero"           # | "fake" — local Silero VAD gate (AVID-77)
 realtime   = "openai"           # | "replay"
 notifier   = "systemd"          # | "fake" — sd_notify supervision (§3.11.3)
 
@@ -2204,10 +2205,15 @@ threshold           = 0.5
 prefix_padding_ms   = 300
 silence_duration_ms = 500
 
-[gate]                          # §6.3 / ADR-007
+[gate]                          # local VAD gate — §6.3 / ADR-007 (NOT [ai.turn_detection], the server VAD)
 vad_model          = "silero_v5"
-ring_buffer_ms     = 300
+threshold          = 0.5        # Silero speech-probability cutoff (local gate)
+ring_buffer_ms     = 300        # pre-roll replayed at a turn's start
+silence_hold_ms    = 500        # silence run before a turn is declared over (AudioService debounce)
 session_idle_close_s = 30
+
+[cues]                          # degraded-mode WAV cue bank base dir (§3.6.4, AVID-80)
+dir = "assets/cues"             # committed 24 kHz mono clips; CueBank resolves dir/<cue>.wav
 
 [memory]
 db_path        = "/var/lib/robot/robot.db"

@@ -44,6 +44,10 @@ class AdaptersConfig(_Section):
     display: Literal["framebuffer", "fake", "png_sequence"] = "fake"
     microphone: Literal["alsa", "fake"] = "fake"
     speaker: Literal["alsa", "fake"] = "fake"
+    # The local voice-activity gate (AVID-77). ``silero`` runs Silero v5 via onnxruntime
+    # (the Pi-only ``pi`` extra, imported lazily inside the adapter); ``fake`` is the
+    # scripted-timeline simulator and the laptop default.
+    vad: Literal["silero", "fake"] = "fake"
     realtime: Literal["openai", "replay"] = "replay"
     # The process supervisor (AVID-38). ``systemd`` speaks sd_notify to
     # ``$NOTIFY_SOCKET``; ``fake`` records the calls and is the laptop default — the
@@ -174,11 +178,36 @@ class AiConfig(_Section):
 
 
 class GateConfig(_Section):
-    """The attention gate (SDS §6.3 / ADR-007)."""
+    """The local attention gate (SDS §6.3 / ADR-007).
+
+    This is the *local* VAD that runs on-device, distinct from ``[ai.turn_detection]`` (the
+    OpenAI Realtime *server*-VAD). ``threshold`` is the Silero speech-probability cutoff the
+    ``SileroVad`` adapter thresholds against; ``silence_hold_ms`` is how long a run of silence
+    must last before ``AudioService`` declares a turn over — the debounce that stops per-frame
+    flapping. Both are injected (P7); the mic-side ``sample_rate``/``channels`` and the pre-roll
+    ``ring_buffer_ms`` the gate needs live in ``[microphone]`` and here, reused rather than
+    duplicated. The adapter/service never reach for these — the composition root injects them.
+    """
 
     vad_model: str = "silero_v5"
+    threshold: float = 0.5
     ring_buffer_ms: int = 300
+    silence_hold_ms: int = 500
     session_idle_close_s: int = 30
+
+
+class CuesConfig(_Section):
+    """The degraded-mode WAV cue bank base dir, injected into ``CueBank`` (P7, AVID-80).
+
+    ``dir`` is where the committed 24 kHz mono clips live (``assets/cues/``, #88). The
+    ``CueBank`` resolves ``dir / <cue>.wav`` and plays it through the speaker, degrading
+    gracefully (log-and-return) if the dir or a file is missing (SDS §3.6.4). The config seam
+    is added at #89 per its AC-3; ``CueBank`` itself is constructed by M5's
+    ``ConversationService`` — its first and only consumer — not here. The service never reaches
+    for the path itself; the composition root injects it.
+    """
+
+    dir: str = "assets/cues"
 
 
 class WeightsConfig(_Section):
@@ -282,6 +311,7 @@ class Config(_Section):
     speaker: SpeakerConfig = SpeakerConfig()
     ai: AiConfig = AiConfig()
     gate: GateConfig = GateConfig()
+    cues: CuesConfig = CuesConfig()
     memory: MemoryConfig = MemoryConfig()
     behavior: BehaviorConfig = BehaviorConfig()
     vision: VisionConfig = VisionConfig()

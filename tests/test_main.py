@@ -25,6 +25,7 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FakeVoiceActivityDetector,
     SystemdNotifier,
 )
 from avid.core import lifecycle
@@ -40,9 +41,11 @@ from avid.main import (
     _build_notifier,
     _build_servo,
     _build_speaker,
+    _build_vad,
     _wire_services,
     main,
 )
+from avid.services import AudioService
 
 # The exact subscriber graph the composition root is expected to build (SDS §9.1.3). Spelled
 # out rather than derived from the services, so that a service silently dropping or renaming
@@ -91,6 +94,13 @@ def test_build_speaker_selects_fake() -> None:
     assert isinstance(_build_speaker(config), FakeSpeaker)
 
 
+def test_build_vad_selects_fake() -> None:
+    # sim.toml (and pi.toml) set vad = "fake"; the silero branch needs the Pi's onnxruntime
+    # model and is proven by the on-hardware M4 gate (AVID-77 / #91).
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_vad(config), FakeVoiceActivityDetector)
+
+
 def test_build_notifier_selects_fake_for_sim() -> None:
     # sim.toml omits [adapters] notifier -> the fake default (no supervisor).
     config = load_config(_SIM_TOML)
@@ -134,6 +144,9 @@ def test_main_wires_and_delegates_to_lifecycle(
     assert isinstance(captured["notifier"], FakeServiceNotifier)
     assert captured["health"] is not None
     assert captured["watchdog_interval_s"] == 15.0
+    # AVID-89: the one lifecycle-managed service (the mic loop) is handed to the lifecycle to
+    # start/stop; the two reactive services are not (they own no task). See ``_wire_services``.
+    assert [type(s) for s in captured["services"]] == [AudioService]
 
 
 def test_main_registers_the_service_subscriptions_before_starting_the_bus(
@@ -200,7 +213,24 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
     clock = FakeClock()
     bus = AsyncioEventBus(clock=clock)
     display = _SignallingDisplay(out_dir=tmp_path)
-    _wire_services(bus=bus, clock=clock, display=display)
+    state = StateManager(bus=bus, clock=clock)
+    config = load_config(_SIM_TOML)
+    # The audio loop is constructed here (the real #89 wiring) but deliberately NOT started —
+    # ``services=`` is left off ``lifecycle.run`` below — so this stays a pure face-render
+    # assertion (the running loop is #90's). A cheap silent ``pcm`` skips FakeMicrophone's tone
+    # synth, which under coverage would trip the P8 slow-callback gate at construction.
+    _wire_services(
+        bus=bus,
+        clock=clock,
+        state=state,
+        display=display,
+        microphone=FakeMicrophone(
+            sample_rate=16000, channels=1, chunk_ms=20, pcm=b"\x00\x00"
+        ),
+        speaker=FakeSpeaker(out_dir=tmp_path),
+        vad=FakeVoiceActivityDetector(),
+        config=config,
+    )
 
     shutdown = asyncio.Event()
     ready = asyncio.Event()
@@ -208,7 +238,7 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         lifecycle.run(
             bus=bus,
             clock=clock,
-            state=StateManager(bus=bus, clock=clock),
+            state=state,
             adapter_health={"display": True},
             notifier=FakeServiceNotifier(),
             watchdog_interval_s=0,
