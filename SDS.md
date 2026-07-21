@@ -1222,6 +1222,8 @@ Tier 1 is pure local state machine — the face is *already correct* before the 
 
 That WAV bank — degraded speech, thinking cues, boot chime — is perhaps 20 short files. It is the least glamorous deliverable in the project and it does more for perceived quality than any optimisation in §11.
 
+**How the bank is structured (AVID-80).** The ~20 clips are named, not pathed: `domain/cues.py` holds a pure `Cue` enum (the vocabulary — boot chime, "hmm" cues, connection/comprehension/error/farewell phrases), and `services/cue_bank.py` holds the `CUE_FILES` manifest binding each `Cue` to a shipped WAV filename plus `CueBank`, which resolves a cue to a file under a **config-injected** base directory (`[cues] dir`, wired in AVID-81) and plays it through the existing `Speaker.play_file()` port. So a caller asks for `Cue.ONE_MOMENT`, never a filesystem path, and the `ai`/`conversation` layers stay free of asset paths. Playing a cue is a best-effort **direct awaited call**, not an event (§3.5.1) — losing it is a perceived-quality miss, not a correctness bug — so a missing directory or file is logged with the turn's correlation id and swallowed, never allowed to crash a turn. All clips are 24 kHz mono 16-bit to match the §6.2.4 playback format. *When* each cue plays (the 600 ms thinking-cue timer above, the boot chime at boot, a degraded phrase on a dropped session) is `ConversationService`'s call in M5; M4 only proves the bank plays on demand with zero network.
+
 ## 6.10 Cost model — SPK-1's target
 
 **All figures verified mid-July 2026. Re-verify before use.**
