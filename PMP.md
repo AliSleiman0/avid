@@ -218,7 +218,7 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M1** | **Pi boots to app** | 1 | Pi cold-boots, systemd starts the app, it reaches IDLE with all-fake adapters, watchdog restarts it when killed. | **5** | M | 13 |
 | **M2** | **HAL real** | 2 | Every port has a real adapter that passes the identical contract test suite as its fake. Camera, servo, mic, speaker, display all individually proven. | **8** | M | 21 |
 | **M3** | **The face lives** | 3 | All 7 affects render on the physical 3.5″ display; a scripted affect sequence plays; measured affect→pixel latency ≤150 ms. | **8** | M | 29 |
-| **M4** | **Audio loop** | 4 | Speak into the ReSpeaker, hear it from the speaker with ≤200 ms round-trip. Local VAD correctly gates speech vs. silence over a 10-minute recording. | **8** | M | 37 |
+| **M4** | **Audio loop** | 4 | Speak into the USB mic, hear it from the speaker with ≤200 ms round-trip. Local VAD correctly gates speech vs. silence over a 10-minute recording. | **8** | M | 37 |
 | **M5** | **It talks** | 5 | Full UC-01. Two-minute conversation. Barge-in works. Latency histogram meets O1. Cost meter shows projected monthly spend meeting O7. Survives a Wi-Fi unplug and recovers. | **13** | **L** | 50 |
 | **M6** | **It has a personality** | 6 | Same question asked in two personality configs yields recognizably different responses. Affect inferred from response drives the face without `ai` importing `display`. | **5** | M | 55 |
 | **M7** | **It remembers** | 7 | Full UC-02 + UC-05. Tell it 20 facts, restart the process, recall all 20. Semantic query returns the right fact. Contradictory fact supersedes correctly. "Forget that" deletes. | **13** | **L** | 68 |

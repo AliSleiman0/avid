@@ -7,8 +7,8 @@ these structurally; ``main.py`` alone wires which one (P2, P3).
 
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
-:class:`Speaker`. ``Embedder`` and ``VoiceActivityDetector`` (SDS §9.3) land with
-their adapters in a later issue.
+:class:`Speaker`, :class:`VoiceActivityDetector`. ``Embedder`` (SDS §9.3) lands
+with its adapter in a later issue.
 
 Every port is ``@runtime_checkable`` (AVID-11 acceptance). Note that
 ``isinstance`` against a runtime-checkable ``Protocol`` verifies member *presence*,
@@ -202,4 +202,28 @@ class Speaker(Protocol):
 
     async def stop(self) -> None:
         """Stop immediately. On the port so barge-in is genuinely instant."""
+        ...
+
+
+@runtime_checkable
+class VoiceActivityDetector(Protocol):
+    """The local session gate — is this frame speech, or silence/noise (SDS §6.3, §9.3)?
+
+    The one question the AI-cost gate turns on (ADR-007, *accepted*): no Realtime session
+    opens until this says speech. Streaming continuously is ~$670/mo; gating on local VAD is
+    ~$4/mo (SPK-1, SDS §6.10) — so the port exists to keep a paid session from opening on a
+    door slam, which a loudness threshold cannot tell from a word (SDS §6.3).
+
+    The port is defined by *what the application needs* — a per-frame yes/no on an
+    :class:`~avid.core.hal.AudioChunk` — never by what the detector offers: no probabilities,
+    no model handles, no vendor types cross it. Choosing a probability threshold is the
+    **adapter's** business, so swapping Silero for another detector is one adapter, not a
+    ripple through the service (P2).
+    """
+
+    def is_speech(self, frame: AudioChunk) -> bool:
+        """Whether *frame* is speech. **Synchronous and fast** — SDS §9.3 budgets <5 ms,
+        called on every frame — so a real detector runs inference in-process rather than
+        blocking the loop (the sub-ms Silero cost stays under the 50 ms slow-callback gate,
+        P8), and the caller (AudioService) invokes it inline, not via an executor."""
         ...

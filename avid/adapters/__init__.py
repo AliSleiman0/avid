@@ -17,6 +17,7 @@ from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
 from avid.adapters.servo import FakeServo, Pca9685Servo
 from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
+from avid.adapters.vad import FakeVoiceActivityDetector, SileroVad
 
 __all__ = [
     # Camera (AVID-51)
@@ -31,6 +32,9 @@ __all__ = [
     # Speaker (AVID-54)
     "FakeSpeaker",
     "AlsaSpeaker",
+    # VoiceActivityDetector (AVID-77 / #85)
+    "FakeVoiceActivityDetector",
+    "SileroVad",
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",

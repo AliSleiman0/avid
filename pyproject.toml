@@ -20,12 +20,16 @@ avid = "avid.main:main"
 # (ADR-008). It is imported only inside Picamera2Camera.
 #
 # `adafruit-circuitpython-servokit` drives the PCA9685 (AVID-52) and `pyalsaaudio` captures
-# from the ReSpeaker (AVID-53); both ARE pip-installable and belong to this Pi-only extra
-# (`uv sync --extra pi` on the Pi). Each is imported only inside its one adapter, lazily, so
-# the modules load off-Pi where the extra is absent.
+# from the USB mic (AVID-53); `onnxruntime`+`numpy` run the Silero v5 VAD model (AVID-77). All
+# ARE pip-installable and belong to this Pi-only extra (`uv sync --extra pi` on the Pi). Each is
+# imported only inside its one adapter, lazily, so the modules load off-Pi where the extra is
+# absent. (Silero is pure-CPU and would run off-Pi too, but its contract's real leg is Pi-gated
+# like the other HALs — SDS §14.4 — so the ~1 MB model and these libs never ship to CI.)
 pi = [
     "adafruit-circuitpython-servokit>=1.3",
     "pyalsaaudio>=0.10",
+    "onnxruntime>=1.16",
+    "numpy>=1.24",
 ]
 
 [dependency-groups]
@@ -77,12 +81,21 @@ platform = "linux"
 strict = true
 files = ["avid"]
 
-# picamera2/libcamera (AVID-51), adafruit_servokit (AVID-52) and alsaaudio (AVID-53) are
-# Pi-only, unstubbed, and absent off the Pi (ADR-008, SPK-5). Each is imported lazily only
-# inside its one adapter; this override lets mypy resolve those imports as Any instead of
-# erroring, without a per-line `# type: ignore`.
+# picamera2/libcamera (AVID-51), adafruit_servokit (AVID-52), alsaaudio (AVID-53) and
+# onnxruntime+numpy (AVID-77) are Pi-only (the `pi` extra), unstubbed *in the CI/mypy env where
+# the extra is absent* (ADR-008, SPK-5). Each is imported lazily only inside its one adapter; this
+# override lets mypy resolve those imports as Any instead of erroring, without a per-line
+# `# type: ignore`. numpy is here for the same reason the others are — it is not installed off-Pi,
+# so mypy cannot find it — and vad.py already handles its arrays as Any regardless.
 [[tool.mypy.overrides]]
-module = ["picamera2.*", "libcamera.*", "adafruit_servokit.*", "alsaaudio.*"]
+module = [
+    "picamera2.*",
+    "libcamera.*",
+    "adafruit_servokit.*",
+    "alsaaudio.*",
+    "onnxruntime.*",
+    "numpy.*",
+]
 ignore_missing_imports = true
 
 [tool.coverage.run]
