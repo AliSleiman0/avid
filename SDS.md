@@ -443,7 +443,7 @@ Full text in Appendix A. Summary:
 | ADR-004 | Memory is owned by the application, not the model. The model gets tools. | Accepted |
 | ADR-005 | SQLite with WAL for v1; vectors as BLOBs + brute-force cosine | Accepted |
 | ADR-006 | Personality is composed instruction text + post-hoc affect mapping, not fine-tuning | Accepted |
-| ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Proposed** — see §6.10 |
+| ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Accepted** — see §6.3, §6.10 |
 | ADR-008 | Python 3.13 on PC, system Python 3.11 + `--system-site-packages` on Pi | **Proposed** — see §3.11 |
 | ADR-009 | Pan+tilt (2 servo) target, 1-servo fallback; gesture engine is axis-agnostic | **Proposed** — needs your call |
 | ADR-012 | Faces compose to RGB888 bytes in the stdlib; no drawing-library dependency | Accepted — see §3.6.4 |
@@ -581,7 +581,7 @@ A queue hitting its bound publishes `system.handler_failed` with a `queue_overfl
 │  Config      │◄───┤ AffectService        │    │ FramebufferDisplay  │
 │  Lifecycle   │◄───┤ PresenceService      ├───►│ Picamera2Camera     │
 │              │◄───┤ ExpressionService    ├───►│ Pca9685Servo        │
-│              │◄───┤ BehaviorService      │    │ RespeakerMic        │
+│              │◄───┤ BehaviorService      │    │ AlsaMicrophone      │
 │              │◄───┤ AudioService         ├───►│ AlsaSpeaker         │
 └──────────────┘    └──────────┬───────────┘    └─────────────────────┘
                                │ depends on
@@ -791,6 +791,10 @@ class Speaker(Protocol):
     async def play(self, chunk: AudioChunk) -> None: ...
     async def play_file(self, path: Path) -> None: ...   # degraded-mode WAV bank
     async def stop(self) -> None: ...                     # barge-in
+
+
+class VoiceActivityDetector(Protocol):   # §6.3 / ADR-007 — the session gate
+    def is_speech(self, frame: AudioChunk) -> bool: ...  # sync; MUST return <5 ms (§9.3)
 ```
 
 Two details worth defending:
