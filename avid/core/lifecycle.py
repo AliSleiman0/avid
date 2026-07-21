@@ -14,13 +14,13 @@ import asyncio
 import contextlib
 import logging
 import signal
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 from uuid import uuid4
 
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.ports import Clock, ServiceNotifier
+from avid.core.ports import Clock, Service, ServiceNotifier
 from avid.core.state_manager import StateManager
 from avid.domain import (
     SystemShuttingDown,
@@ -88,6 +88,7 @@ async def run(
     adapter_health: Mapping[str, bool],
     notifier: ServiceNotifier,
     health: ControlSurface | None = None,
+    services: Sequence[Service] = (),
     watchdog_interval_s: float = 15.0,
     shutdown: asyncio.Event | None = None,
     ready: asyncio.Event | None = None,
@@ -96,11 +97,19 @@ async def run(
 
     Starts *bus* and the *health* control surface, publishes ``system.started`` (with
     the *adapter_health* snapshot), drives *state* ``BOOTING -> IDLE`` (which publishes
-    ``state.transitioned``), announces ``READY=1`` through *notifier* — in that order, so
-    nothing is told the robot is up before it actually is — then pings ``WATCHDOG=1`` every
-    *watchdog_interval_s* while it waits for SIGTERM/SIGINT (or *shutdown* being set —
-    the test seam). On shutdown it announces ``STOPPING=1``, publishes
-    ``system.shutting_down``, stops the health surface, and returns ``0``.
+    ``state.transitioned``), starts each of *services*, announces ``READY=1`` through
+    *notifier* — in that order, so nothing is told the robot is up before it actually is
+    — then pings ``WATCHDOG=1`` every *watchdog_interval_s* while it waits for
+    SIGTERM/SIGINT (or *shutdown* being set — the test seam). On shutdown it announces
+    ``STOPPING=1``, publishes ``system.shutting_down``, stops the services and the health
+    surface, and returns ``0``.
+
+    *services* are the SDS §9.2 use-case services whose owned tasks the loop manages
+    (their subscriptions were registered by the composition root before ``bus.start()``,
+    P3). Empty by default: the reactive services (``AffectService``/``ExpressionService``)
+    have no owned task, so nothing needed managing until M4's ``AudioService`` — the
+    composition root passes only the services that do. ``start`` runs after IDLE and
+    before READY; ``stop`` runs on the way out, before the bus context closes.
 
     *shutdown* and *ready* are injectable for tests: a test sets *shutdown* to stop the
     loop deterministically and awaits *ready* to know IDLE was reached. In production
@@ -129,6 +138,13 @@ async def run(
                 Trigger.SYSTEM_STARTED, correlation_id=boot_id
             )
             _log.info("reached %s [correlation_id=%s]", reached.name, boot_id)
+            # Start every service's owned task now — after IDLE, before READY — so the
+            # supervisor is told the robot is up only once its services' loops are
+            # actually live (a purely reactive service's start() is a no-op). Their
+            # subscriptions were registered by the composition root before bus.start()
+            # (P3); this only spins up background work, e.g. AudioService's mic loop.
+            for service in services:
+                await service.start()
             await notifier.ready()
             if ready is not None:
                 ready.set()
@@ -166,6 +182,11 @@ async def run(
                     )
                 )
         finally:
+            # Stop services before the health surface and the bus context exit, so their
+            # loops are quiesced within the §9.2 5 s budget while the bus they publish to
+            # is still up. Reverse order, mirroring resource-teardown convention.
+            for service in reversed(services):
+                await service.stop()
             if health is not None:
                 await health.stop()
 

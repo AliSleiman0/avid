@@ -62,6 +62,7 @@ name = Services do not import each other (P5)
 type = independence
 modules =
     avid.services.affect
+    avid.services.audio
     avid.services.expression
 # P5: no module reaches through another — cross-module effect happens via the bus,
 # never an import. Dormant since M0 for want of real service modules; activated by

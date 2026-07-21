@@ -40,6 +40,25 @@ class _RecordingSurface:
         self.calls.append("stop")
 
 
+class _RecordingService:
+    """A stand-in :class:`~avid.core.ports.Service` that records its start/stop calls —
+    AudioService's role (an owned task the loop manages), without a real mic loop."""
+
+    name = "RecordingService"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def start(self) -> None:
+        self.calls.append("start")
+
+    async def stop(self) -> None:
+        self.calls.append("stop")
+
+    def subscriptions(self) -> tuple[()]:
+        return ()
+
+
 async def _wait_until_parked(clock: FakeClock) -> None:
     """Yield until the watchdog pinger has registered its sleeper on *clock*, so a
     following ``advance`` actually crosses a live deadline. Without this, the ping task
@@ -243,6 +262,38 @@ async def test_health_surface_started_before_ready_and_stopped_on_exit() -> None
     shutdown.set()
     await asyncio.wait_for(task, timeout=1.0)
     assert health.calls == ["start", "stop"]
+
+
+async def test_services_are_started_before_ready_and_stopped_on_exit() -> None:
+    """AVID-79: the loop owns each service's task — started after IDLE and before READY
+    (so the supervisor hears READY only once the loops are live), stopped on the way out."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    service = _RecordingService()
+    shutdown = asyncio.Event()
+    ready = asyncio.Event()
+
+    task = asyncio.create_task(
+        lifecycle.run(
+            bus=bus,
+            clock=clock,
+            state=StateManager(bus=bus, clock=clock),
+            adapter_health={"display": True},
+            notifier=FakeServiceNotifier(),
+            services=(service,),
+            watchdog_interval_s=0,
+            shutdown=shutdown,
+            ready=ready,
+        )
+    )
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+    # Live before readiness is announced — the audio loop is consuming by the time the
+    # supervisor is told the robot is up.
+    assert service.calls == ["start"]
+
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert service.calls == ["start", "stop"]
 
 
 async def test_watchdog_pings_on_the_configured_interval() -> None:
