@@ -2,11 +2,18 @@
 
 No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``pydantic`` (P1). The domain imports nothing else from ``avid``. Home of the
-``Event`` envelope (AVID-6), ``RobotState`` + the transition table (AVID-7), and
-``Affect`` (AVID-8).
+``Event`` envelope (AVID-6), ``RobotState`` + the transition table (AVID-7),
+``Affect`` (AVID-8), and the ``audio.*`` events + pre-roll ring buffer (#86).
 """
 
 from avid.domain.affect import Affect, AffectChanged, AffectTier
+from avid.domain.audio import (
+    AudioPlaybackFinished,
+    AudioPlaybackStarted,
+    AudioPreRoll,
+    AudioSpeechEnded,
+    AudioSpeechStarted,
+)
 from avid.domain.events import (
     EVENT_DOMAINS,
     REASON_HANDLER_RAISED,
@@ -32,6 +39,12 @@ __all__ = [
     "Affect",
     "AffectChanged",
     "AffectTier",
+    # audio.* events + pre-roll ring buffer (#86)
+    "AudioPlaybackFinished",
+    "AudioPlaybackStarted",
+    "AudioPreRoll",
+    "AudioSpeechEnded",
+    "AudioSpeechStarted",
     # Event envelope (AVID-6)
     "EVENT_DOMAINS",
     "REASON_HANDLER_RAISED",
