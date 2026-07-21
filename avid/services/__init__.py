@@ -6,11 +6,14 @@ never imports ``avid.adapters`` (P2, P5).
 """
 
 from avid.services.affect import AffectService
+from avid.services.audio import AudioService
 from avid.services.expression import ExpressionService
 
 __all__ = [
     # The affect decider (AVID-71)
     "AffectService",
+    # The audio loop — VAD gate, pre-roll, audio.* facts (AVID-79)
+    "AudioService",
     # The drawer (AVID-72) — the other half of the SDS §3.6.1 split
     "ExpressionService",
 ]

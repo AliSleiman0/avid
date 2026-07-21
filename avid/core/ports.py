@@ -10,6 +10,14 @@ Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clo
 :class:`Speaker`, :class:`VoiceActivityDetector`. ``Embedder`` (SDS §9.3) lands
 with its adapter in a later issue.
 
+:class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
+use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
+``lifecycle.run`` can own their loops and ``main.py`` can register their subscriptions
+without naming a concrete service (P2). It lives here beside the ports because it is the
+same kind of thing — a structural contract the application depends on rather than a
+class — even though what it abstracts is inward (a service) rather than outward (a
+device).
+
 Every port is ``@runtime_checkable`` (AVID-11 acceptance). Note that
 ``isinstance`` against a runtime-checkable ``Protocol`` verifies member *presence*,
 not signatures — the type checker enforces the shapes; the decorator lets the
@@ -23,7 +31,7 @@ never imports back — the dependency is one-directional, no cycle.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -226,4 +234,39 @@ class VoiceActivityDetector(Protocol):
         called on every frame — so a real detector runs inference in-process rather than
         blocking the loop (the sub-ms Silero cost stays under the 50 ms slow-callback gate,
         P8), and the caller (AudioService) invokes it inline, not via an executor."""
+        ...
+
+
+@runtime_checkable
+class Service(Protocol):
+    """A use-case service, as the run loop and composition root need it (SDS §9.2).
+
+    The four-member shape ``AffectService`` and ``ExpressionService`` already have —
+    ``name`` / ``start`` / ``stop`` / ``subscriptions`` — named at last, because M4's
+    :class:`~avid.services.audio.AudioService` is the first service that owns a
+    background task (the mic-consume loop) and so is the first that ``lifecycle.run``
+    must actually ``start``/``stop`` (AVID-72/73 deferred the Protocol precisely until a
+    service needed it). Structural, so the three services satisfy it with no edit and the
+    loop depends on none of them by name (P2).
+
+    Two consumers, split by concern: the **run loop** owns the lifetime (``start``/
+    ``stop`` — a purely reactive service makes both no-ops, as the existing two do), while
+    the **composition root** registers the declared subscriptions before ``bus.start()``.
+    ``subscriptions()`` stays on the shape — even though ``lifecycle.run`` never calls it —
+    so ``main.py`` can iterate it typed rather than reaching into a concrete class.
+    """
+
+    name: str
+
+    async def start(self) -> None:
+        """Begin any owned task (e.g. the mic loop). A no-op for a reactive service."""
+        ...
+
+    async def stop(self) -> None:
+        """Unwind within the §9.2 5 s budget. Idempotent; a no-op for a reactive service."""
+        ...
+
+    def subscriptions(self) -> Sequence[Subscription]:
+        """Declare — not register — what this service wants to hear (SDS §9.2). The
+        composition root registers these before the bus starts (P3)."""
         ...
