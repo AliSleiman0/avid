@@ -1,8 +1,9 @@
 """Regenerate the degraded-mode WAV cue bank in ``assets/cues/`` (AVID-80, SDS §6.9).
 
-A **dev-only** tool — it is not imported by the application, not run in CI, and lives
-outside ``avid/`` so it is clear of ruff/mypy/coverage. The committed WAVs are what ship;
-this script only documents *how* they were made and lets them be regenerated.
+A **dev-only** tool — it is not imported by the application and not run in CI, and lives
+outside ``avid/`` so it is clear of mypy and coverage (the CI ``lint`` job does run ``ruff``
+over the whole repo, so it stays formatted). The committed WAVs are what ship; this script
+only documents *how* they were made and lets them be regenerated.
 
 Two sources, both offline and zero-network:
 
@@ -90,7 +91,9 @@ def _synth_boot_chime(path: Path) -> None:
             # Let the final note ring a little longer for a settled ending.
             if i == len(notes) - 1:
                 env = min(1.0, k / (0.01 * _SAMPLE_RATE)) * (1.0 - k / n) ** 0.5
-            samples.append(int(amplitude * env * math.sin(2 * math.pi * freq * t) * 32767))
+            samples.append(
+                int(amplitude * env * math.sin(2 * math.pi * freq * t) * 32767)
+            )
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
