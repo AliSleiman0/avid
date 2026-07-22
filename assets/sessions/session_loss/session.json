@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "events": [
+    {"delay_ms": 0, "type": "user_transcript", "text": "what time is it in Tokyo?", "is_approximate": false},
+    {"delay_ms": 300, "type": "assistant_transcript", "text": "In Tokyo it's currently", "item_id": "item_0"},
+    {"delay_ms": 20, "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_a.wav"},
+    {"delay_ms": 40, "type": "session_closed", "cause": "network"}
+  ]
+}

@@ -2364,6 +2364,23 @@ A fake is a working implementation. `FakeServo` records a movement trace; the te
 
 The one permitted mock boundary is the OpenAI WSS, and even there we prefer `ReplayRealtimeClient` — a recorded session played back deterministically. Recorded once, replayed forever, with no key and no network. Tier 3 depends on it.
 
+**Session fixture format (AVID-101).** A recorded session is a **directory** under `assets/sessions/<name>/` — a shipped runtime asset, reusing the `assets/cues/` / `CUE_FILES` convention (§6.9), because `ReplayRealtimeClient` is a real simulator mode (`realtime = "replay"`, §9.6) and not merely a test double. Each directory holds one `session.json` manifest plus the small WAV clips it references:
+
+```json
+{
+  "format": 1,
+  "events": [
+    {"delay_ms": 0,   "type": "user_transcript",       "text": "...", "is_approximate": false},
+    {"delay_ms": 300, "type": "assistant_transcript",  "text": "...", "item_id": "item_0"},
+    {"delay_ms": 20,  "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_a.wav"},
+    {"delay_ms": 200, "type": "turn_done",             "usage": {"input_tokens": 320, "cached_input_tokens": 256, "output_tokens": 48}},
+    {"delay_ms": 40,  "type": "session_closed",        "cause": "network"}
+  ]
+}
+```
+
+`type` selects a neutral `RealtimeEvent` member (`core/realtime.py`); its remaining keys are that member's fields. `delay_ms` is the gap *before* the event, replayed on the injected `Clock` (never wall time), so a `FakeClock` steps the whole timeline instantly and deterministically. `assistant_audio_chunk.wav` is a filename resolved beside the manifest and loaded as one `AudioChunk` (24 kHz mono S16_LE, the §6.2.4 playback format). Three fixtures ship — a normal two-turn conversation, a barge-in (approximate user transcript mid-reply plus a post-truncation delta), and a mid-turn session loss. The openai adapter's `--capture` mode (AVID-105) writes this exact format from a live session, so the fixtures cannot drift from real API behaviour.
+
 ## 14.4 Contract tests (P6)
 
 One test suite per port. It runs against **every** adapter — real and fake — and they must be indistinguishable through the interface. This is what makes the HAL an abstraction rather than an aspiration.
