@@ -1,32 +1,38 @@
-"""Contract + replay-adapter tests for the ``RealtimeClient`` port (#100 skeleton, #101 fake).
+"""Contract + adapter tests for the ``RealtimeClient`` port (#100 skeleton, #101 fake, #105 real).
 
 A port's contract test runs against *every* adapter, so a fake can never quietly drift from
 the real thing (P6). ``RealtimeClient`` has two adapters: the deterministic
 :class:`~avid.adapters.realtime.ReplayRealtimeClient` (#101 — recorded once, replayed forever,
-no key, no network) and the ``openai`` WSS client (#105). #100 landed this file as a skeleton
-with both legs skipped; #101 flips the ``"fake"`` leg **live** — constructing the replay
-adapter from a committed ``assets/sessions/`` fixture — exactly the placeholder-skip pattern
-AVID-50 laid and #85 filled with ``SileroVad``. The ``"real"`` leg stays skipped until #105.
+no key, no network) and the :class:`~avid.adapters.realtime.OpenAIRealtimeClient` WSS client
+(#105). #100 landed this file as a skeleton with both legs skipped; #101 flipped the ``"fake"``
+leg **live**; #105 flips the ``"real"`` leg live but **network-gated** — it constructs only when a
+key is present and ``AVID_LIVE`` is set, skipping in CI exactly like the Pi HAL real-legs
+(SDS §14.4). That is the AVID-50 → #85 placeholder-skip pattern, one leg at a time.
 
 The shared block asserts an adapter is port-shaped and that
 :meth:`~avid.core.ports.RealtimeClient.events` is an async iterator. The
-**ReplayRealtimeClient tail** then drives the deeper behaviour the fake owns (SDS §14.3): each
-committed fixture replays its recorded :class:`~avid.core.realtime.RealtimeEvent` sequence,
-timing runs entirely on the injected ``FakeClock`` (AC-4, no wall clock), and the barge-in /
-session-loss / empty / malformed cases degrade as documented (AC-5).
+**ReplayRealtimeClient tail** then drives the deeper behaviour the fake owns (SDS §14.3), and the
+**mapping tail** unit-tests the openai adapter's vendor→neutral translation offline, with canned
+JSON frames and no socket — the only part of the real client that can be proven without network.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 
 from avid.adapters.clock import FakeClock
-from avid.adapters.realtime import ReplayRealtimeClient
+from avid.adapters.realtime import (
+    OpenAIRealtimeClient,
+    ReplayRealtimeClient,
+    _translate,
+)
+from avid.core.hal import AudioChunk
 from avid.core.ports import RealtimeClient
 from avid.core.realtime import (
     AssistantAudioChunk,
@@ -41,12 +47,24 @@ from avid.core.realtime import (
 # path is resolved from the repo root, not a tests/ subtree.
 _SESSIONS = Path(__file__).resolve().parents[2] / "assets" / "sessions"
 
-# The replay fake is #101 (live below); the openai real is #105 (still skipped). Each param
-# activates as its adapter lands — the AVID-50 → #85 pattern, one leg at a time.
+
+def _live_enabled() -> bool:
+    """Whether the network-gated ``"real"`` leg runs: an ``OPENAI_API_KEY`` **and** an explicit
+    ``AVID_LIVE`` opt-in, so a dev with a key in their env does not spend money on every run and CI
+    (which has neither) always skips — the same shape as ``_hardware.on_pi`` for the Pi legs."""
+    return bool(os.environ.get("OPENAI_API_KEY")) and bool(os.environ.get("AVID_LIVE"))
+
+
+# The replay fake is #101 (live below); the openai real is #105, network-gated: it skips unless a
+# key + AVID_LIVE are present, so CI only ever exercises the fake — like the Pi HAL contract legs.
 _FAKE_REAL_PARAMS = [
     "fake",
     pytest.param(
-        "real", marks=pytest.mark.skip(reason="openai RealtimeClient lands in #105")
+        "real",
+        marks=pytest.mark.skipif(
+            not _live_enabled(),
+            reason="openai RealtimeClient real leg needs OPENAI_API_KEY + AVID_LIVE (network)",
+        ),
     ),
 ]
 
@@ -56,10 +74,18 @@ def client(request: pytest.FixtureRequest) -> RealtimeClient:
     """Every RealtimeClient adapter, real and fake, must satisfy the shared block (P6).
 
     The ``"fake"`` leg is the replay adapter built from the ``two_turn`` recording on a
-    ``FakeClock``; ``"real"`` skips until the openai adapter exists (#105) — no change to the
-    contract, only the fixture."""
-    if request.param == "real":  # pragma: no cover - skipped until #105
-        raise AssertionError("unreachable: the real leg is skipped until #105")
+    ``FakeClock``; ``"real"`` is the openai adapter, constructed from the injected key — and it
+    only reaches here when :func:`_live_enabled` is true, so CI never builds it (no change to the
+    contract, only the fixture)."""
+    if request.param == "real":
+        return OpenAIRealtimeClient(
+            api_key=os.environ["OPENAI_API_KEY"],
+            model="gpt-realtime-mini-2025-12-15",
+            voice="cedar",
+            instructions="You are a test.",
+            max_output_tokens=512,
+            turn_detection={"type": "server_vad"},
+        )
     return ReplayRealtimeClient.from_dir(_SESSIONS / "two_turn", clock=FakeClock())
 
 
@@ -209,3 +235,92 @@ def test_malformed_fixture_raises_at_load_not_mid_replay(
     (tmp_path / "session.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError):
         ReplayRealtimeClient.from_dir(tmp_path, clock=FakeClock())
+
+
+# --- OpenAIRealtimeClient mapping tail (#105): vendor → neutral, offline (AC-1) ------------
+#
+# The only part of the real client provable without a socket: that each Realtime **server**
+# message maps to the right neutral RealtimeEvent (and that no vendor shape crosses). Canned JSON
+# frames, no network — the live round-trip is the network-gated "real" leg above.
+
+
+def test_translate_user_transcript() -> None:
+    event = _translate(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "hello there",
+        }
+    )
+    assert event == UserTranscript(text="hello there", is_approximate=False)
+
+
+def test_translate_assistant_transcript() -> None:
+    event = _translate(
+        {
+            "type": "response.output_audio_transcript.done",
+            "transcript": "hi!",
+            "item_id": "item_7",
+        }
+    )
+    assert event == AssistantTranscript(text="hi!", item_id="item_7")
+
+
+def test_translate_assistant_audio_decodes_base64_pcm() -> None:
+    import base64
+
+    pcm = b"\x01\x02\x03\x04"
+    event = _translate(
+        {
+            "type": "response.output_audio.delta",
+            "delta": base64.b64encode(pcm).decode("ascii"),
+            "item_id": "item_0",
+        }
+    )
+    assert isinstance(event, AssistantAudioChunk)
+    assert event.item_id == "item_0"
+    # Decoded to the §6.2.4 playback format: 24 kHz mono PCM.
+    assert event.chunk == AudioChunk(pcm=pcm, sample_rate=24_000, channels=1)
+
+
+def test_translate_turn_done_maps_the_usage_payload() -> None:
+    event = _translate(
+        {
+            "type": "response.done",
+            "response": {
+                "usage": {
+                    "input_tokens": 320,
+                    "output_tokens": 48,
+                    "input_token_details": {"cached_tokens": 256},
+                }
+            },
+        }
+    )
+    assert isinstance(event, TurnDone)
+    assert event.usage.input_tokens == 320
+    assert event.usage.cached_input_tokens == 256
+    assert event.usage.output_tokens == 48
+
+
+def test_translate_error_becomes_session_closed() -> None:
+    event = _translate({"type": "error", "error": {"type": "server_error"}})
+    assert event == SessionClosed(cause="server_error")
+
+
+def test_translate_ignores_unmodelled_messages() -> None:
+    """A delta/ack we do not surface returns None so the events loop skips it."""
+    assert _translate({"type": "response.output_audio.delta.done"}) is None
+    assert _translate({"type": "input_audio_buffer.speech_started"}) is None
+
+
+def test_openai_client_repr_never_leaks_the_key() -> None:
+    """AC-6: the secret must not reach a log line via ``repr`` (SECURITY.md)."""
+    client = OpenAIRealtimeClient(
+        api_key="sk-super-secret-value",
+        model="gpt-realtime-mini-2025-12-15",
+        voice="cedar",
+        instructions="You are a test.",
+        max_output_tokens=512,
+        turn_detection={"type": "server_vad"},
+    )
+    assert "sk-super-secret-value" not in repr(client)
+    assert isinstance(client, RealtimeClient)  # port-shaped without a connection (P6)
