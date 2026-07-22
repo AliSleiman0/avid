@@ -37,6 +37,7 @@ from avid.core.hal import DisplayFrame
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AffectChanged,
+    AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
     ConversationTurnEnded,
@@ -66,6 +67,7 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ExpressionService.state_transitioned",
     "ConversationService.speech_started",
     "ConversationService.speech_ended",
+    "ConversationService.playback_finished",
     "CostMeterService.turn_ended",
 }
 
@@ -248,14 +250,16 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     assert main(["--config", str(_SIM_TOML)]) == 0
 
     bus = captured["bus"]
-    # Every event type the wired services care about, and nothing else: the two reactive
-    # faces, ConversationService's two ``audio.*`` turn origins (#102), and the cost meter's
+    # Every event type the wired services care about, and nothing else: the two reactive faces,
+    # ConversationService's ``audio.speech_started`` origin + ``audio.speech_ended`` (#102) + its
+    # ``audio.playback_finished`` barge-in feed (#104), and the cost meter's
     # ``conversation.turn_ended`` (#105).
     assert set(bus._subs) == {
         AffectChanged,
         StateTransitioned,
         AudioSpeechStarted,
         AudioSpeechEnded,
+        AudioPlaybackFinished,
         ConversationTurnEnded,
     }
 
