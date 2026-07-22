@@ -25,12 +25,14 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NamedTuple
+from uuid import uuid4
 
 from avid.adapters.clock import FakeClock
 from avid.adapters.microphone import FakeMicrophone
 from avid.adapters.speaker import FakeSpeaker
 from avid.adapters.vad import FakeVoiceActivityDetector
 from avid.core.event_bus import AsyncioEventBus
+from avid.core.hal import AudioChunk
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioPlaybackFinished,
@@ -62,6 +64,17 @@ _CHANNELS = 1
 _CHUNK_MS = 10
 _FRAME_BYTES = _SAMPLE_RATE * _CHANNELS * 2 * _CHUNK_MS // 1000  # 320
 _BYTES_PER_MS = _SAMPLE_RATE * _CHANNELS * 2 // 1000  # 32
+
+# Assistant playback is 24 kHz mono S16_LE (§6.2.4), distinct from the 16 kHz capture rate.
+_OUT_RATE = 24000
+
+
+def _out_chunk(*, ms: int, fill: int) -> AudioChunk:
+    """One ``ms``-long assistant PCM delta at 24 kHz — a ``play()`` argument."""
+    length = _OUT_RATE * _CHANNELS * 2 * ms // 1000
+    return AudioChunk(
+        pcm=bytes([fill]) * length, sample_rate=_OUT_RATE, channels=_CHANNELS
+    )
 
 
 class _Collector:
@@ -115,6 +128,7 @@ async def _rig(
     initial: RobotState = RobotState.IDLE,
     silence_hold_ms: int = 20,
     ring_buffer_ms: int = 300,
+    loopback: bool = False,
     speaker_factory: Callable[[StateManager], FakeSpeaker] | None = None,
     extra_subs: tuple[_ExtraSub, ...] = (),
 ) -> AsyncIterator[Rig]:
@@ -152,6 +166,7 @@ async def _rig(
         sample_rate=_SAMPLE_RATE,
         channels=_CHANNELS,
         silence_hold_ms=silence_hold_ms,
+        loopback=loopback,
     )
     for cls in _COLLECTED:
         bus.subscribe(cls, collector.handle, name=f"test.{cls.__name__}")
@@ -184,9 +199,10 @@ def test_played_ms_is_bytes_over_the_chunks_own_format() -> None:
 # --- the service shape (SDS §9.2) ----------------------------------------------------------
 
 
-async def test_subscriptions_are_empty_at_m4() -> None:
-    """AC-4 seam: the conversation.* Event types AudioService will subscribe to do not
-    exist until M5, so there is nothing to declare — the loopback stands in for now."""
+async def test_audioservice_subscribes_to_nothing() -> None:
+    """AC-3 drift fix: AudioService is **not** a ``conversation.*`` subscriber — the assistant
+    audio seam is the ``TurnSink`` port it implements (direct calls, §9.1.4), not the bus. So
+    ``subscriptions()`` is empty, permanently."""
     async with _rig(vad_script=[False]) as rig:
         assert rig.service.subscriptions() == ()
         assert rig.service.name == "AudioService"
@@ -206,14 +222,15 @@ async def test_start_is_idempotent_and_stop_finalizes_the_stream() -> None:
     await rig.service.stop()
 
 
-# --- AC-1 / AC-2 / AC-3: a full turn -------------------------------------------------------
+# --- the loopback path (loopback=True), kept for the #91 on-Pi transport gate --------------
 
 
 async def test_a_full_turn_publishes_the_four_audio_facts_on_one_correlation_id() -> (
     None
 ):
-    """The happy path end to end: two silent frames of pre-roll, three of speech, two of
-    trailing silence to close it. Exactly one of each fact, all on the minted turn id.
+    """The loopback happy path end to end: two silent frames of pre-roll, three of speech, two
+    of trailing silence to close it. Exactly one of each fact, all on the minted turn id. This
+    is the M4 echo, retained under ``loopback=True`` for the transport gate (#91).
 
     ring_buffer_ms = the drained pre-roll: frames 0,1 (silence) plus frame 2 (the first
     speech frame, appended before the drain) = 3 frames x 10 ms = 30 ms. duration_ms = the
@@ -221,7 +238,7 @@ async def test_a_full_turn_publishes_the_four_audio_facts_on_one_correlation_id(
     whole captured clip, frames 0..6 = 7 x 320 B = 2240 B over 32 B/ms = 70 ms.
     """
     script = [False, False, True, True, True, False, False]
-    async with _rig(vad_script=script) as rig:
+    async with _rig(vad_script=script, loopback=True) as rig:
         await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
         await rig.collector.settle()
 
@@ -281,7 +298,7 @@ async def test_a_single_silent_frame_does_not_end_the_turn() -> None:
         False,
         False,
     ]  # the lone False at index 1 is a gap
-    async with _rig(vad_script=script) as rig:
+    async with _rig(vad_script=script, loopback=True) as rig:
         await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
         await rig.collector.settle()
 
@@ -374,3 +391,107 @@ async def test_a_raising_subscriber_is_isolated_and_the_loop_keeps_running() -> 
         assert isinstance(failure, SystemHandlerFailed)
         assert failure.handler == "test.raiser"
         assert failure.reason == REASON_HANDLER_RAISED
+
+
+# --- #103: the TurnSink seam (loopback=False) ----------------------------------------------
+
+
+async def test_seam_hands_the_captured_utterance_up_the_mic_stream() -> None:
+    """AC-1: in seam mode a completed utterance is pushed up ``mic()`` (for ConversationService
+    to forward to the model), not echoed to the speaker. The whole captured clip crosses at the
+    16 kHz capture format, and nothing is played."""
+    script = [False, False, True, True, True, False, False]
+    async with _rig(vad_script=script, loopback=False) as rig:
+        await rig.collector.wait_for_type(AudioSpeechEnded, 1)
+        chunk = await asyncio.wait_for(anext(rig.service.mic()), _TIMEOUT_S)
+        assert isinstance(chunk, AudioChunk)
+        assert chunk.sample_rate == _SAMPLE_RATE  # 16 kHz capture, not 24 kHz playback
+        assert (
+            len(chunk.pcm) == 7 * _FRAME_BYTES
+        )  # frames 0..6, the whole captured clip
+        assert rig.speaker.played == []  # no loopback echo in seam mode
+
+
+async def test_seam_play_starts_playback_and_enters_speaking() -> None:
+    """AC-2: the first assistant delta publishes ``audio.playback_started`` (tagged by item and
+    the turn's minted id), drives THINKING→SPEAKING, and reaches the speaker."""
+    async with _rig(
+        vad_script=[False], initial=RobotState.THINKING, loopback=False
+    ) as rig:
+        cid = uuid4()
+        rig.service._turn_id = cid  # the id AudioService minted at speech_started
+        await rig.service.play(_out_chunk(ms=20, fill=0x11), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackStarted, 1)
+
+        assert rig.state.state is RobotState.SPEAKING
+        started = rig.collector.of_type(AudioPlaybackStarted)[0]
+        assert isinstance(started, AudioPlaybackStarted)
+        assert started.item_id == "item_0"
+        assert started.correlation_id == cid
+        assert len(rig.speaker.played) == 1  # the delta streamed to the speaker
+
+
+async def test_seam_end_response_finishes_playback_and_returns_to_idle() -> None:
+    """AC-2: ``end_response`` closes a multi-delta response — one started/finished pair, the two
+    deltas' ms accumulated, ``truncated=False``, and SPEAKING→IDLE."""
+    async with _rig(
+        vad_script=[False], initial=RobotState.THINKING, loopback=False
+    ) as rig:
+        cid = uuid4()
+        rig.service._turn_id = cid
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.play(_out_chunk(ms=20, fill=2), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackStarted, 1)
+        assert rig.state.state is RobotState.SPEAKING
+
+        await rig.service.end_response()
+        await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
+
+        assert rig.state.state is RobotState.IDLE
+        fin = rig.collector.of_type(AudioPlaybackFinished)[0]
+        assert isinstance(fin, AudioPlaybackFinished)
+        assert fin.item_id == "item_0"
+        assert fin.truncated is False
+        assert fin.correlation_id == cid
+        assert fin.played_ms == 40  # two 20 ms deltas @ 24 kHz
+        assert (
+            len(rig.collector.of_type(AudioPlaybackStarted)) == 1
+        )  # one pair, not two
+
+
+async def test_seam_end_response_is_a_noop_when_nothing_is_playing() -> None:
+    """AC-2: a turn that produced no audio → ``end_response`` publishes nothing and does not
+    touch the state machine (no spurious SPEAKING→IDLE)."""
+    async with _rig(
+        vad_script=[False], initial=RobotState.THINKING, loopback=False
+    ) as rig:
+        await rig.service.end_response()
+        await rig.collector.settle()
+        assert rig.collector.of_type(AudioPlaybackFinished) == []
+        assert rig.state.state is RobotState.THINKING
+
+
+async def test_seam_interrupt_reports_played_ms_and_marks_truncated() -> None:
+    """AC-1/AC-2: a barge-in ``interrupt`` returns the ms actually emitted, publishes the
+    truncated ``audio.playback_finished`` fact, and is idempotent (0 with nothing playing)."""
+    async with _rig(
+        vad_script=[False], initial=RobotState.THINKING, loopback=False
+    ) as rig:
+        cid = uuid4()
+        rig.service._turn_id = cid
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackStarted, 1)
+
+        played = await rig.service.interrupt()
+        assert played == 20
+        await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
+        fin = rig.collector.of_type(AudioPlaybackFinished)[0]
+        assert isinstance(fin, AudioPlaybackFinished)
+        assert fin.truncated is True
+        assert fin.played_ms == 20
+        assert fin.correlation_id == cid
+
+        # Idempotent: nothing playing now → 0, and no second fact.
+        assert await rig.service.interrupt() == 0
+        await rig.collector.settle()
+        assert len(rig.collector.of_type(AudioPlaybackFinished)) == 1

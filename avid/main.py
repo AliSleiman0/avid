@@ -30,7 +30,6 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
-    FakeTurnSink,
     FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
@@ -55,7 +54,6 @@ from avid.core.ports import (
     ServiceNotifier,
     Servo,
     Speaker,
-    TurnSink,
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
@@ -290,18 +288,6 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
             )
 
 
-def _build_turn_sink(config: Config) -> TurnSink:
-    """Build the ``TurnSink`` — the ``ConvSvc ↔ AudioSvc`` audio seam (§9.1.4, #100/#103).
-
-    ``FakeTurnSink`` is the only implementation today: it records assistant PCM and replays a
-    scripted mic timeline, standing in until the *real* AudioService-backed sink lands with the
-    audio seam (#103), at which point this becomes a config-driven ``match`` like the device
-    adapters. Structured as a builder now so #103 is pure addition, not a wiring change.
-    """
-    _ = config  # the real sink (#103) will read capture params from here
-    return FakeTurnSink()
-
-
 def _build_cue_bank(config: Config, *, speaker: Speaker) -> CueBank:
     """Build the degraded-mode :class:`~avid.services.cue_bank.CueBank` (AVID-80, #102).
 
@@ -337,7 +323,6 @@ def _wire_services(
     speaker: Speaker,
     vad: VoiceActivityDetector,
     realtime: RealtimeClient,
-    turn_sink: TurnSink,
     cues: CueBank,
     config: Config,
 ) -> Sequence[Service]:
@@ -362,11 +347,16 @@ def _wire_services(
     ``AffectService`` and ``ExpressionService`` are purely reactive — no owned task, ``start``/
     ``stop`` are no-ops — so they are wired for their subscriptions and then dropped: every
     ``Subscription`` holds a **bound method** that keeps its instance alive for the life of the
-    bus. ``AudioService`` is different: it owns a mic-consume loop (SDS §9.2), so it is **returned**
-    for :func:`lifecycle.run` to ``start``/``stop`` at the right points in the boot/shutdown order.
-    Its ``subscriptions()`` is empty at M4 (the ``conversation.*`` facts it will hear do not exist
-    until M5), so it registers nothing today — but it goes through the same loop so the day those
-    facts arrive is pure addition, not a wiring change.
+    bus. ``AudioService`` and ``ConversationService`` own tasks (the mic loop; the per-session
+    pump/mic/idle), so they are **returned** for :func:`lifecycle.run` to ``start``/``stop``. Both
+    ``subscriptions()`` sets are small and static — AudioService's is empty (it is *not* a
+    ``conversation.*`` subscriber; the assistant-audio seam is the ``TurnSink`` port it
+    implements, §9.1.4), ConversationService's is the two ``audio.*`` turn origins.
+
+    ``AudioService`` *is* the real ``TurnSink`` (#103): it is built first and injected as
+    ``ConversationService``'s ``sink``, so a turn's audio crosses the two services through the
+    port without either importing the other (P5). ``loopback=False`` selects the M5 seam; the #91
+    transport-gate demo constructs its own AudioService with ``loopback=True``.
     """
     affect = AffectService(bus=bus, clock=clock)
     expression = ExpressionService(bus=bus, display=display, clock=clock)
@@ -381,13 +371,14 @@ def _wire_services(
         sample_rate=config.microphone.sample_rate,
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
+        loopback=False,
     )
     conversation = ConversationService(
         bus=bus,
         clock=clock,
         state=state,
         client=realtime,
-        sink=turn_sink,
+        sink=audio,
         cues=cues,
         session_idle_close_s=config.gate.session_idle_close_s,
     )
@@ -421,7 +412,6 @@ async def _run(config: Config) -> int:
     speaker = _build_speaker(config)
     vad = _build_vad(config)
     realtime = _build_realtime(config, clock=clock)
-    turn_sink = _build_turn_sink(config)
     cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
@@ -452,7 +442,6 @@ async def _run(config: Config) -> int:
         speaker=speaker,
         vad=vad,
         realtime=realtime,
-        turn_sink=turn_sink,
         cues=cues,
         config=config,
     )

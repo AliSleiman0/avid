@@ -120,6 +120,8 @@ async def test_m4_gate_one_turn_loops_back_on_one_correlation_id(
         sample_rate=_SAMPLE_RATE,
         channels=_CHANNELS,
         silence_hold_ms=_SILENCE_HOLD_MS,
+        # The M4 gate proves the transport loopback (no AI client), so echo mode (#103).
+        loopback=True,
     )
 
     collector = _Collector()

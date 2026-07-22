@@ -10,14 +10,14 @@ module ships the fake that stands in until then and forever after in the simulat
 :class:`FakeTurnSink` keeps the port's three promises with no hardware: :meth:`mic` replays a
 **scripted** list of captured frames (the reproducible timeline ``ConversationService`` tests
 drive turns through, exactly like ``FakeMicrophone``/``FakeVoiceActivityDetector``);
-:meth:`play` records each assistant delta; and :meth:`stop` returns a **scriptable**
-``played_ms`` — the honest ``audio_end_ms`` a barge-in test asserts against (§6.2.4). Stdlib
-only.
+:meth:`play` records each assistant delta; :meth:`end_response` counts a normal completion; and
+:meth:`interrupt` returns a **scriptable** ``played_ms`` — the honest ``audio_end_ms`` a barge-in
+test asserts against (§6.2.4). Stdlib only.
 
-The :attr:`played`, :attr:`stops` and :attr:`mic_sent` attributes are advertised as plain
-attributes, deliberately **off** the ``TurnSink`` port (no application reads them back, exactly
-as ``FakeSpeaker.played``/``stops`` are off the ``Speaker`` port) — they are the contract
-suite's observation points. Constructed only by the composition root or a test fixture (P3);
+The :attr:`played`, :attr:`interrupts`, :attr:`responses_ended` and :attr:`mic_sent` attributes
+are advertised as plain attributes, deliberately **off** the ``TurnSink`` port (no application
+reads them back, exactly as ``FakeSpeaker.played``/``stops`` are off the ``Speaker`` port) — they
+are the contract suite's observation points. Constructed only by the composition root or a test fixture (P3);
 everything else depends on the port (P2).
 """
 
@@ -32,11 +32,11 @@ from avid.core.hal import AudioChunk
 class FakeTurnSink:
     """The :class:`~avid.core.ports.TurnSink` fake (P6): scripted mic, recorded playback.
 
-    ``script`` is the mic timeline :meth:`mic` replays; ``played_ms`` is what :meth:`stop`
+    ``script`` is the mic timeline :meth:`mic` replays; ``played_ms`` is what :meth:`interrupt`
     reports the speaker emitted (a fixed, injected figure — the point is that a test *chooses*
     it, so the barge-in ``audio_end_ms`` path is exercised with a known value). The public
-    :attr:`played` list, :attr:`stops` counter and :attr:`mic_sent` counter are the assertable,
-    off-port trace.
+    :attr:`played` list, :attr:`stops` / :attr:`responses_ended` counters and :attr:`mic_sent`
+    counter are the assertable, off-port trace.
     """
 
     def __init__(
@@ -49,7 +49,8 @@ class FakeTurnSink:
         self._played_ms = played_ms
         # Advertised, off the port (the contract's observation points, not an app need).
         self.played: list[tuple[str, AudioChunk]] = []
-        self.stops = 0
+        self.interrupts = 0
+        self.responses_ended = 0
         self.mic_sent = 0
 
     def mic(self) -> AsyncIterator[AudioChunk]:
@@ -71,8 +72,14 @@ class FakeTurnSink:
         self.played.append((item_id, chunk))
         await asyncio.sleep(0)
 
-    async def stop(self) -> int:
-        """Barge-in: count the stop and return the scripted ``played_ms`` (§6.2.4). Idempotent —
-        safe to call with nothing playing; still reports the injected figure."""
-        self.stops += 1
+    async def end_response(self) -> None:
+        """Count one normal end-of-response (the real sink finalizes playback here). ``await``\\ s
+        so it is a real loop yield (P8); ``responses_ended`` is the off-port trace."""
+        self.responses_ended += 1
+        await asyncio.sleep(0)
+
+    async def interrupt(self) -> int:
+        """Barge-in: count the interrupt and return the scripted ``played_ms`` (§6.2.4).
+        Idempotent — safe to call with nothing playing; still reports the injected figure."""
+        self.interrupts += 1
         return self._played_ms

@@ -595,7 +595,7 @@ A queue hitting its bound publishes `system.handler_failed` with a `queue_overfl
 
 | Component | Responsibility (one sentence — if it needs two, split it) | Subscribes | Publishes |
 |---|---|---|---|
-| `AudioService` | Move PCM between devices and the AI client without ever blocking. | `conversation.*` | `audio.*` |
+| `AudioService` | Move PCM between devices and the AI client without ever blocking. | — (assistant audio is a direct `TurnSink` call, §9.1.4) | `audio.*` |
 | `ConversationService` | Own the Realtime session lifecycle and translate its events into ours. | `audio.speech_*`, `behavior.trigger_fired` | `conversation.*` |
 | `MemoryService` | Be the sole writer and reader of persistent user knowledge. | — (direct calls) | `memory.*` |
 | `AffectService` | Decide the robot's emotional state from all available signals. | `conversation.*`, `vision.*` | `affect.changed` |
@@ -809,7 +809,8 @@ class RealtimeClient(Protocol):          # the vendor boundary (§6.2, R-10)
 class TurnSink(Protocol):                # the ConvSvc↔AudioSvc audio seam (§9.1.4)
     def mic(self) -> AsyncIterator[AudioChunk]: ...            # captured PCM up
     async def play(self, chunk: AudioChunk, *, item_id: str) -> None: ...  # assistant PCM down
-    async def stop(self) -> int: ...     # barge-in; returns played_ms ACTUALLY emitted (§6.2.4)
+    async def end_response(self) -> None: ...  # normal completion → playback_finished, SPEAKING→IDLE
+    async def interrupt(self) -> int: ...  # barge-in; returns played_ms ACTUALLY emitted (§6.2.4)
 ```
 
 `RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
@@ -820,7 +821,7 @@ Three details worth defending:
 
 **`Servo.axes` and `Camera.capabilities` exist** because of §3.9.3 — the system must run on a 1-servo rig, a 2-servo rig, and a simulator with 6, without conditionals scattered through the services.
 
-**`TurnSink.stop()` returns `played_ms`, not `None`.** Barge-in (§6.2.4) needs `audio_end_ms` to be *what the speaker actually emitted*, and only the sink at the bottom of the playback path knows that — it differs from what we received by the entire buffer depth. Returning it from `stop()` puts the honest figure at the one layer that can measure it, exactly as `Servo.move_to` clamps at the one layer that owns the limit. Get it wrong and the model believes it said things the user never heard, which then poisons the conversation context.
+**`TurnSink.interrupt()` returns `played_ms`, not `None`.** Barge-in (§6.2.4) needs `audio_end_ms` to be *what the speaker actually emitted*, and only the sink at the bottom of the playback path knows that — it differs from what we received by the entire buffer depth. Returning it from `interrupt()` puts the honest figure at the one layer that can measure it, exactly as `Servo.move_to` clamps at the one layer that owns the limit. Get it wrong and the model believes it said things the user never heard, which then poisons the conversation context. The method is named `interrupt`, not `stop`, because the real sink (`AudioService`, AVID-103) is also a `Service`, whose `stop()` unwinds the mic loop — a lifecycle shutdown is a different act from cutting a turn's playback, and the two must not collide. Its sibling `end_response()` is the *normal* end (no barge-in): the service calls it on `response.done`, and the sink then publishes `audio.playback_finished(truncated=False)` and drives `SPEAKING → IDLE`.
 
 ### 3.9.2 Simulator adapters
 
