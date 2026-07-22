@@ -2224,6 +2224,9 @@ threshold           = 0.5
 prefix_padding_ms   = 300
 silence_duration_ms = 500
 
+[realtime]                      # Realtime session adapter params (AVID-102); only "replay" reads it
+session_dir = "assets/sessions/two_turn"   # recorded session ReplayRealtimeClient plays back (§14.3, #101)
+
 [gate]                          # local VAD gate — §6.3 / ADR-007 (NOT [ai.turn_detection], the server VAD)
 vad_model          = "silero_v5"
 threshold          = 0.5        # Silero speech-probability cutoff (local gate)

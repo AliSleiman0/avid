@@ -46,6 +46,11 @@ threshold           = 0.5
 prefix_padding_ms   = 300
 silence_duration_ms = 500
 
+[realtime]                      # the Realtime session adapter (#102); only "replay" reads session_dir
+# Committed under the read-only code tree (assets/sessions/, #101), readable under the unit's
+# ProtectSystem=strict — so repo-relative, like [cues] dir. The openai adapter (#105) ignores it.
+session_dir = "assets/sessions/two_turn"
+
 [gate]                          # local VAD gate — §6.3 / ADR-007 (NOT [ai.turn_detection], the server VAD)
 vad_model            = "silero_v5"
 threshold            = 0.5       # Silero speech-probability cutoff

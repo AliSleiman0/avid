@@ -30,11 +30,13 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FakeTurnSink,
     FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
     Pca9685Servo,
     Picamera2Camera,
+    ReplayRealtimeClient,
     SileroVad,
     SystemClock,
     SystemdNotifier,
@@ -48,14 +50,22 @@ from avid.core.ports import (
     Clock,
     Display,
     Microphone,
+    RealtimeClient,
     Service,
     ServiceNotifier,
     Servo,
     Speaker,
+    TurnSink,
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
-from avid.services import AffectService, AudioService, ExpressionService
+from avid.services import (
+    AffectService,
+    AudioService,
+    ConversationService,
+    CueBank,
+    ExpressionService,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -253,6 +263,56 @@ def _build_vad(config: Config) -> VoiceActivityDetector:
             )
 
 
+def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
+    """Select the ``RealtimeClient`` adapter named by ``[adapters] realtime`` (#101/#105).
+
+    ``replay`` is the laptop/sim default and the vendor blast-radius escape hatch (R-10): it
+    plays a recorded session (``[realtime] session_dir``, #101) back deterministically on the
+    injected ``clock`` — no key, no network, no cost. ``openai`` is the live Realtime WSS client
+    (the ``openai`` import lives inside that adapter, ADR-008) and lands with #105. The whole
+    ``ConversationService`` is built and CI-gated against ``replay`` before a single API call.
+    Any other value fails loudly rather than silently doing nothing.
+    """
+    match config.adapters.realtime:
+        case "replay":
+            return ReplayRealtimeClient.from_dir(
+                Path(config.realtime.session_dir), clock=clock
+            )
+        case "openai":  # pragma: no cover - the live client lands with #105
+            raise NotImplementedError(
+                "realtime adapter 'openai' is not available yet — it lands with #105; "
+                "only 'replay' exists today (#101)"
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"realtime adapter {other!r} is not available — only 'openai' and "
+                f"'replay' exist (#101)"
+            )
+
+
+def _build_turn_sink(config: Config) -> TurnSink:
+    """Build the ``TurnSink`` — the ``ConvSvc ↔ AudioSvc`` audio seam (§9.1.4, #100/#103).
+
+    ``FakeTurnSink`` is the only implementation today: it records assistant PCM and replays a
+    scripted mic timeline, standing in until the *real* AudioService-backed sink lands with the
+    audio seam (#103), at which point this becomes a config-driven ``match`` like the device
+    adapters. Structured as a builder now so #103 is pure addition, not a wiring change.
+    """
+    _ = config  # the real sink (#103) will read capture params from here
+    return FakeTurnSink()
+
+
+def _build_cue_bank(config: Config, *, speaker: Speaker) -> CueBank:
+    """Build the degraded-mode :class:`~avid.services.cue_bank.CueBank` (AVID-80, #102).
+
+    ConversationService's first and only consumer (SDS §6.9): it resolves a named cue to a WAV
+    under the injected ``[cues] dir`` and plays it through the shared ``Speaker`` port
+    (``play_file``), degrading quietly if the assets are missing. The base dir is injected (P7);
+    the same ``speaker`` instance drives both AudioService playback and these canned phrases.
+    """
+    return CueBank(speaker=speaker, asset_dir=Path(config.cues.dir))
+
+
 def _build_notifier(config: Config) -> ServiceNotifier:
     """Select the ``ServiceNotifier`` named by ``[adapters] notifier`` (AVID-38).
 
@@ -276,6 +336,9 @@ def _wire_services(
     microphone: Microphone,
     speaker: Speaker,
     vad: VoiceActivityDetector,
+    realtime: RealtimeClient,
+    turn_sink: TurnSink,
+    cues: CueBank,
     config: Config,
 ) -> Sequence[Service]:
     """Construct the services, register what they *declared*, return the ones with an owned task.
@@ -319,7 +382,16 @@ def _wire_services(
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
     )
-    for service in (affect, expression, audio):
+    conversation = ConversationService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        client=realtime,
+        sink=turn_sink,
+        cues=cues,
+        session_idle_close_s=config.gate.session_idle_close_s,
+    )
+    for service in (affect, expression, audio, conversation):
         for sub in service.subscriptions():
             bus.subscribe(
                 sub.event_type,
@@ -328,9 +400,10 @@ def _wire_services(
                 policy=sub.policy,
                 maxsize=sub.maxsize,
             )
-    # Only the services with an owned task need lifecycle management; the two reactive ones
-    # are kept alive by their bound-method subscriptions above.
-    return (audio,)
+    # The services that own tasks need lifecycle management (AudioService's mic loop,
+    # ConversationService's per-session pump/mic/idle tasks); the two reactive services are
+    # kept alive by their bound-method subscriptions above.
+    return (audio, conversation)
 
 
 async def _run(config: Config) -> int:
@@ -347,6 +420,9 @@ async def _run(config: Config) -> int:
     microphone = _build_microphone(config)
     speaker = _build_speaker(config)
     vad = _build_vad(config)
+    realtime = _build_realtime(config, clock=clock)
+    turn_sink = _build_turn_sink(config)
+    cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
     health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
@@ -375,6 +451,9 @@ async def _run(config: Config) -> int:
         microphone=microphone,
         speaker=speaker,
         vad=vad,
+        realtime=realtime,
+        turn_sink=turn_sink,
+        cues=cues,
         config=config,
     )
     # ``camera`` and ``servo`` are still constructed only to realize the switch and appear in the
