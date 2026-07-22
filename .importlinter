@@ -63,9 +63,16 @@ type = independence
 modules =
     avid.services.affect
     avid.services.audio
+    avid.services.conversation
     avid.services.expression
 # P5: no module reaches through another — cross-module effect happens via the bus,
-# never an import. Dormant since M0 for want of real service modules; activated by
+# never an import. `services.cue_bank` is deliberately NOT listed: it is a shared
+# collaborator the port-owning service *calls* (SDS §6.9, like `core/affect_map`),
+# not a peer service that reaches sideways — `conversation` importing it is the
+# intended pattern, and cue_bank itself imports only `core`/`domain`, so it opens no
+# indirect path between the listed services.
+#
+# Dormant since M0 for want of real service modules; activated by
 # AVID-73 now that two exist. **Add one line per service as it arrives** (M4 audio,
 # M6 behavior, M8 vision, M9 motion, memory) — a service missing from this list is
 # unguarded, and the list is the only thing that makes P5 mechanical.

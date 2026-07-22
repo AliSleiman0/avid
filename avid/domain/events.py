@@ -154,3 +154,35 @@ class SystemHandlerFailed(Event):
     event_type: str  # ``type(event).__name__`` of the event being delivered
     reason: str  # REASON_HANDLER_RAISED | REASON_QUEUE_OVERFLOW
     exc: str | None = None  # ``repr(exception)`` for a raise; None for an overflow
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SystemDegradedEntered(Event):
+    """The robot entered degraded mode (SDS §9.1.3, SDS:1987).
+
+    Published by ``ConversationService`` when a Realtime session drops (UC-06): the robot
+    can no longer converse, so it falls back to CueBank phrases and a CONFUSED face while it
+    waits to reconnect. Distinct from the ``conversation.session_lost`` that precedes it —
+    that names the *session* dying; this names the *robot* changing mode, and drives
+    ``ExpressionService``/``BehaviorService`` (which never learn why, only that it happened).
+    ``cause`` is a short human-readable reason (e.g. ``"network"``). Queue policy DROP_NEWEST.
+    """
+
+    name: ClassVar[str] = "system.degraded_entered"
+
+    cause: str  # short human-readable reason the robot went degraded
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SystemDegradedExited(Event):
+    """The robot recovered from degraded mode (SDS §9.1.3, SDS:1988).
+
+    Published by ``ConversationService`` when a fresh session opens after a loss (UC-06): the
+    robot is conversational again. ``downtime_s`` is how long it spent degraded — computed
+    from ``monotonic_ns`` (never wall clock, SDS §9.1.1), so an NTP step during the outage
+    cannot make the outage look negative. Queue policy DROP_NEWEST.
+    """
+
+    name: ClassVar[str] = "system.degraded_exited"
+
+    downtime_s: float  # seconds spent in degraded mode (monotonic-derived)

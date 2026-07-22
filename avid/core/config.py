@@ -196,6 +196,20 @@ class GateConfig(_Section):
     session_idle_close_s: int = 30
 
 
+class RealtimeConfig(_Section):
+    """The Realtime session adapter's parameters, injected into the client (P7, #102).
+
+    Only the ``replay`` adapter reads ``session_dir`` — the directory of a recorded session
+    (``assets/sessions/<name>/``, #101) it plays back deterministically, no network, no key.
+    Mirrors ``[cues] dir``: a shipped-asset path the composition root resolves and hands the
+    ``ReplayRealtimeClient``, never read by the service. The ``openai`` adapter (#105) ignores
+    it and reads ``[ai]`` + the injected key instead. The adapter never reaches for this
+    itself — the composition root injects it.
+    """
+
+    session_dir: str = "assets/sessions/two_turn"
+
+
 class CuesConfig(_Section):
     """The degraded-mode WAV cue bank base dir, injected into ``CueBank`` (P7, AVID-80).
 
@@ -310,6 +324,7 @@ class Config(_Section):
     microphone: MicrophoneConfig = MicrophoneConfig()
     speaker: SpeakerConfig = SpeakerConfig()
     ai: AiConfig = AiConfig()
+    realtime: RealtimeConfig = RealtimeConfig()
     gate: GateConfig = GateConfig()
     cues: CuesConfig = CuesConfig()
     memory: MemoryConfig = MemoryConfig()

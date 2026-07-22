@@ -8,7 +8,13 @@ from uuid import uuid4
 
 import pytest
 
-from avid.domain import EVENT_DOMAINS, Event, validate_event_name
+from avid.domain import (
+    EVENT_DOMAINS,
+    Event,
+    SystemDegradedEntered,
+    SystemDegradedExited,
+    validate_event_name,
+)
 
 # The full v1 event catalog (SDS §9.1.3). The validator must accept every one —
 # including the non-"-ed" names presence_lost / session_lost (irregular past
@@ -148,6 +154,24 @@ def test_valid_subclass_carries_name_and_stays_frozen() -> None:
     assert not hasattr(e, "__dict__")
     with pytest.raises(dataclasses.FrozenInstanceError):
         e.tier = 2  # type: ignore[misc]
+
+
+def test_degraded_events_carry_their_catalogued_names_and_payloads() -> None:
+    """The two ``system.degraded_*`` facts ConversationService publishes (#102): catalogued
+    names (SDS §9.1.3) and their distinct payloads — a cause on entry, a downtime on exit."""
+    base = dict(
+        event_id=uuid4(),
+        correlation_id=uuid4(),
+        timestamp_ms=1,
+        monotonic_ns=2,
+        source="ConversationService",
+    )
+    entered = SystemDegradedEntered(**base, cause="network")  # type: ignore[arg-type]
+    exited = SystemDegradedExited(**base, downtime_s=4.5)  # type: ignore[arg-type]
+    assert entered.name == "system.degraded_entered"
+    assert entered.cause == "network"
+    assert exited.name == "system.degraded_exited"
+    assert exited.downtime_s == 4.5
 
 
 def test_subclass_with_bad_name_raises_at_class_creation() -> None:

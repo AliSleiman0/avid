@@ -25,7 +25,9 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FakeTurnSink,
     FakeVoiceActivityDetector,
+    ReplayRealtimeClient,
     SystemdNotifier,
 )
 from avid.core import lifecycle
@@ -33,19 +35,27 @@ from avid.core.config import load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
 from avid.core.hal import DisplayFrame
 from avid.core.state_manager import StateManager
-from avid.domain import AffectChanged, StateTransitioned
+from avid.domain import (
+    AffectChanged,
+    AudioSpeechEnded,
+    AudioSpeechStarted,
+    StateTransitioned,
+)
 from avid.main import (
     _build_camera,
+    _build_cue_bank,
     _build_display,
     _build_microphone,
     _build_notifier,
+    _build_realtime,
     _build_servo,
     _build_speaker,
+    _build_turn_sink,
     _build_vad,
     _wire_services,
     main,
 )
-from avid.services import AudioService
+from avid.services import AudioService, ConversationService, CueBank
 
 # The exact subscriber graph the composition root is expected to build (SDS §9.1.3). Spelled
 # out rather than derived from the services, so that a service silently dropping or renaming
@@ -54,6 +64,8 @@ _EXPECTED_SUBSCRIPTIONS = {
     "AffectService.state_transitioned",
     "ExpressionService.affect_changed",
     "ExpressionService.state_transitioned",
+    "ConversationService.speech_started",
+    "ConversationService.speech_ended",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +113,28 @@ def test_build_vad_selects_fake() -> None:
     assert isinstance(_build_vad(config), FakeVoiceActivityDetector)
 
 
+def test_build_realtime_selects_replay() -> None:
+    # sim.toml (and pi.toml) set realtime = "replay"; the openai branch lands with #105. The
+    # replay client is built from [realtime] session_dir on the injected clock (#101).
+    config = load_config(_SIM_TOML)
+    client = _build_realtime(config, clock=FakeClock())
+    assert isinstance(client, ReplayRealtimeClient)
+
+
+def test_build_turn_sink_is_the_fake_seam() -> None:
+    # The real AudioService-backed sink lands with #103; today the composition root wires the
+    # fake seam (§9.1.4) so ConversationService has something to push assistant PCM through.
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_turn_sink(config), FakeTurnSink)
+
+
+def test_build_cue_bank_uses_the_injected_cues_dir() -> None:
+    # CueBank is handed the shared speaker and the [cues] dir (P7); ConversationService is its
+    # only consumer (SDS §6.9).
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_cue_bank(config, speaker=FakeSpeaker()), CueBank)
+
+
 def test_build_notifier_selects_fake_for_sim() -> None:
     # sim.toml omits [adapters] notifier -> the fake default (no supervisor).
     config = load_config(_SIM_TOML)
@@ -144,9 +178,13 @@ def test_main_wires_and_delegates_to_lifecycle(
     assert isinstance(captured["notifier"], FakeServiceNotifier)
     assert captured["health"] is not None
     assert captured["watchdog_interval_s"] == 15.0
-    # AVID-89: the one lifecycle-managed service (the mic loop) is handed to the lifecycle to
+    # The lifecycle-managed services — the two that own tasks (AudioService's mic loop,
+    # ConversationService's per-session pump/mic/idle) — are handed to the lifecycle to
     # start/stop; the two reactive services are not (they own no task). See ``_wire_services``.
-    assert [type(s) for s in captured["services"]] == [AudioService]
+    assert [type(s) for s in captured["services"]] == [
+        AudioService,
+        ConversationService,
+    ]
 
 
 def test_main_registers_the_service_subscriptions_before_starting_the_bus(
@@ -170,12 +208,18 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     assert main(["--config", str(_SIM_TOML)]) == 0
 
     bus = captured["bus"]
-    # Both event types the two services care about, and nothing else.
-    assert set(bus._subs) == {AffectChanged, StateTransitioned}
+    # Every event type the wired services care about, and nothing else: the two reactive
+    # faces plus ConversationService's two ``audio.*`` turn origins (#102).
+    assert set(bus._subs) == {
+        AffectChanged,
+        StateTransitioned,
+        AudioSpeechStarted,
+        AudioSpeechEnded,
+    }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]
     assert {sub.name for sub in subs} == _EXPECTED_SUBSCRIPTIONS
-    # DROP_OLDEST throughout: a backlog of stale faces is worse than no backlog (SDS §9.1.3).
+    # DROP_OLDEST throughout: only the latest edge is worth acting on (SDS §9.1.3).
     assert all(sub.policy is OverflowPolicy.DROP_OLDEST for sub in subs)
 
 
@@ -229,6 +273,9 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         ),
         speaker=FakeSpeaker(out_dir=tmp_path),
         vad=FakeVoiceActivityDetector(),
+        realtime=ReplayRealtimeClient(clock=clock, timeline=()),
+        turn_sink=FakeTurnSink(),
+        cues=CueBank(speaker=FakeSpeaker(out_dir=tmp_path), asset_dir=None),
         config=config,
     )
 
