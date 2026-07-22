@@ -36,6 +36,7 @@ from avid.core.hal import DisplayFrame
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AffectChanged,
+    AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
     StateTransitioned,
@@ -64,6 +65,7 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ExpressionService.state_transitioned",
     "ConversationService.speech_started",
     "ConversationService.speech_ended",
+    "ConversationService.playback_finished",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -200,12 +202,14 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
 
     bus = captured["bus"]
     # Every event type the wired services care about, and nothing else: the two reactive
-    # faces plus ConversationService's two ``audio.*`` turn origins (#102).
+    # faces, ConversationService's ``audio.speech_started`` origin + ``audio.speech_ended``
+    # (#102), and its ``audio.playback_finished`` barge-in feed (#104).
     assert set(bus._subs) == {
         AffectChanged,
         StateTransitioned,
         AudioSpeechStarted,
         AudioSpeechEnded,
+        AudioPlaybackFinished,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]
