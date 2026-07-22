@@ -31,6 +31,16 @@ pi = [
     "onnxruntime>=1.16",
     "numpy>=1.24",
 ]
+# The live OpenAI Realtime client (#105). `websockets` is the WSS transport
+# (SDS §6.2.1, ADR-010); `openai` rounds out the vendor SDK per the issue's AC-2. Both are
+# imported lazily, only inside OpenAIRealtimeClient, so avid/adapters/realtime.py loads on a host
+# without this group (the replay fake + capture decorator never touch the vendor). Installed with
+# `uv sync --extra openai` on a networked host; absent in CI, where the real leg is network-gated
+# and skipped like the Pi HAL legs (SDS §14.4).
+openai = [
+    "openai>=1",
+    "websockets>=13",
+]
 
 [dependency-groups]
 dev = [
@@ -83,10 +93,12 @@ files = ["avid"]
 
 # picamera2/libcamera (AVID-51), adafruit_servokit (AVID-52), alsaaudio (AVID-53) and
 # onnxruntime+numpy (AVID-77) are Pi-only (the `pi` extra), unstubbed *in the CI/mypy env where
-# the extra is absent* (ADR-008, SPK-5). Each is imported lazily only inside its one adapter; this
-# override lets mypy resolve those imports as Any instead of erroring, without a per-line
-# `# type: ignore`. numpy is here for the same reason the others are — it is not installed off-Pi,
-# so mypy cannot find it — and vad.py already handles its arrays as Any regardless.
+# the extra is absent* (ADR-008, SPK-5). openai+websockets (#105) are the same case for the
+# networked `openai` extra — imported lazily only inside OpenAIRealtimeClient (AC-6). Each is
+# imported lazily only inside its one adapter; this override lets mypy resolve those imports as Any
+# instead of erroring, without a per-line `# type: ignore`. numpy is here for the same reason the
+# others are — it is not installed off-Pi, so mypy cannot find it — and vad.py already handles its
+# arrays as Any regardless.
 [[tool.mypy.overrides]]
 module = [
     "picamera2.*",
@@ -95,6 +107,8 @@ module = [
     "alsaaudio.*",
     "onnxruntime.*",
     "numpy.*",
+    "openai.*",
+    "websockets.*",
 ]
 ignore_missing_imports = true
 

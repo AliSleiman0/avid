@@ -26,6 +26,7 @@ from avid.adapters import (
     FakeServo,
     FakeSpeaker,
     FakeVoiceActivityDetector,
+    OpenAIRealtimeClient,
     ReplayRealtimeClient,
     SystemdNotifier,
 )
@@ -39,6 +40,7 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    ConversationTurnEnded,
     StateTransitioned,
 )
 from avid.main import (
@@ -66,6 +68,7 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ConversationService.speech_started",
     "ConversationService.speech_ended",
     "ConversationService.playback_finished",
+    "CostMeterService.turn_ended",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,11 +117,37 @@ def test_build_vad_selects_fake() -> None:
 
 
 def test_build_realtime_selects_replay() -> None:
-    # sim.toml (and pi.toml) set realtime = "replay"; the openai branch lands with #105. The
-    # replay client is built from [realtime] session_dir on the injected clock (#101).
+    # sim.toml (and pi.toml) set realtime = "replay": the replay client is built from
+    # [realtime] session_dir on the injected clock (#101), no key, no network.
     config = load_config(_SIM_TOML)
     client = _build_realtime(config, clock=FakeClock())
     assert isinstance(client, ReplayRealtimeClient)
+
+
+def test_build_realtime_selects_openai_with_the_injected_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # realtime = "openai" builds the real WSS client (#105), fed the key read once from the env
+    # as a SecretStr (P7). Construction only — no connect, so this stays network-free.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+    toml = tmp_path / "openai.toml"
+    toml.write_text('[adapters]\nrealtime = "openai"\n', encoding="utf-8")
+    config = load_config(toml)
+    client = _build_realtime(config, clock=FakeClock())
+    assert isinstance(client, OpenAIRealtimeClient)
+
+
+def test_build_realtime_openai_without_a_key_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The 'openai' adapter needs OPENAI_API_KEY; absent, the composition root refuses loudly
+    # rather than constructing a keyless client that would fail obscurely at connect (AC-3).
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    toml = tmp_path / "openai.toml"
+    toml.write_text('[adapters]\nrealtime = "openai"\n', encoding="utf-8")
+    config = load_config(toml)
+    with pytest.raises(RuntimeError):
+        _build_realtime(config, clock=FakeClock())
 
 
 def test_build_cue_bank_uses_the_injected_cues_dir() -> None:
@@ -180,6 +209,26 @@ def test_main_wires_and_delegates_to_lifecycle(
     ]
 
 
+def test_main_capture_flag_routes_to_capture_not_the_run_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --capture NAME records a session instead of running the robot (#105). Stub the live capture
+    # (it needs a network + key) and assert main() dispatches to it with the parsed name/seconds,
+    # never touching lifecycle.run. This covers the CLI wiring without a socket.
+    captured: dict[str, Any] = {}
+
+    async def _stub_capture(config: Any, *, name: str, seconds: int) -> int:
+        captured["name"] = name
+        captured["seconds"] = seconds
+        return 0
+
+    monkeypatch.setattr("avid.main._capture", _stub_capture)
+    assert (
+        main(["--config", str(_SIM_TOML), "--capture", "demo", "--seconds", "5"]) == 0
+    )
+    assert captured == {"name": "demo", "seconds": 5}
+
+
 def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,15 +250,17 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     assert main(["--config", str(_SIM_TOML)]) == 0
 
     bus = captured["bus"]
-    # Every event type the wired services care about, and nothing else: the two reactive
-    # faces, ConversationService's ``audio.speech_started`` origin + ``audio.speech_ended``
-    # (#102), and its ``audio.playback_finished`` barge-in feed (#104).
+    # Every event type the wired services care about, and nothing else: the two reactive faces,
+    # ConversationService's ``audio.speech_started`` origin + ``audio.speech_ended`` (#102) + its
+    # ``audio.playback_finished`` barge-in feed (#104), and the cost meter's
+    # ``conversation.turn_ended`` (#105).
     assert set(bus._subs) == {
         AffectChanged,
         StateTransitioned,
         AudioSpeechStarted,
         AudioSpeechEnded,
         AudioPlaybackFinished,
+        ConversationTurnEnded,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]

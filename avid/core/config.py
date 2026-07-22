@@ -168,12 +168,22 @@ class AiConfig(_Section):
 
     ``model`` is pinned to a dated snapshot because the Realtime family churns fast
     (SDS §6.10). Swapping model or voice touches this section only.
+
+    ``instructions`` is the **static** session prompt the ``openai`` adapter seeds at connect
+    (SDS §6.2.2) — it must stay frozen for a session's life to hold the ~98.75% caching discount
+    (§6.10.2, Fact 1). M5 seeds a minimal identity string only; the full four-layer §6.4
+    composition (identity/personality/capabilities/memory) and ``personality`` TOML loading are a
+    later milestone (M6/M7), so the seam is here but the layering is not yet built.
     """
 
     model: str = "gpt-realtime-mini-2025-12-15"
     voice: str = "cedar"
     max_output_tokens: int = 512
     personality: str = "config/personality/default.toml"
+    instructions: str = (
+        "You are Pico, a small AI desk companion robot. Speak briefly and warmly, "
+        "like a friend at the next desk. Keep replies short."
+    )
     turn_detection: TurnDetectionConfig = TurnDetectionConfig()
 
 

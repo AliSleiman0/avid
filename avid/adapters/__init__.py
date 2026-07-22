@@ -15,7 +15,11 @@ from avid.adapters.display import FakeDisplay, FramebufferDisplay
 from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
-from avid.adapters.realtime import ReplayRealtimeClient
+from avid.adapters.realtime import (
+    CapturingRealtimeClient,
+    OpenAIRealtimeClient,
+    ReplayRealtimeClient,
+)
 from avid.adapters.servo import FakeServo, Pca9685Servo
 from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
 from avid.adapters.turn_sink import FakeTurnSink
@@ -39,8 +43,10 @@ __all__ = [
     "SileroVad",
     # TurnSink (#100) — real adapter lands with the AudioService seam (#103)
     "FakeTurnSink",
-    # RealtimeClient (#101) — real openai adapter lands with #105
+    # RealtimeClient — replay fake (#101), real openai WSS client + capture decorator (#105)
     "ReplayRealtimeClient",
+    "OpenAIRealtimeClient",
+    "CapturingRealtimeClient",
     # Clock (AVID-12)
     "FakeClock",
     "SystemClock",

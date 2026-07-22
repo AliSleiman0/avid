@@ -24,6 +24,7 @@ from avid import __version__
 from avid.adapters import (
     AlsaMicrophone,
     AlsaSpeaker,
+    CapturingRealtimeClient,
     FakeCamera,
     FakeDisplay,
     FakeMicrophone,
@@ -33,6 +34,7 @@ from avid.adapters import (
     FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
+    OpenAIRealtimeClient,
     Pca9685Servo,
     Picamera2Camera,
     ReplayRealtimeClient,
@@ -61,9 +63,12 @@ from avid.services import (
     AffectService,
     AudioService,
     ConversationService,
+    CostMeterService,
     CueBank,
     ExpressionService,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +87,22 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="PATH",
         help="Path to a TOML config file, e.g. config/sim.toml.",
+    )
+    parser.add_argument(
+        "--capture",
+        metavar="NAME",
+        help=(
+            "Record one live Realtime session into assets/sessions/NAME/ in the replay "
+            "fixture format (#105), instead of running the robot. Needs [adapters] realtime "
+            "= 'openai' and OPENAI_API_KEY."
+        ),
+    )
+    parser.add_argument(
+        "--seconds",
+        type=int,
+        default=60,
+        metavar="N",
+        help="How long to record in --capture mode (default 60).",
     )
     return parser
 
@@ -267,7 +288,8 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
     ``replay`` is the laptop/sim default and the vendor blast-radius escape hatch (R-10): it
     plays a recorded session (``[realtime] session_dir``, #101) back deterministically on the
     injected ``clock`` — no key, no network, no cost. ``openai`` is the live Realtime WSS client
-    (the ``openai`` import lives inside that adapter, ADR-008) and lands with #105. The whole
+    (#105 — the ``websockets`` import lives lazily inside that adapter, ADR-008), fed
+    model/voice/instructions/turn-detection from ``[ai]`` and the injected key. The whole
     ``ConversationService`` is built and CI-gated against ``replay`` before a single API call.
     Any other value fails loudly rather than silently doing nothing.
     """
@@ -276,10 +298,21 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
             return ReplayRealtimeClient.from_dir(
                 Path(config.realtime.session_dir), clock=clock
             )
-        case "openai":  # pragma: no cover - the live client lands with #105
-            raise NotImplementedError(
-                "realtime adapter 'openai' is not available yet — it lands with #105; "
-                "only 'replay' exists today (#101)"
+        case "openai":
+            # The one place the secret is unwrapped (P7, SECURITY.md, AC-3): read once as a
+            # SecretStr in load_config, handed to the adapter only to build the auth header.
+            if config.openai_api_key is None:
+                raise RuntimeError(
+                    "realtime adapter 'openai' requires OPENAI_API_KEY in the environment "
+                    "(read once as SecretStr, SECURITY.md/P7) — none was injected"
+                )
+            return OpenAIRealtimeClient(
+                api_key=config.openai_api_key.get_secret_value(),
+                model=config.ai.model,
+                voice=config.ai.voice,
+                instructions=config.ai.instructions,
+                max_output_tokens=config.ai.max_output_tokens,
+                turn_detection=config.ai.turn_detection.model_dump(),
             )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
@@ -344,14 +377,15 @@ def _wire_services(
     the identical wiring drive the fakes on a laptop and the real HALs on the Pi from one config
     literal. Config values (`[gate]`/`[microphone]`) are injected, never read by the service (P7).
 
-    ``AffectService`` and ``ExpressionService`` are purely reactive — no owned task, ``start``/
-    ``stop`` are no-ops — so they are wired for their subscriptions and then dropped: every
-    ``Subscription`` holds a **bound method** that keeps its instance alive for the life of the
-    bus. ``AudioService`` and ``ConversationService`` own tasks (the mic loop; the per-session
-    pump/mic/idle), so they are **returned** for :func:`lifecycle.run` to ``start``/``stop``. Both
-    ``subscriptions()`` sets are small and static — AudioService's is empty (it is *not* a
-    ``conversation.*`` subscriber; the assistant-audio seam is the ``TurnSink`` port it
-    implements, §9.1.4), ConversationService's is the two ``audio.*`` turn origins.
+    ``AffectService``, ``ExpressionService`` and ``CostMeterService`` (#105) are purely reactive —
+    no owned task, ``start``/``stop`` are no-ops — so they are wired for their subscriptions and
+    then dropped: every ``Subscription`` holds a **bound method** that keeps its instance alive for
+    the life of the bus. ``AudioService`` and ``ConversationService`` own tasks (the mic loop; the
+    per-session pump/mic/idle), so they are **returned** for :func:`lifecycle.run` to ``start``/
+    ``stop``. Each ``subscriptions()`` set is small and static — AudioService's is empty (it is
+    *not* a ``conversation.*`` subscriber; the assistant-audio seam is the ``TurnSink`` port it
+    implements, §9.1.4), ConversationService's is the two ``audio.*`` turn origins plus the
+    barge-in feed, and CostMeterService's is the single ``conversation.turn_ended`` it meters.
 
     ``AudioService`` *is* the real ``TurnSink`` (#103): it is built first and injected as
     ``ConversationService``'s ``sink``, so a turn's audio crosses the two services through the
@@ -382,7 +416,12 @@ def _wire_services(
         cues=cues,
         session_idle_close_s=config.gate.session_idle_close_s,
     )
-    for service in (affect, expression, audio, conversation):
+    # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
+    # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so
+    # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
+    # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
+    cost_meter = CostMeterService(bus=bus, model=config.ai.model)
+    for service in (affect, expression, audio, conversation, cost_meter):
         for sub in service.subscriptions():
             bus.subscribe(
                 sub.event_type,
@@ -463,12 +502,53 @@ async def _run(config: Config) -> int:
     )
 
 
+async def _capture(  # pragma: no cover - live capture needs network + a real key (#105)
+    config: Config, *, name: str, seconds: int
+) -> int:
+    """Record one live Realtime session into ``assets/sessions/<name>/`` (AC-4).
+
+    Wraps whatever ``_build_realtime`` selects (``openai`` for a live recording) in a
+    :class:`~avid.adapters.realtime.CapturingRealtimeClient`, forwards mic audio up and drains the
+    event stream — which the wrapper writes to the ``replay`` fixture format on close — for
+    ``seconds``, then tears down. The recording *is* the fixture ``ReplayRealtimeClient`` plays, so
+    replay can never drift from the real API. Network-gated: never exercised in CI (the format
+    round-trip is proven offline in ``tests/adapters/test_realtime_capture.py``).
+    """
+    clock = SystemClock()
+    inner = _build_realtime(config, clock=clock)
+    microphone = _build_microphone(config)
+    out_dir = Path("assets") / "sessions" / name
+    client = CapturingRealtimeClient(inner=inner, clock=clock, out_dir=out_dir)
+    _log.info("capturing a live session into %s for %ss", out_dir, seconds)
+    await client.open()
+
+    async def forward_mic() -> None:
+        async for chunk in microphone.stream():
+            await client.send_audio(chunk)
+
+    async def drain_events() -> None:
+        async for _event in client.events():
+            pass
+
+    mic_task = asyncio.create_task(forward_mic(), name="capture.mic")
+    drain_task = asyncio.create_task(drain_events(), name="capture.drain")
+    try:
+        await asyncio.sleep(seconds)
+    finally:
+        mic_task.cancel()
+        drain_task.cancel()
+        await client.aclose()  # flushes session.json + the WAVs
+    _log.info("capture complete: %s", out_dir)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``avid`` console script.
 
-    Parses args, loads the config (the one place ``OPENAI_API_KEY`` is read), and runs
-    the robot. Returns a process exit code; ``--help``/``--version`` exit 0 via argparse
-    before returning here, and a missing ``--config`` exits 2.
+    Parses args, loads the config (the one place ``OPENAI_API_KEY`` is read), and runs the robot —
+    or, with ``--capture NAME``, records one live session into the replay fixture format and exits
+    (#105). Returns a process exit code; ``--help``/``--version`` exit 0 via argparse before
+    returning here, and a missing ``--config`` exits 2.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -476,4 +556,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
+    if args.capture is not None:
+        return asyncio.run(_capture(config, name=args.capture, seconds=args.seconds))
     return asyncio.run(_run(config))
