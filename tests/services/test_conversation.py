@@ -26,14 +26,17 @@ from uuid import UUID, uuid4
 import pytest
 
 from avid.adapters.clock import FakeClock
+from avid.adapters.microphone import FakeMicrophone
 from avid.adapters.realtime import ReplayRealtimeClient
 from avid.adapters.speaker import FakeSpeaker
 from avid.adapters.turn_sink import FakeTurnSink
+from avid.adapters.vad import FakeVoiceActivityDetector
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import AudioChunk
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
     ConversationAssistantResponded,
@@ -51,6 +54,7 @@ from avid.domain import (
     Trigger,
 )
 from avid.services import CueBank
+from avid.services.audio import AudioService
 from avid.services.conversation import ConversationService
 
 _SESSIONS = Path(__file__).resolve().parents[2] / "assets" / "sessions"
@@ -67,6 +71,7 @@ _COLLECTED: tuple[type[Event], ...] = (
     SystemDegradedExited,
     StateTransitioned,
     SystemHandlerFailed,
+    AudioPlaybackFinished,
 )
 
 
@@ -181,37 +186,79 @@ async def _speak(rig: Rig, *, correlation_id: UUID) -> None:
     )
 
 
-async def _advance_until(
-    rig: Rig, pred: Callable[[], bool], *, step_s: float = 0.5, max_steps: int = 400
+async def _finish_playback(
+    bus: AsyncioEventBus,
+    clock: FakeClock,
+    *,
+    item_id: str,
+    played_ms: int,
+    truncated: bool,
+    correlation_id: UUID,
 ) -> None:
-    """Step virtual time forward until *pred* holds, yielding so dispatch can run.
+    """Publish the ``audio.playback_finished`` fact AudioService emits — the barge-in feed (#104).
+
+    A ``truncated=True`` fact carrying ``played_ms`` is exactly what
+    ``AudioService.interrupt`` publishes once local VAD has cut the speaker; the unit tests
+    stand in for that so the ConvSvc model-side half (truncate/cancel/mute) can be exercised
+    with a chosen ``played_ms`` and no AudioService (§6.2.4)."""
+    await bus.publish(
+        AudioPlaybackFinished(
+            **envelope(clock=clock, correlation_id=correlation_id, source="test"),
+            item_id=item_id,
+            played_ms=played_ms,
+            truncated=truncated,
+        )
+    )
+
+
+async def _advance_clock_until(
+    clock: FakeClock,
+    pred: Callable[[], bool],
+    *,
+    step_s: float = 0.5,
+    max_steps: int = 400,
+) -> None:
+    """Step *clock* forward until *pred* holds, yielding so dispatch can run.
 
     Stops the instant the predicate is satisfied, so a fixture drain never accumulates enough
     virtual time to trip an idle-close it is not exercising. Fails loudly if it never holds."""
     for _ in range(max_steps):
         if pred():
             return
-        await rig.clock.advance(step_s)
+        await clock.advance(step_s)
         for _ in range(3):
             await asyncio.sleep(0)
     if not pred():
         raise AssertionError("predicate never became true within the step budget")
 
 
+async def _advance_until(
+    rig: Rig, pred: Callable[[], bool], *, step_s: float = 0.5, max_steps: int = 400
+) -> None:
+    """Step the rig's virtual time until *pred* holds (see :func:`_advance_clock_until`)."""
+    await _advance_clock_until(rig.clock, pred, step_s=step_s, max_steps=max_steps)
+
+
 # --- the service shape (SDS §9.2) ----------------------------------------------------------
 
 
-async def test_service_shape_declares_the_two_audio_origins() -> None:
-    """AC-1/AC-2: name plus exactly the two ``audio.*`` origins that exist at M5 (the
-    ``behavior.trigger_fired`` origin has no Event type yet — it is an M6 seam)."""
+async def test_service_shape_declares_the_audio_origins_and_barge_in_feed() -> None:
+    """AC-1/AC-2: name plus the two ``audio.*`` origins that exist at M5 and the
+    ``audio.playback_finished`` barge-in feed (#104, SDS §9.1.3). The ``behavior.trigger_fired``
+    origin has no Event type yet — it is an M6 seam."""
     clock = FakeClock()
     async with _rig(client=_replay("two_turn", clock=clock)) as rig:
         assert rig.service.name == "ConversationService"
         subs = rig.service.subscriptions()
-        assert {s.event_type for s in subs} == {AudioSpeechStarted, AudioSpeechEnded}
+        assert {s.event_type for s in subs} == {
+            AudioSpeechStarted,
+            AudioSpeechEnded,
+            AudioPlaybackFinished,
+        }
         assert {s.name for s in subs} == {
             "ConversationService.speech_started",
             "ConversationService.speech_ended",
+            "ConversationService.playback_finished",
         }
 
 
@@ -361,6 +408,183 @@ async def test_session_loss_degrades_then_reopen_recovers() -> None:
             and e.to is RobotState.IDLE
             for e in rig.collector.of_type(StateTransitioned)
         )
+
+
+# --- #104: barge-in truncate (SDS §6.2.4) --------------------------------------------------
+
+
+async def test_barge_in_truncates_cancels_and_mutes() -> None:
+    """AC-1/AC-2/AC-5: an ``audio.playback_finished(truncated=True)`` fact drives the §6.2.4
+    model half — ``truncate(item_id, played_ms)`` then ``cancel`` — and the post-truncation
+    delta of that item (``turn0_c``) is muted, never reaching the sink. ``played_ms`` is passed
+    straight through as ``audio_end_ms``."""
+    cid = uuid4()
+    clock = FakeClock()
+    async with _rig(client=_replay("barge_in", clock=clock)) as rig:
+        await _speak(rig, correlation_id=cid)
+        # Two item_0 deltas (turn0_a/b) reach the speaker, then the user barges in.
+        await _advance_until(
+            rig,
+            lambda: len([i for i, _ in rig.sink.played if i == "item_0"]) >= 2,
+        )
+        await _finish_playback(
+            rig.bus,
+            rig.clock,
+            item_id="item_0",
+            played_ms=40,
+            truncated=True,
+            correlation_id=cid,
+        )
+        await (
+            rig.collector.settle()
+        )  # let _on_playback_finished arm the mute + truncate/cancel
+        await _advance_until(
+            rig, lambda: len(rig.collector.of_type(ConversationTurnEnded)) >= 1
+        )
+
+        # Steps 4/5: the model was told the user cut item_0 off at what actually played.
+        assert rig.client.truncations == [("item_0", 40)]
+        assert rig.client.cancels == 1
+        # Step 6: only the two pre-barge deltas reached the sink — turn0_c was dropped (AC-2).
+        assert [i for i, _ in rig.sink.played] == ["item_0", "item_0"]
+
+
+async def test_barge_in_user_transcript_is_approximate() -> None:
+    """AC-4: a barge-in leaves the truncated turn's transcript unreliable, so
+    ``conversation.user_transcribed`` carries ``is_approximate=True`` (the flag the fixture sets
+    and ConvSvc propagates, §6.2.4)."""
+    clock = FakeClock()
+    async with _rig(client=_replay("barge_in", clock=clock)) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await _advance_until(
+            rig,
+            lambda: len(rig.collector.of_type(ConversationUserTranscribed)) >= 2,
+        )
+        # The opening utterance is exact; the interrupting one is approximate (truncation tail).
+        flags = [
+            e.is_approximate
+            for e in rig.collector.of_type(ConversationUserTranscribed)
+            if isinstance(e, ConversationUserTranscribed)
+        ]
+        assert flags[:2] == [False, True]
+
+
+async def test_normal_playback_finished_does_not_truncate() -> None:
+    """A *normal* end (``truncated=False``) is AudioService's own fact — ConvSvc ignores it and
+    sends no ``truncate``/``cancel`` (only a barge-in cuts the model off)."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+        await _finish_playback(
+            rig.bus,
+            rig.clock,
+            item_id="item_0",
+            played_ms=999,
+            truncated=False,
+            correlation_id=uuid4(),
+        )
+        await rig.collector.settle()
+        assert rig.client.truncations == []
+        assert rig.client.cancels == 0
+
+
+async def test_barge_in_full_chain_on_one_correlation_id() -> None:
+    """AC-5 (e2e): with the **real** ``AudioService`` as the sink, a local barge-in runs the
+    whole §6.2.4 chain on one ``correlation_id`` — speaker stopped, the truncated
+    ``audio.playback_finished`` published with what actually played, the model told
+    (``truncate``+``cancel``), and the post-truncation delta muted (never reaching the speaker).
+
+    The mic loop is never started; the turn's playback is driven through ConvSvc's pump and the
+    local barge-in is triggered by ``AudioService.interrupt()`` directly — exactly what the VAD
+    edge (``_begin_speech``) does, whose own SPEAKING→LISTENING move is covered in test_audio."""
+    cid = uuid4()
+    clock = FakeClock()
+    client = _replay("barge_in", clock=clock)
+    bus = AsyncioEventBus(clock=clock)
+    state = StateManager(bus=bus, clock=clock, initial=RobotState.LISTENING)
+    speaker = FakeSpeaker()
+    mic = FakeMicrophone(sample_rate=16000, channels=1, chunk_ms=20)
+    vad = FakeVoiceActivityDetector(default=False)
+    audio = AudioService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        microphone=mic,
+        speaker=speaker,
+        vad=vad,
+        ring_buffer_ms=300,
+        sample_rate=16000,
+        channels=1,
+        silence_hold_ms=200,
+        loopback=False,
+    )
+    cues = CueBank(speaker=speaker, asset_dir=_CUES)
+    collector = _Collector()
+    service = ConversationService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        client=client,
+        sink=audio,
+        cues=cues,
+        session_idle_close_s=30,
+    )
+    for sub in service.subscriptions():
+        bus.subscribe(
+            sub.event_type,
+            sub.handler,
+            name=sub.name,
+            policy=sub.policy,
+            maxsize=sub.maxsize,
+        )
+    for cls in _COLLECTED:
+        bus.subscribe(cls, collector.handle, name=f"test.{cls.__name__}")
+    await bus.start()
+    await service.start()  # ConvSvc only — AudioService's mic loop stays parked
+    try:
+        # The id the mic-loop origin would have minted for this turn's playback (test_audio idiom).
+        audio._turn_id = cid
+        await bus.publish(
+            AudioSpeechStarted(
+                **envelope(clock=clock, correlation_id=cid, source="test"),
+                ring_buffer_ms=0,
+            )
+        )
+        # Drive the turn until the robot is genuinely SPEAKING with two deltas on the speaker.
+        await _advance_clock_until(
+            clock,
+            lambda: state.state is RobotState.SPEAKING and len(speaker.played) >= 2,
+        )
+
+        # Local barge-in: cut the speaker and measure what actually played (§6.2.4 steps 2/3).
+        played = await audio.interrupt()
+        assert played > 0 and speaker.stops == 1
+        await (
+            collector.settle()
+        )  # let ConvSvc arm the mute + truncate/cancel before turn0_c
+        await _advance_clock_until(
+            clock, lambda: len(collector.of_type(ConversationTurnEnded)) >= 1
+        )
+
+        # Steps 4/5: the model was told, with the honest audio_end_ms.
+        assert client.truncations == [("item_0", played)]
+        assert client.cancels == 1
+        # Step 6: turn0_c never reached the real speaker — still just the two pre-barge deltas.
+        assert len(speaker.played) == 2
+        # One correlation_id: the truncated fact carries the same id as the turn facts.
+        truncated = [
+            e
+            for e in collector.of_type(AudioPlaybackFinished)
+            if isinstance(e, AudioPlaybackFinished) and e.truncated
+        ]
+        assert truncated and truncated[0].correlation_id == cid
+        assert truncated[0].played_ms == played
+    finally:
+        await service.stop()
+        await audio.stop()
+        await bus.stop()
 
 
 # --- AC-8: reliability — a raising subscriber never kills the turn -------------------------

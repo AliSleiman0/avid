@@ -26,12 +26,23 @@ It owns three seams, none of which it imports the other side of:
   The LISTENING entry and the THINKING→SPEAKING→IDLE playback arc are **AudioService's**
   (``audio.speech_started`` / ``audio.playback_*``), not this service's.
 
+**Barge-in is split across the two services (#104, SDS §6.2.4).** AudioService owns the *local*
+half — local VAD cuts the speaker instantly (``interrupt()``), measures what actually played,
+and moves ``SPEAKING → LISTENING`` — publishing ``audio.playback_finished(truncated=True)`` with
+that ``played_ms``. This service owns the *model* half: it subscribes to that fact (SDS §9.1.3
+lists it as a subscriber) and, on ``truncated=True``, tells the API the user cut the reply off —
+``RealtimeClient.truncate(item_id, played_ms)`` then ``cancel()`` — and **mutes** the assistant
+audio deltas still in flight for that item until the next item begins (step 6, not optional: an
+un-muted cancelled sentence resumes for ~200 ms). ``played_ms`` crossing on the fact is why the
+honest ``audio_end_ms`` — measured at the one layer that owns the speaker — is what the model is
+told, so it never believes it said what the user never heard.
+
 **Two origins, one wired.** A turn begins at ``audio.speech_started`` (user) or
 ``behavior.trigger_fired`` (proactive) — the two events that mint a ``correlation_id`` (SDS
 §9.1.1). Only the first exists as an ``Event`` at M5; ``behavior.trigger_fired`` and its
-``initiator="proactive"`` path are an M6 seam, so :meth:`subscriptions` declares only the two
-``audio.*`` origins — exactly as ``AudioService.subscriptions`` returned ``()`` for the
-``conversation.*`` it could not yet name. The ``correlation_id`` is **propagated, never
+``initiator="proactive"`` path are an M6 seam, so of the two origins :meth:`subscriptions`
+wires only ``audio.speech_started`` — exactly as ``AudioService.subscriptions`` returned ``()``
+for the ``conversation.*`` it could not yet name. The ``correlation_id`` is **propagated, never
 re-minted** (SDS §3.12.2): every fact and every transition carries the id AudioService minted at
 ``audio.speech_started``, so one grep reconstructs the turn.
 
@@ -66,6 +77,7 @@ from avid.core.realtime import (
 )
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
     ConversationAssistantResponded,
@@ -133,6 +145,9 @@ class ConversationService:
         self._turn_active = False  # between conversation.turn_started and turn_ended
         self._turn_started_ns: int | None = None  # monotonic, for turn_ended duration
         self._first_audio = False  # has this turn's first assistant delta arrived yet?
+        # Barge-in (§6.2.4 step 6): the response item whose in-flight audio deltas must be
+        # dropped after a truncation, until the next assistant item begins. None = not muting.
+        self._muted_item: str | None = None
         # Degraded mode: set when the session drops, cleared when a fresh one opens (UC-06).
         self._degraded = False
         self._lost_at_ns: int | None = None  # monotonic, for degraded_exited downtime
@@ -164,14 +179,16 @@ class ConversationService:
             self._cancel_cues()
 
     def subscriptions(self) -> Sequence[Subscription]:
-        """Declare the two turn origins that exist at M5 (SDS §9.2, §9.1.3).
+        """Declare the two turn origins plus the barge-in feed (SDS §9.2, §9.1.3).
 
-        ``audio.speech_started`` ensures the session and opens a turn;
-        ``audio.speech_ended`` re-arms the idle-close timer. The third catalogued origin,
-        ``behavior.trigger_fired``, has no ``Event`` type yet (BehaviorService is M6), so it is
-        a declared seam, not a subscription — the same reason ``AudioService.subscriptions``
-        returned ``()`` at M4. DROP_OLDEST: only the latest speech edge is worth acting on, and
-        the §9.1.5 drift check sees both by their mandatory names.
+        ``audio.speech_started`` ensures the session and opens a turn; ``audio.speech_ended``
+        re-arms the idle-close timer; ``audio.playback_finished`` is the barge-in feed (#104) —
+        on ``truncated=True`` this service runs the §6.2.4 model half (truncate/cancel/mute),
+        which is why the §9.1.3 catalog lists it as a subscriber of that fact. The third
+        catalogued *origin*, ``behavior.trigger_fired``, has no ``Event`` type yet
+        (BehaviorService is M6), so it is a declared seam, not a subscription — the same reason
+        ``AudioService.subscriptions`` returned ``()`` at M4. DROP_OLDEST: only the latest edge
+        is worth acting on, and the §9.1.5 drift check sees each by its mandatory name.
         """
         return (
             Subscription(
@@ -185,6 +202,13 @@ class ConversationService:
                 event_type=AudioSpeechEnded,
                 handler=cast(Handler, self._on_speech_ended),
                 name="ConversationService.speech_ended",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=AudioPlaybackFinished,
+                handler=cast(Handler, self._on_playback_finished),
+                name="ConversationService.playback_finished",
                 policy=OverflowPolicy.DROP_OLDEST,
                 maxsize=DEFAULT_MAXSIZE,
             ),
@@ -227,6 +251,28 @@ class ConversationService:
         async with self._lock:
             if self._session_open:
                 self._arm_idle()
+
+    async def _on_playback_finished(self, event: AudioPlaybackFinished) -> None:
+        """The barge-in feed (#104, SDS §6.2.4 steps 4–6): tell the model the user cut it off.
+
+        A *normal* end (``truncated=False``) is nothing of ours — AudioService already published
+        it and drove ``SPEAKING → IDLE`` (we return at once). A ``truncated=True`` fact is a
+        barge-in: AudioService has already stopped the speaker and measured ``played_ms`` (what
+        the speaker *actually* emitted), so we send that honest ``audio_end_ms`` to the model —
+        ``truncate`` then ``cancel`` — or it believes it said what the user never heard, which
+        poisons the context (§6.2.4 trap 2).
+
+        ``_muted_item`` is set **synchronously, before the awaits**: it is step 6, and the pump
+        (a separate coroutine, advancing only at await points) must see it set before it can
+        process any post-truncation delta for this item — otherwise the cancelled sentence
+        resumes for ~200 ms (§6.2.4 trap 1). The truncate/cancel are quick ``RealtimeClient``
+        calls; a stray fact with no open session is harmless (the replay records it; a barge-in
+        only ever fires with a session live)."""
+        if not event.truncated:
+            return
+        self._muted_item = event.item_id  # step 6 — arm the drop before any await
+        await self._client.truncate(event.item_id, event.played_ms)  # step 4
+        await self._client.cancel()  # step 5
 
     # --- the events pump -----------------------------------------------------------------
 
@@ -285,8 +331,14 @@ class ConversationService:
     async def _on_assistant_audio(self, ev: AssistantAudioChunk) -> None:
         """Push one assistant PCM delta down the ``TurnSink`` (§9.1.4, AC-6).
 
-        The first delta of a turn ends the thinking-cue wait. The play is a direct awaited call,
-        never a bus event — audio does not belong on an at-most-once bus."""
+        Barge-in step 6 (§6.2.4): a delta for the truncated ``_muted_item`` is **dropped here**,
+        before it can reach :meth:`TurnSink.play` — that is what silences the cancelled sentence
+        already in flight. A delta for any *other* item ends the mute window (the next assistant
+        item has begun). The first delta of a turn ends the thinking-cue wait. The play itself is
+        a direct awaited call, never a bus event — audio does not belong on an at-most-once bus."""
+        if ev.item_id == self._muted_item:
+            return  # post-truncation delta of the cancelled item — drop it (§6.2.4 step 6)
+        self._muted_item = None  # a delta for a different item ends the mute window
         if not self._first_audio:
             self._first_audio = True
             self._cancel_task(self._thinking_task)
@@ -313,6 +365,8 @@ class ConversationService:
             )
         )
         self._turn_active = False
+        # The (possibly cancelled) response is done — end any barge-in mute (#104).
+        self._muted_item = None
         async with self._lock:
             if self._session_open:
                 self._arm_idle()
@@ -403,6 +457,8 @@ class ConversationService:
         client. The thinking cue is stopped; other best-effort cue tasks are left to finish
         (they release themselves) but are swept on :meth:`stop`."""
         self._session_open = False
+        # A fresh cold session must not inherit a stale barge-in mute (#104).
+        self._muted_item = None
         self._cancel_task(self._idle_task)
         self._idle_task = None
         self._cancel_task(self._mic_task)
