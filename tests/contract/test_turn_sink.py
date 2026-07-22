@@ -9,11 +9,12 @@ placeholder-skip pattern AVID-50 laid for the hardware ports), not :func:`skip_o
 flips it to construct the real sink, exactly as #85 turned the VAD placeholder into
 ``SileroVad``.
 
-The port promises three things — :meth:`~avid.core.ports.TurnSink.mic` (captured PCM up),
-:meth:`play` (assistant PCM down), and :meth:`stop` (**barge-in**, returning the ``played_ms``
-the speaker actually emitted — §6.2.4). The shared tests touch only those; the
-``FakeTurnSink``-specific tail asserts the off-port trace (``played``/``stops``/``mic_sent``)
-and the scripted mic timeline / scripted ``played_ms``.
+The port promises four things — :meth:`~avid.core.ports.TurnSink.mic` (captured PCM up),
+:meth:`play` (assistant PCM down), :meth:`end_response` (normal completion), and
+:meth:`interrupt` (**barge-in**, returning the ``played_ms`` the speaker actually emitted —
+§6.2.4). The shared tests touch only those; the ``FakeTurnSink``-specific tail asserts the
+off-port trace (``played``/``interrupts``/``responses_ended``/``mic_sent``) and the scripted mic
+timeline / scripted ``played_ms``.
 """
 
 from __future__ import annotations
@@ -29,11 +30,19 @@ from avid.core.ports import TurnSink
 # The two rigs the seam bridges (config/*.toml): mic capture 16 kHz, assistant playback 24 kHz.
 _MIC_RATE, _OUT_RATE, _CHANNELS = 16000, 24000, 1
 
-# fake runs everywhere; the real sink is the #103 AudioService seam, skipped until it exists.
+# fake runs everywhere. The "real" TurnSink is AudioService (#103), but it is a *stateful
+# service*: its mic() is an infinite live stream (not a finite script) and its play()/end_response()
+# need a running bus and a THINKING state to be legal — none of which the stateless contract
+# fixtures below provide. So the real sink's port behaviour is exercised in tests/services/
+# test_audio.py instead, and this leg stays skipped (the finite-vs-infinite mic() divergence is
+# inherent: a real microphone never ends).
 _FAKE_REAL_PARAMS = [
     "fake",
     pytest.param(
-        "real", marks=pytest.mark.skip(reason="real TurnSink lands with #103")
+        "real",
+        marks=pytest.mark.skip(
+            reason="real TurnSink is the stateful AudioService seam — covered in test_audio.py"
+        ),
     ),
 ]
 
@@ -77,12 +86,17 @@ async def test_play_accepts_a_chunk_and_item_id(sink: TurnSink) -> None:
     )
 
 
-async def test_stop_returns_played_ms_and_is_idempotent(sink: TurnSink) -> None:
+async def test_interrupt_returns_played_ms_and_is_idempotent(sink: TurnSink) -> None:
     """§6.2.4: barge-in returns the ms actually emitted (an int), and is safe to call twice."""
-    first = await asyncio.wait_for(sink.stop(), timeout=1.0)
-    second = await asyncio.wait_for(sink.stop(), timeout=1.0)
+    first = await asyncio.wait_for(sink.interrupt(), timeout=1.0)
+    second = await asyncio.wait_for(sink.interrupt(), timeout=1.0)
     assert isinstance(first, int)
     assert isinstance(second, int)
+
+
+async def test_end_response_is_a_prompt_direct_call(sink: TurnSink) -> None:
+    """§9.1.4: normal end-of-response returns promptly — a direct call, no loop block (P8)."""
+    await asyncio.wait_for(sink.end_response(), timeout=1.0)
 
 
 # --- FakeTurnSink-specific: the scripted timeline + recorded trace (SDS §3.9.2) ---
@@ -113,16 +127,27 @@ async def test_play_records_item_id_and_chunk() -> None:
     assert fake.played == [("item_1", a), ("item_1", b)]
 
 
-async def test_stop_reports_the_scripted_played_ms_and_counts() -> None:
-    """SDS §6.2.4: stop() returns the injected ``played_ms`` — a test chooses the honest
-    ``audio_end_ms`` the barge-in truncate path will carry — and `stops` counts the calls."""
+async def test_interrupt_reports_the_scripted_played_ms_and_counts() -> None:
+    """SDS §6.2.4: interrupt() returns the injected ``played_ms`` — a test chooses the honest
+    ``audio_end_ms`` the barge-in truncate path will carry — and `interrupts` counts the calls."""
     fake = FakeTurnSink(played_ms=480)
-    assert fake.stops == 0
-    assert await fake.stop() == 480
-    assert await fake.stop() == 480
-    assert fake.stops == 2
+    assert fake.interrupts == 0
+    assert await fake.interrupt() == 480
+    assert await fake.interrupt() == 480
+    assert fake.interrupts == 2
 
 
-async def test_stop_defaults_played_ms_to_zero() -> None:
+async def test_interrupt_defaults_played_ms_to_zero() -> None:
     """No injected figure → 0 ms played, the honest answer when nothing was scripted."""
-    assert await FakeTurnSink().stop() == 0
+    assert await FakeTurnSink().interrupt() == 0
+
+
+async def test_end_response_is_recorded() -> None:
+    """`responses_ended` is the off-port trace of normal completions (the real sink finalizes
+    playback here); it counts the calls, distinct from a barge-in `interrupt`."""
+    fake = FakeTurnSink()
+    assert fake.responses_ended == 0
+    await fake.end_response()
+    await fake.end_response()
+    assert fake.responses_ended == 2
+    assert fake.interrupts == 0

@@ -260,6 +260,10 @@ async def test_two_turn_publishes_the_facts_on_one_correlation_id() -> None:
         # AC-6: assistant PCM was pushed to the sink, tagged by response item.
         assert [item_id for item_id, _ in rig.sink.played] == ["item_0", "item_1"]
 
+        # #103: each completed turn finalizes playback through the sink (end_response), so the
+        # real AudioService sink drives audio.playback_finished + SPEAKING→IDLE.
+        assert rig.sink.responses_ended == 2
+
 
 async def test_user_transcribed_drives_listening_to_thinking() -> None:
     """AC-5: ConvSvc drives the LISTENING→THINKING edge by direct call on the first

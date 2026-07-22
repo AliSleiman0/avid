@@ -299,6 +299,9 @@ class ConversationService:
         Carries the real :class:`~avid.domain.TokenUsage` from ``response.done`` and the turn's
         wall length, measured monotonically (never ``timestamp_ms`` — SDS §9.1.1). Re-arms the
         idle timer: a completed turn is the start of the quiet window before session close."""
+        # Finalize the assistant's audio first: the sink publishes audio.playback_finished and
+        # drives SPEAKING→IDLE (§9.1.4, a direct call — never a conversation.* subscription).
+        await self._sink.end_response()
         duration_ms = 0
         if self._turn_started_ns is not None:
             duration_ms = (

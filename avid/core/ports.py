@@ -309,11 +309,27 @@ class TurnSink(Protocol):
         later truncate. A §9.1.4 direct call — never blocks the loop (P8)."""
         ...
 
-    async def stop(self) -> int:
+    async def end_response(self) -> None:
+        """The assistant's audio for the in-flight response is complete — a *normal* end, not a
+        barge-in. The sink finalizes playback: it publishes ``audio.playback_finished`` with
+        ``truncated=False`` and drives ``SPEAKING → IDLE`` (§3.10.3). A no-op if nothing is
+        playing (a turn that produced no audio).
+
+        Distinct from :meth:`interrupt` on purpose: only ``ConversationService`` knows a
+        response finished (it receives the model's ``response.done``), and the two ways playback
+        ends have **different** state outcomes — normal completion → IDLE, barge-in → LISTENING.
+        So the service calls this on ``TurnDone`` and calls :meth:`interrupt` on a barge-in."""
+        ...
+
+    async def interrupt(self) -> int:
         """Barge-in: stop playback immediately and return ``played_ms`` — the milliseconds the
         speaker **actually** emitted, not what was received (§6.2.4). That figure is the honest
         ``audio_end_ms`` :meth:`RealtimeClient.truncate` needs; the two differ by the whole
-        playback buffer depth. Idempotent — safe to call with nothing playing (returns 0)."""
+        playback buffer depth. Idempotent — safe to call with nothing playing (returns 0).
+
+        Named ``interrupt``, not ``stop``: the real sink (``AudioService``) is also a
+        :class:`Service`, whose ``stop`` unwinds the mic loop — a lifecycle shutdown is a
+        different act from cutting a turn's playback, and the two must not collide."""
         ...
 
 

@@ -66,7 +66,7 @@ def test_m5_seam_ports_expose_their_members() -> None:
     (SDS §3.9.1, §9.1.4) — the vendor boundary and the audio seam."""
     for member in ("open", "aclose", "send_audio", "events", "truncate", "cancel"):
         assert hasattr(RealtimeClient, member)
-    for member in ("mic", "play", "stop"):
+    for member in ("mic", "play", "end_response", "interrupt"):
         assert hasattr(TurnSink, member)
 
 

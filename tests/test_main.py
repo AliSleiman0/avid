@@ -25,7 +25,6 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
-    FakeTurnSink,
     FakeVoiceActivityDetector,
     ReplayRealtimeClient,
     SystemdNotifier,
@@ -50,7 +49,6 @@ from avid.main import (
     _build_realtime,
     _build_servo,
     _build_speaker,
-    _build_turn_sink,
     _build_vad,
     _wire_services,
     main,
@@ -119,13 +117,6 @@ def test_build_realtime_selects_replay() -> None:
     config = load_config(_SIM_TOML)
     client = _build_realtime(config, clock=FakeClock())
     assert isinstance(client, ReplayRealtimeClient)
-
-
-def test_build_turn_sink_is_the_fake_seam() -> None:
-    # The real AudioService-backed sink lands with #103; today the composition root wires the
-    # fake seam (§9.1.4) so ConversationService has something to push assistant PCM through.
-    config = load_config(_SIM_TOML)
-    assert isinstance(_build_turn_sink(config), FakeTurnSink)
 
 
 def test_build_cue_bank_uses_the_injected_cues_dir() -> None:
@@ -274,7 +265,6 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         speaker=FakeSpeaker(out_dir=tmp_path),
         vad=FakeVoiceActivityDetector(),
         realtime=ReplayRealtimeClient(clock=clock, timeline=()),
-        turn_sink=FakeTurnSink(),
         cues=CueBank(speaker=FakeSpeaker(out_dir=tmp_path), asset_dir=None),
         config=config,
     )

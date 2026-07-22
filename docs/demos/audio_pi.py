@@ -188,6 +188,9 @@ async def _run_loopback(
         sample_rate=config.microphone.sample_rate,
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
+        # The transport gate has no ConversationService to consume the TurnSink seam, so keep the
+        # M4 echo: _end_speech loops the captured utterance straight back to the speaker (#103).
+        loopback=True,
     )
 
     collector = _LatencyCollector()
