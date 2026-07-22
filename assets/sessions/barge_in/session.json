@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "events": [
+    {"delay_ms": 0, "type": "user_transcript", "text": "tell me a long story about the sea", "is_approximate": false},
+    {"delay_ms": 300, "type": "assistant_transcript", "text": "Once upon a time, far out on the open ocean, there lived a", "item_id": "item_0"},
+    {"delay_ms": 20, "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_a.wav"},
+    {"delay_ms": 20, "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_b.wav"},
+    {"delay_ms": 30, "type": "user_transcript", "text": "actually never mind", "is_approximate": true},
+    {"delay_ms": 10, "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_c.wav"},
+    {"delay_ms": 150, "type": "turn_done", "usage": {"input_tokens": 300, "cached_input_tokens": 256, "output_tokens": 64}}
+  ]
+}
