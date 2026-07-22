@@ -795,13 +795,32 @@ class Speaker(Protocol):
 
 class VoiceActivityDetector(Protocol):   # §6.3 / ADR-007 — the session gate
     def is_speech(self, frame: AudioChunk) -> bool: ...  # sync; MUST return <5 ms (§9.3)
+
+
+class RealtimeClient(Protocol):          # the vendor boundary (§6.2, R-10)
+    async def open(self) -> None: ...                          # cold session; no resumption (§6.2.3)
+    async def aclose(self) -> None: ...
+    async def send_audio(self, chunk: AudioChunk) -> None: ... # mic PCM up
+    def events(self) -> AsyncIterator[RealtimeEvent]: ...      # neutral, typed, vendor-free
+    async def truncate(self, item_id: str, audio_end_ms: int) -> None: ...  # barge-in (§6.2.4)
+    async def cancel(self) -> None: ...                        # response.cancel
+
+
+class TurnSink(Protocol):                # the ConvSvc↔AudioSvc audio seam (§9.1.4)
+    def mic(self) -> AsyncIterator[AudioChunk]: ...            # captured PCM up
+    async def play(self, chunk: AudioChunk, *, item_id: str) -> None: ...  # assistant PCM down
+    async def stop(self) -> int: ...     # barge-in; returns played_ms ACTUALLY emitted (§6.2.4)
 ```
 
-Two details worth defending:
+`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
+
+Three details worth defending:
 
 **`Servo.move_to` clamps internally.** You could argue clamping belongs in the service. It doesn't: the safety limit is a property of the physical linkage, and if it lives in the service, a future second caller bypasses it. Safety invariants belong at the lowest layer that can enforce them universally.
 
 **`Servo.axes` and `Camera.capabilities` exist** because of §3.9.3 — the system must run on a 1-servo rig, a 2-servo rig, and a simulator with 6, without conditionals scattered through the services.
+
+**`TurnSink.stop()` returns `played_ms`, not `None`.** Barge-in (§6.2.4) needs `audio_end_ms` to be *what the speaker actually emitted*, and only the sink at the bottom of the playback path knows that — it differs from what we received by the entire buffer depth. Returning it from `stop()` puts the honest figure at the one layer that can measure it, exactly as `Servo.move_to` clamps at the one layer that owns the limit. Get it wrong and the model believes it said things the user never heard, which then poisons the conversation context.
 
 ### 3.9.2 Simulator adapters
 
