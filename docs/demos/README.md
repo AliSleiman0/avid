@@ -72,3 +72,40 @@ Reproduce it on the Pi (full runbook, incl. wiring + ALSA routing, in `deploy/RE
    `docs/demos/hal_pi_out/` — open/play them.
 
 Tagged `v0.M2.0`.
+
+## M4 — Audio loop
+
+**Gate (PMP §5.2):** speak into the mic, hear it from the speaker with **≤ 200 ms round-trip**;
+the local VAD correctly **gates speech vs. silence over a ~10-minute recording**.
+
+**Permanent proof:** `tests/e2e/test_m4_gate.py` drives one scripted speech/silence turn through
+the real bus and `AudioService` (fakes, no mocks) and asserts the loopback invariant — the four
+`audio.*` facts on one `correlation_id`, and the captured frames echoed back byte for byte. It
+re-runs on every push, cross-platform. **Recording:** waived (solo maintainer); the on-Pi latency
+print and a short A/V clip are the human evidence.
+
+Note on the metric: `AudioService` is turn-based (it echoes each buffered utterance after
+`speech_ended` — the M4 loopback stands in for the M5 AI client), so the machine-checked number is
+the **processing turnaround** (`playback_started − speech_ended` from event `monotonic_ns`), the
+part of latency the software owns (§2.8.1). The *physical* mouth-to-ear ≤ 200 ms is judged by ear
+on the Pi, exactly as the M3 face gate is judged by eye.
+
+Reproduce it — on a laptop (fakes, deterministic) or on the Pi (real `AlsaMicrophone` /
+`AlsaSpeaker` / `SileroVad`):
+
+1. **Loopback round-trip latency** — drives (laptop) or listens for (Pi) N turns, prints a
+   per-turn table + `min/median/max/count`, and exits non-zero if the max blows the budget:
+   ```
+   uv run python docs/demos/audio_pi.py --mode loopback --config config/sim.toml      # laptop
+   /opt/avid/.venv/bin/python docs/demos/audio_pi.py --mode loopback --config config/pi.toml  # Pi: speak N phrases
+   ```
+2. **VAD gate accuracy** — replays a labelled recording through the config-selected VAD and
+   reports false-open / missed-speech counts (meaningful with `SileroVad` on the Pi). The
+   ~10-min WAV lives outside the repo; point `--wav`/`--labels` at it (`--labels` is a JSON list
+   of `[start_ms, end_ms]` speech spans):
+   ```
+   /opt/avid/.venv/bin/python docs/demos/audio_pi.py --mode vad \
+     --config config/pi.toml --wav ~/vad_10min.wav --labels ~/vad_10min.labels.json
+   ```
+
+Tagged `v0.M4.0`.
