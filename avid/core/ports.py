@@ -7,8 +7,8 @@ these structurally; ``main.py`` alone wires which one (P2, P3).
 
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
-:class:`Speaker`, :class:`VoiceActivityDetector`. ``Embedder`` (SDS §9.3) lands
-with its adapter in a later issue.
+:class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
+:class:`TurnSink`. ``Embedder`` (SDS §9.3) lands with its adapter in a later issue.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -37,6 +37,7 @@ from typing import Protocol, runtime_checkable
 
 from avid.core.event_bus import E, Subscription
 from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
+from avid.core.realtime import RealtimeEvent
 from avid.domain import Event
 
 
@@ -234,6 +235,85 @@ class VoiceActivityDetector(Protocol):
         called on every frame — so a real detector runs inference in-process rather than
         blocking the loop (the sub-ms Silero cost stays under the 50 ms slow-callback gate,
         P8), and the caller (AudioService) invokes it inline, not via an executor."""
+        ...
+
+
+@runtime_checkable
+class RealtimeClient(Protocol):
+    """The OpenAI Realtime session, as ``ConversationService`` needs it (SDS §3.9.1, §6.2).
+
+    The vendor boundary as a port (CLAUDE.md §3, R-10). ``ConversationService`` (#102) depends
+    only on this; the ``replay`` (#101) and ``openai`` (#105) adapters satisfy it. The port is
+    in *our* vocabulary — a session to open/close, PCM to send, a stream of neutral events to
+    consume, a barge-in truncate/cancel — never OpenAI's message shapes. What crosses is the
+    :class:`~avid.core.realtime.RealtimeEvent` union; the vendor's wire format is the adapter's
+    private business, so if the Realtime API changes, exactly one adapter changes and this port,
+    the service, and the domain do not (PMP §9.2).
+
+    A session is **cold** — there is no resumption (SDS §6.2.3): a dropped connection means a new
+    session, re-seeded with instructions + memory, which is why :meth:`open` /:meth:`aclose` are
+    an explicit lifecycle rather than a constructor detail.
+    """
+
+    async def open(self) -> None:
+        """Open a fresh session (instructions + tools + injected memory) — cold, no resume."""
+        ...
+
+    async def aclose(self) -> None:
+        """Tear the session down and release the socket. Idempotent."""
+        ...
+
+    async def send_audio(self, chunk: AudioChunk) -> None:
+        """Send one captured mic chunk up to the model. Never blocks the loop (P8)."""
+        ...
+
+    def events(self) -> AsyncIterator[RealtimeEvent]:
+        """Yield neutral, typed session events (SDS §3.9.1). Vendor-free by construction:
+        every provider message is mapped to a :class:`~avid.core.realtime.RealtimeEvent`
+        before it crosses, so no Realtime shape leaks past the adapter."""
+        ...
+
+    async def truncate(self, item_id: str, audio_end_ms: int) -> None:
+        """Barge-in step 4 (§6.2.4): tell the model the user cut ``item_id`` off at
+        ``audio_end_ms`` — **what the speaker actually played** (from
+        :meth:`TurnSink.stop`), not what we received, or the model believes it said
+        things the user never heard. The Realtime ``content_index`` (always 0 for us) is
+        the adapter's detail, kept off this port."""
+        ...
+
+    async def cancel(self) -> None:
+        """Barge-in step 5 (§6.2.4): cancel the in-flight response so the model stops
+        generating the interrupted turn."""
+        ...
+
+
+@runtime_checkable
+class TurnSink(Protocol):
+    """The audio seam between ``ConversationService`` and ``AudioService`` (SDS §9.1.4).
+
+    PCM is a **direct call, never a bus event** (§9.1.4): audio does not belong on an
+    at-most-once bus. This port is how a turn's audio crosses ``ConvSvc ↔ AudioSvc`` without
+    the two services importing each other (P5) — the conversation service reads captured mic
+    frames off :meth:`mic` to forward to the model, and pushes assistant PCM down through
+    :meth:`play`. Its real implementation lands with the ``AudioService`` seam (#103); the
+    :class:`~avid.adapters.turn_sink.FakeTurnSink` is the simulator (P6).
+    """
+
+    def mic(self) -> AsyncIterator[AudioChunk]:
+        """Yield captured mic PCM (up), mirroring :meth:`Microphone.stream` — the frames the
+        conversation service forwards to the model via :meth:`RealtimeClient.send_audio`."""
+        ...
+
+    async def play(self, chunk: AudioChunk, *, item_id: str) -> None:
+        """Play one assistant PCM delta (down), tagged with the ``item_id`` a barge-in may
+        later truncate. A §9.1.4 direct call — never blocks the loop (P8)."""
+        ...
+
+    async def stop(self) -> int:
+        """Barge-in: stop playback immediately and return ``played_ms`` — the milliseconds the
+        speaker **actually** emitted, not what was received (§6.2.4). That figure is the honest
+        ``audio_end_ms`` :meth:`RealtimeClient.truncate` needs; the two differ by the whole
+        playback buffer depth. Idempotent — safe to call with nothing playing (returns 0)."""
         ...
 
 

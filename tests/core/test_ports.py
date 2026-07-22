@@ -22,11 +22,23 @@ from avid.core.ports import (
     Display,
     EventBus,
     Microphone,
+    RealtimeClient,
     Servo,
     Speaker,
+    TurnSink,
 )
 
-ALL_PORTS = (Camera, Clock, Display, EventBus, Microphone, Servo, Speaker)
+ALL_PORTS = (
+    Camera,
+    Clock,
+    Display,
+    EventBus,
+    Microphone,
+    RealtimeClient,
+    Servo,
+    Speaker,
+    TurnSink,
+)
 
 
 def test_asyncio_event_bus_satisfies_the_eventbus_port() -> None:
@@ -47,6 +59,15 @@ def test_negotiation_members_exist() -> None:
     """§3.9.3 capability negotiation — keeps ADR-009 open without conditionals."""
     assert hasattr(Camera, "capabilities")
     assert hasattr(Servo, "axes")
+
+
+def test_m5_seam_ports_expose_their_members() -> None:
+    """#100: the two M5 ports promise the members ConversationService depends on
+    (SDS §3.9.1, §9.1.4) — the vendor boundary and the audio seam."""
+    for member in ("open", "aclose", "send_audio", "events", "truncate", "cancel"):
+        assert hasattr(RealtimeClient, member)
+    for member in ("mic", "play", "stop"):
+        assert hasattr(TurnSink, member)
 
 
 def test_servo_move_to_documents_adapter_side_clamping() -> None:
