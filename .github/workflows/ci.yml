@@ -36,10 +36,13 @@ jobs:
       - name: import-linter (P1/P5)
         run: uv run lint-imports
       - name: P3 — composition-root purity
-        # No Real*/Fake* is constructed outside main.py and adapters/. A match here
-        # means an adapter leaked into the domain/core/services layers.
+        # No Real*/Fake* adapter is constructed outside main.py and adapters/. A match
+        # here means an adapter leaked into the domain/core/services layers.
+        # The prefix must be followed by an uppercase letter (the RealClock/FakeSpeaker
+        # CamelCase convention) so a genuinely-named port like `RealtimeClient` — "Real"
+        # + lowercase "time", not a Real* adapter — is not a false positive.
         run: |
-          if grep -rEn --include='*.py' '\b(Real|Fake)[A-Za-z0-9_]*\(' avid/domain avid/core avid/services; then
+          if grep -rEn --include='*.py' '\b(Real|Fake)[A-Z][A-Za-z0-9_]*\(' avid/domain avid/core avid/services; then
             echo "::error::P3 violation — Real*/Fake* constructed outside main.py / adapters/"
             exit 1
           fi
