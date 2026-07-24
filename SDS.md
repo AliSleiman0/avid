@@ -741,7 +741,7 @@ Blocking calls get a thread. Non-negotiable list:
 | I2C to PCA9685 | Blocking syscall, sub-ms | `asyncio.to_thread`; short enough to be uncontroversial |
 | ALSA read/write | Blocking | Dedicated capture and playback threads with ring buffers |
 
-Enforcement (P8): CI runs the whole test suite with `PYTHONASYNCIODEBUG=1` and treats any slow-callback warning >50 ms as a failure. This catches the accidental blocking call *at the moment it's introduced*, which is the only time it's cheap to fix.
+Enforcement (P8): CI runs the whole test suite with `PYTHONASYNCIODEBUG=1` and treats any slow-callback warning >50 ms as a failure. This catches the accidental blocking call *at the moment it's introduced*, which is the only time it's cheap to fix. One narrow carve-out (AVID-57): on the Pi, a real device's one-time `start()`/`stop()` (libcamera pipeline init, ALSA card open) is offloaded via `asyncio.to_thread`, so the loop runs no blocking code — but the fixture's own trivial resume callback is measured with inflated wall-clock time while that multi-threaded init contends for the Pi's cores. The gate exempts *only* that fixture setup/teardown boundary, *only* on a real-hardware run; the identical `start`/`stop`/`capture` also run in gated test bodies, so a genuinely loop-blocking adapter still fails, and fake/CI runs stay fully strict (`tests/conftest.py`).
 
 ### 3.8.4 Shared state rules
 
@@ -2515,7 +2515,7 @@ Each principle in §3.2 that lacks a mechanism will be violated by you, at 1 a.m
 | `import-linter` | **P1, P5** | Layer contracts: `domain` imports nothing; `ai` may not import `motion`; etc. |
 | composition-root grep | **P3** | `Adapter(` outside `main.py` / fixtures → fail |
 | config grep | **P7** | `os.environ` outside `core/config.py` → fail |
-| `PYTHONASYNCIODEBUG=1` | **P8** | Slow-callback >50 ms → fail |
+| `PYTHONASYNCIODEBUG=1` | **P8** | Slow-callback >50 ms → fail. Carve-out: one-time real-hardware device init/teardown (fixture boundary, on-Pi only) is threaded, so exempt — see §3.8.3, `tests/conftest.py` (AVID-57) |
 | `event-catalog-drift` | **§9.1.5** | Registry vs §9.1.3's tables → diff → fail |
 | `pytest` on 3.11 **and** 3.13 | **ADR-008** | A 3.13-only feature breaking the Pi caught in CI, not on the desk |
 
