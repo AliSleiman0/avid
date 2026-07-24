@@ -5,32 +5,36 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = 3ee94eb` · tree: only this file dirty · gh `AliSleiman0`.
+**As of:** 2026-07-25 · `main = 30387f4` · tree: only this file dirty · gh `AliSleiman0`.
 **M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
-Latest merge: **#117** (PR #134) — the durable half of M7 and its first I/O: `0001_initial.sql`
-(§8.3 transcribed verbatim, ships in the wheel), the checksummed migration runner + connection
-PRAGMAs (`sqlite.py`), the `FactRepository` port (defined by what MemoryService needs, numpy-free,
-async off the loop), `SqliteFactRepo` (one dedicated writer thread), and a `:memory:`
-`FakeFactRepository` that runs the same schema so cascade + CHECK are the DB's real behaviour (P6).
-Prior this run of the milestone: **#116** (`Fact` + four `memory.*` events + §7.7 scoring), **#115**
-(retrieval eval set), **#130** (P8 gate exempts one-time real-hardware init). The **camera real leg
-is contract-proven** (ov5647, 11/11) — all five HALs are hardware-present, so the four Pi gates
-(#57/#75/#91/#106) are pure demonstration ceremonies batched for one bench day. M7 is the active
-zero-hardware queue: **3 of 15 done**, next is #118 / #120 / #122.
+Latest merge: **#118** (PR #135) — the `Embedder` port + stdlib-only `FakeEmbedder` + its P6 contract.
+The port speaks `Sequence[float]` (not numpy — core/domain stay numpy-free, P1); `embed` is async so
+the real ONNX adapter offloads inference (P8), the fake computes in-process. `FakeEmbedder` is
+`sha256`-seeded (never the `PYTHONHASHSEED`-salted builtin `hash()`) so vectors are byte-identical
+across a process restart — the M7 gate's requirement, proven by a subprocess test — and a per-token
+bag-of-words sum gives pre-normalised output (§8.2) + useful geometry (shared words pull texts closer).
+Wired into `main.py` now (build-and-hold like camera/servo): a `[adapters] embedder` switch +
+`_build_embedder` asserting `dimensions == [memory] dimensions` at composition (AC-6). Prior this run
+of the milestone: **#117** (schema v1 + migration runner + `FactRepository` port + `SqliteFactRepo`),
+**#116** (`Fact` + four `memory.*` events + §7.7 scoring), **#115** (retrieval eval set), **#130**
+(P8 gate exempts one-time real-hardware init). The **camera real leg is contract-proven** (ov5647,
+11/11) — all five HALs are hardware-present, so the four Pi gates (#57/#75/#91/#106) are pure
+demonstration ceremonies batched for one bench day. M7 is the active zero-hardware queue: **4 of 15
+done**, next is #120 / #122 (#124 parallel).
 
 ---
 
 ## ⭐ Next session — two tracks: M7 build (laptop, active) · Pi seal day (below)
 
-The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117
-are merged (3/15); with the store in, the next pickups are **#118** (`Embedder` port + `FakeEmbedder`
-+ contract tests — small, `← #116`, numpy joins the new `memory` extra at #120), **#120** (hybrid
+The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117 +
+#118 are merged (4/15); with the store **and** the embedder in, the next pickups are **#120** (hybrid
 FTS5∪vector retrieval — where #116's `rank_candidates` gets its first real caller and the §8.5 numpy
-matrix is built from `SqliteFactRepo.load_embeddings()`; `← #116/#117/#118`), and **#122**
-(`MemoryService` — calls the repo, publishes the `memory.*` events, and finally wires `SqliteFactRepo`
-into `main.py`, which #117 deferred by design; `← #117`). **#124** (RealtimeClient tool-call widening)
-is also startable in parallel — it touches the M5 seam, not the store. Full dependency order is in
-epic #114.
+matrix is built from `SqliteFactRepo.load_embeddings()` and `FakeEmbedder`'s vectors; `← #116/#117/#118`,
+numpy joins via the new `memory` extra here), and **#122** (`MemoryService` — calls the repo + embedder,
+publishes the `memory.*` events, and finally wires `SqliteFactRepo` into `main.py`, which #117 deferred
+by design; `← #117`). The `Embedder` is already built-and-held in `main.py` (#118), so #122's wiring
+inherits the AC-6 dimension guard. **#124** (RealtimeClient tool-call widening) is also startable in
+parallel — it touches the M5 seam, not the store. Full dependency order is in epic #114.
 
 **Pi track (queued for a full-bench day): seal M2 → M3 → M4 → M5 in one sitting.** All four open
 gate issues are now **pure on-Pi ceremonies** — every child issue and code dependency is closed, and
