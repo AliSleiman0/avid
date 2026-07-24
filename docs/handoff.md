@@ -5,26 +5,32 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = c008860` · tree: only this file dirty · gh `AliSleiman0`.
+**As of:** 2026-07-25 · `main = 3ee94eb` · tree: only this file dirty · gh `AliSleiman0`.
 **M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
-This session shipped three merges: **#130** (P8 async-debug gate now exempts one-time real-hardware
-device init — the carve-out that lets every HAL seal), **#115** (M7's retrieval eval set + recall@5
-harness), and **#116** (the pure layer M7 is built on — `Fact` + the four `memory.*` events + §7.7
-scoring). The **camera real leg is now contract-proven** (ov5647, 11/11) — all five HALs are
-hardware-present, so the four Pi gates (#57/#75/#91/#106) are pure demonstration ceremonies batched
-for one bench day. M7 is the active zero-hardware queue: **2 of 15 done**, next is #117/#118.
+Latest merge: **#117** (PR #134) — the durable half of M7 and its first I/O: `0001_initial.sql`
+(§8.3 transcribed verbatim, ships in the wheel), the checksummed migration runner + connection
+PRAGMAs (`sqlite.py`), the `FactRepository` port (defined by what MemoryService needs, numpy-free,
+async off the loop), `SqliteFactRepo` (one dedicated writer thread), and a `:memory:`
+`FakeFactRepository` that runs the same schema so cascade + CHECK are the DB's real behaviour (P6).
+Prior this run of the milestone: **#116** (`Fact` + four `memory.*` events + §7.7 scoring), **#115**
+(retrieval eval set), **#130** (P8 gate exempts one-time real-hardware init). The **camera real leg
+is contract-proven** (ov5647, 11/11) — all five HALs are hardware-present, so the four Pi gates
+(#57/#75/#91/#106) are pure demonstration ceremonies batched for one bench day. M7 is the active
+zero-hardware queue: **3 of 15 done**, next is #118 / #120 / #122.
 
 ---
 
 ## ⭐ Next session — two tracks: M7 build (laptop, active) · Pi seal day (below)
 
-The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 are
-merged (2/15); the next pickups are **#117** (schema v1 + migration runner + `FactRepository` port
-+ `SqliteFactRepo` — the first I/O of M7, transcribes §8.3, does **not** redesign it) or the smaller
-**#118** (`Embedder` port + `FakeEmbedder` + contract tests). Both are `← #116`, now unblocked;
-**#124** (RealtimeClient tool-call widening) is also startable in parallel — it touches the M5 seam,
-not the store. Then #120 hybrid retrieval is where #116's `rank_candidates` gets its first real
-caller. Full dependency order is in epic #114.
+The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117
+are merged (3/15); with the store in, the next pickups are **#118** (`Embedder` port + `FakeEmbedder`
++ contract tests — small, `← #116`, numpy joins the new `memory` extra at #120), **#120** (hybrid
+FTS5∪vector retrieval — where #116's `rank_candidates` gets its first real caller and the §8.5 numpy
+matrix is built from `SqliteFactRepo.load_embeddings()`; `← #116/#117/#118`), and **#122**
+(`MemoryService` — calls the repo, publishes the `memory.*` events, and finally wires `SqliteFactRepo`
+into `main.py`, which #117 deferred by design; `← #117`). **#124** (RealtimeClient tool-call widening)
+is also startable in parallel — it touches the M5 seam, not the store. Full dependency order is in
+epic #114.
 
 **Pi track (queued for a full-bench day): seal M2 → M3 → M4 → M5 in one sitting.** All four open
 gate issues are now **pure on-Pi ceremonies** — every child issue and code dependency is closed, and
