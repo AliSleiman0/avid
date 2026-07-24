@@ -4,8 +4,9 @@ No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``pydantic`` (P1). The domain imports nothing else from ``avid``. Home of the
 ``Event`` envelope (AVID-6), ``RobotState`` + the transition table (AVID-7),
 ``Affect`` (AVID-8), the ``audio.*`` events + pre-roll ring buffer (#86), the
-degraded-mode cue vocabulary ``Cue`` (AVID-80), and the ``conversation.*`` events +
-``TokenUsage`` value (#99).
+degraded-mode cue vocabulary ``Cue`` (AVID-80), the ``conversation.*`` events +
+``TokenUsage`` value (#99), and the ``Fact`` value + ``memory.*`` events + §7.7 scoring
+(#116).
 """
 
 from avid.domain.affect import Affect, AffectChanged, AffectTier
@@ -36,6 +37,20 @@ from avid.domain.events import (
     SystemShuttingDown,
     SystemStarted,
     validate_event_name,
+)
+from avid.domain.memory import (
+    FACT_KINDS,
+    Fact,
+    FactKind,
+    MemoryFactDeleted,
+    MemoryFactStored,
+    MemoryFactSuperseded,
+    MemoryRecallCompleted,
+    RetrievalCandidate,
+    ScoredCandidate,
+    ScoreWeights,
+    rank_candidates,
+    recency_decay,
 )
 from avid.domain.state import (
     EVENT_TYPES,
@@ -78,6 +93,19 @@ __all__ = [
     "SystemShuttingDown",
     "SystemStarted",
     "validate_event_name",
+    # memory.* events + Fact value + §7.7 scoring (#116)
+    "FACT_KINDS",
+    "Fact",
+    "FactKind",
+    "MemoryFactDeleted",
+    "MemoryFactStored",
+    "MemoryFactSuperseded",
+    "MemoryRecallCompleted",
+    "RetrievalCandidate",
+    "ScoredCandidate",
+    "ScoreWeights",
+    "rank_candidates",
+    "recency_decay",
     # RobotState (AVID-7); state.transitioned (AVID-69)
     "EVENT_TYPES",
     "TRANSITION_TABLE",
