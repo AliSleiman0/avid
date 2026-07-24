@@ -12,6 +12,7 @@ idiomatic name, matching SDS §9.3, AVID-12's acceptance criteria, and the bus's
 from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay, FramebufferDisplay
+from avid.adapters.embedder import FakeEmbedder
 from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
@@ -58,4 +59,6 @@ __all__ = [
     "SystemdNotifier",
     # Local control API (AVID-40)
     "HealthServer",
+    # Embedder (#118) — real LocalMiniLmEmbedder (ONNX) lands in a later issue
+    "FakeEmbedder",
 ]
