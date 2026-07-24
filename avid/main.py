@@ -27,6 +27,7 @@ from avid.adapters import (
     CapturingRealtimeClient,
     FakeCamera,
     FakeDisplay,
+    FakeEmbedder,
     FakeMicrophone,
     FakeServiceNotifier,
     FakeServo,
@@ -50,6 +51,7 @@ from avid.core.ports import (
     Camera,
     Clock,
     Display,
+    Embedder,
     Microphone,
     RealtimeClient,
     Service,
@@ -282,6 +284,45 @@ def _build_vad(config: Config) -> VoiceActivityDetector:
             )
 
 
+def _build_embedder(config: Config) -> Embedder:
+    """Select the ``Embedder`` adapter named by ``[adapters] embedder`` (#118, SDS §9.3).
+
+    ``fake`` is the laptop/sim default — the stdlib, dependency-free :class:`FakeEmbedder`, the CI
+    embedder and simulator (P6); ``local_minilm`` is the real ONNX all-MiniLM-L6-v2 adapter (a later
+    issue, its ``onnxruntime``/``numpy`` in the ``memory`` extra, ADR-008). The vector width is
+    injected from ``[memory] dimensions`` (P7).
+
+    The returned embedder's :attr:`~avid.core.ports.Embedder.dimensions` is asserted equal to
+    ``[memory] dimensions`` (AC-6): a fixed-dim real model paired with a mismatched config must fail
+    **loudly at startup**, not silently write half-width BLOBs that only surface as a wrong index at
+    the M7 gate. The fake takes its width from the same config value, so the guard can only ever fire
+    for a real model — but it lives here, at composition, where the mismatch is knowable.
+    """
+    match config.adapters.embedder:
+        case "fake":
+            embedder: Embedder = FakeEmbedder(dimensions=config.memory.dimensions)
+        case (
+            "local_minilm"
+        ):  # pragma: no cover - real ONNX adapter lands in a later issue
+            raise NotImplementedError(
+                "embedder adapter 'local_minilm' is not available yet — only 'fake' exists "
+                "(#118 ships the port + fake; the ONNX adapter follows)"
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"embedder adapter {other!r} is not available — only 'fake' and "
+                f"'local_minilm' exist (#118)"
+            )
+    if (
+        embedder.dimensions != config.memory.dimensions
+    ):  # pragma: no cover - real fixed-dim only
+        raise RuntimeError(
+            f"embedder produces {embedder.dimensions}-dim vectors but [memory] dimensions is "
+            f"{config.memory.dimensions} — a mismatch would corrupt the index (SDS §8.2, #118)"
+        )
+    return embedder
+
+
 def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
     """Select the ``RealtimeClient`` adapter named by ``[adapters] realtime`` (#101/#105).
 
@@ -450,6 +491,7 @@ async def _run(config: Config) -> int:
     microphone = _build_microphone(config)
     speaker = _build_speaker(config)
     vad = _build_vad(config)
+    embedder = _build_embedder(config)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
@@ -465,6 +507,7 @@ async def _run(config: Config) -> int:
         "servo": True,
         "microphone": True,
         "speaker": True,
+        "embedder": True,
         "notifier": True,
         "health": True,
     }
@@ -484,12 +527,15 @@ async def _run(config: Config) -> int:
         cues=cues,
         config=config,
     )
-    # ``camera`` and ``servo`` are still constructed only to realize the switch and appear in the
-    # health map: driving the camera is the vision service's job (M8) and moving the servo is
-    # MotionService's (M9) — both later issues. ``display`` (AVID-73) and now ``microphone``/
-    # ``speaker``/``vad`` (AVID-89) have left this list; their services own them.
+    # ``camera``, ``servo`` and ``embedder`` are still constructed only to realize the switch and
+    # appear in the health map: driving the camera is the vision service's job (M8), moving the servo
+    # is MotionService's (M9), and the embedder is consumed by the memory index (#120) / MemoryService
+    # (#122) — all later issues. Building the embedder here now still buys AC-6: its dimensions are
+    # checked against config at startup. ``display`` (AVID-73) and ``microphone``/``speaker``/``vad``
+    # (AVID-89) have left this list; their services own them.
     _ = camera
     _ = servo
+    _ = embedder
     return await lifecycle.run(
         bus=bus,
         clock=clock,

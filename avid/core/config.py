@@ -48,6 +48,12 @@ class AdaptersConfig(_Section):
     # (the Pi-only ``pi`` extra, imported lazily inside the adapter); ``fake`` is the
     # scripted-timeline simulator and the laptop default.
     vad: Literal["silero", "fake"] = "fake"
+    # The embedding model (#118). This is the fake-vs-real toggle — ``fake`` is the stdlib,
+    # dependency-free laptop default; ``local_minilm`` is the ONNX all-MiniLM-L6-v2 adapter
+    # (a later issue). It is a *different* axis from ``[memory] embedder`` (``local_minilm`` |
+    # ``openai``), which is the §7.4 which-real-model escape hatch — as ``[adapters] vad`` and
+    # ``[gate] threshold`` are separate axes.
+    embedder: Literal["local_minilm", "fake"] = "fake"
     realtime: Literal["openai", "replay"] = "replay"
     # The process supervisor (AVID-38). ``systemd`` speaks sd_notify to
     # ``$NOTIFY_SOCKET``; ``fake`` records the calls and is the laptop default — the

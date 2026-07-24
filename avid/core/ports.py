@@ -8,8 +8,7 @@ these structurally; ``main.py`` alone wires which one (P2, P3).
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
 :class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
-:class:`TurnSink`, :class:`FactRepository`. ``Embedder`` (SDS §9.3) lands with its
-adapter in a later issue.
+:class:`TurnSink`, :class:`FactRepository`, :class:`Embedder`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -392,6 +391,41 @@ class FactRepository(Protocol):
 
     async def aclose(self) -> None:
         """Close the connection and shut the writer thread down. Idempotent."""
+        ...
+
+
+@runtime_checkable
+class Embedder(Protocol):
+    """Text → semantic vector, as memory retrieval needs it (SDS §9.3, §7.4, ADR-011).
+
+    The port behind which the embedding model hides — ``LocalMiniLmEmbedder`` (all-MiniLM-L6-v2
+    via ONNX, the accepted default), ``OpenAiEmbedder`` (the §7.4 escape hatch if R-07 fires),
+    or ``FakeEmbedder`` (the CI embedder and simulator, P6). Defined by *what retrieval needs* —
+    one vector per string — never by the model's tensor shapes: swapping the model is a config
+    line plus a re-embed migration, not a change here (§7.4).
+
+    The vector crosses as a plain ``Sequence[float]``, **not** a ``numpy`` array: ``core`` and
+    ``domain`` stay ``numpy``-free (P1), so the fake needs no third-party dependency. Packing the
+    floats into the §8.2 384×f32 LE BLOB is the repository's job (:meth:`FactRepository.add`), and
+    stacking them into the search matrix is the index adapter's (§8.5, #120) — both downstream of
+    this port, both ``numpy``'s private business, not this contract's.
+    """
+
+    async def embed(self, text: str) -> Sequence[float]:
+        """Embed ``text`` into a **pre-normalised, unit-length** vector of length
+        :attr:`dimensions` (SDS §8.2).
+
+        Normalising at the port is load-bearing: with ‖v‖ = 1, cosine similarity *is* a dot
+        product, so §7.7's ranking is one matmul with no per-query normalisation pass. ``async``
+        because the real adapter runs model inference it must keep off the event loop (P8); the
+        fake computes in-process and returns directly."""
+        ...
+
+    @property
+    def dimensions(self) -> int:
+        """The fixed vector length this embedder produces (384 for MiniLM, §7.4). Checked against
+        ``[memory] dimensions`` at composition (P7) so a model/config mismatch fails loudly at
+        startup rather than silently corrupting an index discovered wrong only at the gate."""
         ...
 
 

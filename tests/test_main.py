@@ -21,6 +21,7 @@ from avid.adapters import (
     FakeCamera,
     FakeClock,
     FakeDisplay,
+    FakeEmbedder,
     FakeMicrophone,
     FakeServiceNotifier,
     FakeServo,
@@ -47,6 +48,7 @@ from avid.main import (
     _build_camera,
     _build_cue_bank,
     _build_display,
+    _build_embedder,
     _build_microphone,
     _build_notifier,
     _build_realtime,
@@ -114,6 +116,16 @@ def test_build_vad_selects_fake() -> None:
     # model and is proven by the on-hardware M4 gate (AVID-77 / #91).
     config = load_config(_SIM_TOML)
     assert isinstance(_build_vad(config), FakeVoiceActivityDetector)
+
+
+def test_build_embedder_selects_fake_at_the_configured_dimension() -> None:
+    # sim.toml (and pi.toml) set embedder = "fake"; the local_minilm ONNX branch lands in a later
+    # issue. The AC-6 guard's happy path — dimensions match [memory] dimensions — runs here (the
+    # mismatch branch is only reachable by a real fixed-dim model, so it is pragma-excluded).
+    config = load_config(_SIM_TOML)
+    embedder = _build_embedder(config)
+    assert isinstance(embedder, FakeEmbedder)
+    assert embedder.dimensions == config.memory.dimensions
 
 
 def test_build_realtime_selects_replay() -> None:
@@ -192,6 +204,7 @@ def test_main_wires_and_delegates_to_lifecycle(
         "servo": True,
         "microphone": True,
         "speaker": True,
+        "embedder": True,
         "notifier": True,
         "health": True,
     }
