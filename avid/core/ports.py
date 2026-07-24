@@ -8,7 +8,8 @@ these structurally; ``main.py`` alone wires which one (P2, P3).
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
 :class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
-:class:`TurnSink`. ``Embedder`` (SDS §9.3) lands with its adapter in a later issue.
+:class:`TurnSink`, :class:`FactRepository`. ``Embedder`` (SDS §9.3) lands with its
+adapter in a later issue.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -38,7 +39,7 @@ from typing import Protocol, runtime_checkable
 from avid.core.event_bus import E, Subscription
 from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
 from avid.core.realtime import RealtimeEvent
-from avid.domain import Event
+from avid.domain import Event, Fact
 
 
 @runtime_checkable
@@ -330,6 +331,67 @@ class TurnSink(Protocol):
         Named ``interrupt``, not ``stop``: the real sink (``AudioService``) is also a
         :class:`Service`, whose ``stop`` unwinds the mic loop — a lifecycle shutdown is a
         different act from cutting a turn's playback, and the two must not collide."""
+        ...
+
+
+@runtime_checkable
+class FactRepository(Protocol):
+    """Durable fact storage, as ``MemoryService`` needs it (SDS §8.3, §3.6, ADR-003).
+
+    The port `SqliteFactRepo` hides behind — defined by *what the application needs* (store a
+    fact, read the live ones, supersede, forget, hand out embeddings for the boot rebuild),
+    never by what SQLite offers. That inversion is the whole value: the numpy matrix (§8.5),
+    the FTS5 shadow, the PRAGMAs are all the adapter's business, not this contract's.
+
+    Every method is ``async`` because ``sqlite3`` is blocking, synchronous I/O that must never
+    touch the event loop (P8, §3.8.2): the adapter offloads each call to a dedicated writer
+    thread, so the port is async even though SQLite itself is not. Timestamps crossing here are
+    epoch **seconds**, UTC (§8.2) — the :class:`~avid.domain.Fact` convention, not the
+    :class:`~avid.domain.Event` envelope's ``timestamp_ms``.
+    """
+
+    async def add(self, fact: Fact, *, embedding: bytes | None = None) -> int:
+        """Insert ``fact`` and return its assigned id. The database owns the id (an
+        ``INTEGER PRIMARY KEY`` rowid, §8.2), so ``fact.id`` is ignored on insert and the new
+        id is returned for the caller to carry. ``embedding`` is the pre-normalised 384×f32 LE
+        BLOB (§8.2), crossing as opaque ``bytes`` so the port stays ``numpy``-free; ``None``
+        until the embedder (#118) is wired."""
+        ...
+
+    async def get(self, fact_id: int) -> Fact | None:
+        """The fact with ``fact_id``, or ``None`` if it does not exist. Never returns the
+        embedding — the vector is the index's concern (§8.5), not the value's."""
+        ...
+
+    async def fetch_live(self) -> Sequence[Fact]:
+        """Every live (non-superseded) fact, most-recently-accessed first — the ``idx_facts_live``
+        hot path (§7.7). Superseded facts are retained for temporal reasoning (§7.8) but excluded
+        here; ``retrieve()`` only ever ranks live ones."""
+        ...
+
+    async def mark_superseded(self, old_id: int, new_id: int, *, at: int) -> None:
+        """Point ``old_id`` at the fact that replaced it (§7.8), setting ``superseded_by`` **and**
+        ``superseded_at`` together — the schema's paired ``CHECK`` rejects setting one without the
+        other. Soft supersession: the old fact is not deleted, so "what did I *used* to drink?"
+        stays answerable. ``at`` is epoch seconds (§8.2)."""
+        ...
+
+    async def delete(self, fact_id: int) -> None:
+        """Hard-delete ``fact_id`` — the ``forget()`` primitive (§7.10, UC-05). The schema's
+        ``ON DELETE CASCADE`` (with ``foreign_keys = ON``, §8.4) removes the fact's routines and
+        triggers with it; the FTS5 shadow is swept by its delete trigger. A privacy operation, so
+        it leaves no trace to reason over — distinct from supersession."""
+        ...
+
+    async def load_embeddings(self) -> Sequence[tuple[int, bytes]]:
+        """Every live fact's ``(id, embedding)`` for the boot-time index rebuild (§8.5): SQLite is
+        truth, the numpy matrix is a write-through cache reconstructed on start. Facts without an
+        embedding are skipped. The BLOB crosses as opaque ``bytes`` — turning it into the float32
+        matrix is the index adapter's job (#120), keeping this port ``numpy``-free."""
+        ...
+
+    async def aclose(self) -> None:
+        """Close the connection and shut the writer thread down. Idempotent."""
         ...
 
 
