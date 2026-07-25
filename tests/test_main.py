@@ -22,13 +22,16 @@ from avid.adapters import (
     FakeClock,
     FakeDisplay,
     FakeEmbedder,
+    FakeFactRepository,
     FakeMicrophone,
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
     FakeVoiceActivityDetector,
+    HybridRetriever,
     OpenAIRealtimeClient,
     ReplayRealtimeClient,
+    SqliteFactRepo,
     SystemdNotifier,
 )
 from avid.core import lifecycle
@@ -49,9 +52,11 @@ from avid.main import (
     _build_cue_bank,
     _build_display,
     _build_embedder,
+    _build_fact_repository,
     _build_microphone,
     _build_notifier,
     _build_realtime,
+    _build_retriever,
     _build_servo,
     _build_speaker,
     _build_vad,
@@ -126,6 +131,39 @@ def test_build_embedder_selects_fake_at_the_configured_dimension() -> None:
     embedder = _build_embedder(config)
     assert isinstance(embedder, FakeEmbedder)
     assert embedder.dimensions == config.memory.dimensions
+
+
+def test_build_fact_repository_selects_fake_for_sim() -> None:
+    # sim.toml defaults [adapters] store = "fake" → the in-memory FakeFactRepository.
+    config = load_config(_SIM_TOML)
+    assert isinstance(
+        _build_fact_repository(config, clock=FakeClock()), FakeFactRepository
+    )
+
+
+async def test_build_fact_repository_selects_sqlite_when_configured() -> None:
+    # The real file-backed store branch: SQLite runs everywhere, so this is not Pi-gated. The
+    # connection opens lazily, so constructing it here touches no file.
+    config = load_config(_SIM_TOML)
+    sqlite_config = config.model_copy(
+        update={"adapters": config.adapters.model_copy(update={"store": "sqlite"})}
+    )
+    repo = _build_fact_repository(sqlite_config, clock=FakeClock())
+    assert isinstance(repo, SqliteFactRepo)
+    await repo.aclose()
+
+
+async def test_build_retriever_wires_the_store_and_embedder_from_config() -> None:
+    config = load_config(_SIM_TOML)
+    clock = FakeClock()
+    repo = _build_fact_repository(config, clock=clock)
+    embedder = _build_embedder(config)
+    bus = AsyncioEventBus(clock=clock)
+    retriever = _build_retriever(
+        config, repo=repo, embedder=embedder, bus=bus, clock=clock
+    )
+    assert isinstance(retriever, HybridRetriever)
+    await repo.aclose()
 
 
 def test_build_realtime_selects_replay() -> None:
@@ -205,6 +243,8 @@ def test_main_wires_and_delegates_to_lifecycle(
         "microphone": True,
         "speaker": True,
         "embedder": True,
+        "fact_store": True,
+        "retriever": True,
         "notifier": True,
         "health": True,
     }

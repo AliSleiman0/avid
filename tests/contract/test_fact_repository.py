@@ -168,6 +168,41 @@ async def test_load_embeddings_excludes_superseded(repo: FactRepository) -> None
     assert await repo.load_embeddings() == []
 
 
+async def test_keyword_search_matches_a_proper_noun(repo: FactRepository) -> None:
+    """The §7.7 hybrid ∪-keyword branch: a name query returns the fact containing it."""
+    maya = await repo.add(make_fact(text="Maya is my sister"))
+    await repo.add(make_fact(text="I drink coffee at 8am", kind="routine"))
+
+    hits = await repo.keyword_search("tell me about Maya", limit=5)
+    assert maya in hits
+
+
+async def test_keyword_search_excludes_superseded(repo: FactRepository) -> None:
+    """Like every retrieval path, keyword search is live-only (§7.8) — history stays stored
+    but never surfaces in recall."""
+    old = await repo.add(make_fact(text="I drink coffee every morning", kind="routine"))
+    new = await repo.add(make_fact(text="I switched to tea", kind="routine"))
+    await repo.mark_superseded(old, new, at=500)
+
+    hits = await repo.keyword_search("coffee", limit=5)
+    assert old not in hits
+
+
+async def test_keyword_search_on_a_termless_query_returns_empty(
+    repo: FactRepository,
+) -> None:
+    """Punctuation with no word tokens is a clean miss, never an FTS5 MATCH syntax error."""
+    await repo.add(make_fact(text="Maya is my sister"))
+    assert list(await repo.keyword_search("!?...", limit=5)) == []
+
+
+async def test_keyword_search_respects_the_limit(repo: FactRepository) -> None:
+    for i in range(6):
+        await repo.add(make_fact(text=f"coffee fact number {i}", kind="routine"))
+    hits = await repo.keyword_search("coffee", limit=3)
+    assert len(hits) == 3
+
+
 async def test_aclose_is_idempotent(repo: FactRepository) -> None:
     await repo.add(make_fact())
     await repo.aclose()

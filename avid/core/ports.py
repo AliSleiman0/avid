@@ -389,6 +389,19 @@ class FactRepository(Protocol):
         matrix is the index adapter's job (#120), keeping this port ``numpy``-free."""
         ...
 
+    async def keyword_search(self, query: str, *, limit: int) -> Sequence[int]:
+        """The live fact ids whose text keyword-matches ``query``, best first, capped at ``limit``.
+
+        The **∪ keyword** half of §7.7's hybrid retrieval (#120): vector search alone cannot
+        reliably surface a proper noun — *"Maya" embeds to mush* — so the retriever unions these
+        ids with its cosine candidates before scoring. Backed by the ``facts_fts`` FTS5 shadow
+        (§8.3), ranked by ``bm25``; the tokenisation and the FTS5 ``MATCH`` grammar are the
+        adapter's business, so a query full of punctuation never reaches this port as a syntax
+        error. Filtered to **live facts** (``superseded_by IS NULL``, §7.8) like every retrieval
+        path — history stays stored but never contaminates recall. Returns ``()`` for a query with
+        no searchable terms."""
+        ...
+
     async def aclose(self) -> None:
         """Close the connection and shut the writer thread down. Idempotent."""
         ...
