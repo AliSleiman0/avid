@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "events": [
+    {"delay_ms": 0, "type": "user_transcript", "text": "where did I say I was travelling next month?", "is_approximate": false},
+    {"delay_ms": 250, "type": "tool_call_requested", "call_id": "call_0", "name": "recall", "arguments": "{\"query\": \"travel plans next month\"}"},
+    {"delay_ms": 300, "type": "assistant_transcript", "text": "You mentioned a trip to Lisbon.", "item_id": "item_0"},
+    {"delay_ms": 20, "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_a.wav"},
+    {"delay_ms": 200, "type": "turn_done", "usage": {"input_tokens": 512, "cached_input_tokens": 448, "output_tokens": 36}}
+  ]
+}

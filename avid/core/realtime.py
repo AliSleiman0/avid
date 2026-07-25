@@ -68,6 +68,29 @@ class AssistantTranscript:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallRequested:
+    """The model invoked a tool (→ dispatched by ``ConversationService``, §6.6, ADR-004).
+
+    Per ADR-004 the model does not own memory — it *gets tools*, and this is the neutral value
+    that carries one invocation across the port. The adapter surfaces it off the vendor's
+    finalize frame (``response.output_item.done``, item type ``function_call``); the streaming
+    ``response.function_call_arguments.delta`` acks are not modelled — we take the ``.done``
+    rollup, exactly as we do for transcripts. The **return leg** is
+    :meth:`~avid.core.ports.RealtimeClient.send_tool_output`, which must be followed by a
+    ``response.create`` or the model silently sits (§6.6 — the step-5 trap).
+
+    ``call_id`` is echoed back verbatim in the tool output so the model can correlate the
+    result; ``arguments`` is the **raw JSON string** the model produced — the dispatcher parses
+    it (the tool schemas + the dispatch to :class:`~avid.services.memory.MemoryService` land in
+    #125). Kept a string here so the vendor boundary carries no opinion about a tool's shape.
+    """
+
+    call_id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TurnDone:
     """The turn's ``response.done`` token counts (→ ``conversation.turn_ended``).
 
@@ -97,6 +120,7 @@ RealtimeEvent = (
     UserTranscript
     | AssistantAudioChunk
     | AssistantTranscript
+    | ToolCallRequested
     | TurnDone
     | SessionClosed
 )

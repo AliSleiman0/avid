@@ -60,6 +60,7 @@ from avid.core.realtime import (
     AssistantTranscript,
     RealtimeEvent,
     SessionClosed,
+    ToolCallRequested,
     TurnDone,
     UserTranscript,
 )
@@ -106,6 +107,12 @@ def _build_event(record: dict[str, Any], *, base: Path) -> RealtimeEvent:
             )
         if kind == "assistant_transcript":
             return AssistantTranscript(text=record["text"], item_id=record["item_id"])
+        if kind == "tool_call_requested":
+            return ToolCallRequested(
+                call_id=record["call_id"],
+                name=record["name"],
+                arguments=record["arguments"],
+            )
         if kind == "assistant_audio_chunk":
             return AssistantAudioChunk(
                 chunk=_load_wav(base / record["wav"]), item_id=record["item_id"]
@@ -148,6 +155,7 @@ class ReplayRealtimeClient:
         # Advertised, off the port (the contract's observation points, not an app need).
         self.sent: list[AudioChunk] = []
         self.truncations: list[tuple[str, int]] = []
+        self.tool_outputs: list[tuple[str, str]] = []
         self.cancels = 0
         self.opened = False
         self.closed = False
@@ -211,6 +219,12 @@ class ReplayRealtimeClient:
         """Barge-in step 5 (§6.2.4): record the cancel. Non-blocking (P8)."""
         self.cancels += 1
 
+    async def send_tool_output(self, call_id: str, output: str) -> None:
+        """Record one tool result (§6.6). A replay does not act on it — the model's follow-up is
+        pre-recorded (the next timeline events), so this only keeps the ``(call_id, output)`` pair
+        assertable for the dispatch tests (#125), like :attr:`truncations`. Non-blocking (P8)."""
+        self.tool_outputs.append((call_id, output))
+
 
 # --- OpenAIRealtimeClient (#105): the real WSS client -------------------------------------
 
@@ -244,6 +258,18 @@ def _translate(msg: dict[str, Any]) -> RealtimeEvent | None:
             ),
             item_id=str(msg["item_id"]),
         )
+    if kind == "response.output_item.done":
+        item = msg.get("item") or {}
+        if item.get("type") == "function_call":
+            # §6.6: the model finalized a tool call. Arguments streamed in on
+            # response.function_call_arguments.delta (unmodelled, like transcript deltas); this
+            # .done frame carries the complete arguments, so we map off it and stay stateless.
+            return ToolCallRequested(
+                call_id=str(item["call_id"]),
+                name=str(item["name"]),
+                arguments=str(item.get("arguments", "")),
+            )
+        return None  # a non-function output item (e.g. a message) — not surfaced here
     if kind == "response.done":
         usage = (msg.get("response") or {}).get("usage") or {}
         details = usage.get("input_token_details") or {}
@@ -288,6 +314,7 @@ class OpenAIRealtimeClient:
         instructions: str,
         max_output_tokens: int,
         turn_detection: dict[str, Any],
+        tools: Sequence[dict[str, Any]] = (),
     ) -> None:
         self._api_key = (
             api_key  # private; only ever used to build the connect header (AC-6)
@@ -297,6 +324,11 @@ class OpenAIRealtimeClient:
         self._instructions = instructions
         self._max_output_tokens = max_output_tokens
         self._turn_detection = turn_detection
+        # Tool declarations (§6.6) are session-level and part of the cached prefix (§6.2.2), so
+        # they are fixed at construction, never sent per-turn. Empty until #125 supplies the
+        # recall/forget/remember_fact schemas via the composition root; a vendor-shaped dict
+        # injected here (like turn_detection) does not cross the port.
+        self._tools = tuple(tools)
         self._ws: Any = None  # the websockets connection, untyped (lazy vendor import)
         self._closed = False
         # Set on a truncate() and consumed by the next user transcript: audio/transcript alignment
@@ -311,8 +343,9 @@ class OpenAIRealtimeClient:
         """The ``session.update`` payload (SDS §6.2.2). ``instructions``/``voice``/``model`` are the
         cacheable, session-static prefix (§6.10.2, Fact 1); ``max_output_tokens`` is a cost
         guardrail (§6.10). ``create_response``/``interrupt_response`` let the server VAD drive
-        turn-taking and barge-in."""
-        return {
+        turn-taking and barge-in. ``tools`` rides the same static payload (§6.6) — part of the
+        cached prefix, so declared once here and never mutated mid-session (§6.2.2)."""
+        config: dict[str, Any] = {
             "instructions": self._instructions,
             "audio": {
                 "input": {
@@ -327,6 +360,9 @@ class OpenAIRealtimeClient:
             },
             "max_output_tokens": self._max_output_tokens,
         }
+        if self._tools:
+            config["tools"] = list(self._tools)  # §6.6 — static for the session's life
+        return config
 
     async def open(self) -> None:
         """Connect a fresh cold session and send ``session.update`` (SDS §6.2.2/§6.2.3).
@@ -411,6 +447,28 @@ class OpenAIRealtimeClient:
         """Barge-in step 5 (§6.2.4): cancel the in-flight response (``response.cancel``)."""
         await self._send({"type": "response.cancel"})
 
+    async def send_tool_output(self, call_id: str, output: str) -> None:
+        """Return a tool result and prompt the model to speak (§6.6 steps 4–5).
+
+        Two client events, in order: ``conversation.item.create`` carrying the
+        ``function_call_output`` (``call_id`` echoed, ``output`` a string), **then**
+        ``response.create``. The second is not optional — without it the model silently swallows
+        the turn (§6.6's step-5 trap, the number-one Realtime tool-integration bug). Non-blocking
+        (P8)."""
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                },
+            }
+        )
+        await self._send(
+            {"type": "response.create"}
+        )  # step 5 — or the model just sits (§6.6)
+
     async def _send(self, payload: dict[str, Any]) -> None:
         """Serialise and send one client event, if the socket is live. Non-blocking (P8)."""
         if self._ws is not None:
@@ -460,6 +518,9 @@ class CapturingRealtimeClient:
     async def cancel(self) -> None:
         await self._inner.cancel()
 
+    async def send_tool_output(self, call_id: str, output: str) -> None:
+        await self._inner.send_tool_output(call_id, output)
+
     def events(self) -> AsyncIterator[RealtimeEvent]:
         return self._events()
 
@@ -489,6 +550,11 @@ class CapturingRealtimeClient:
                 record["type"] = "assistant_transcript"
                 record["text"] = event.text
                 record["item_id"] = event.item_id
+            case ToolCallRequested():
+                record["type"] = "tool_call_requested"
+                record["call_id"] = event.call_id
+                record["name"] = event.name
+                record["arguments"] = event.arguments
             case AssistantAudioChunk():
                 wav = f"turn{self._audio_index}.wav"
                 self._audio_index += 1

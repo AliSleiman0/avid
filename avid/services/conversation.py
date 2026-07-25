@@ -72,6 +72,7 @@ from avid.core.realtime import (
     AssistantAudioChunk,
     AssistantTranscript,
     SessionClosed,
+    ToolCallRequested,
     TurnDone,
     UserTranscript,
 )
@@ -290,6 +291,8 @@ class ConversationService:
                     await self._on_assistant_transcript(ev)
                 case AssistantAudioChunk():
                     await self._on_assistant_audio(ev)
+                case ToolCallRequested():
+                    await self._on_tool_call(ev)
                 case TurnDone():
                     await self._on_turn_done(ev)
                 case SessionClosed():
@@ -344,6 +347,23 @@ class ConversationService:
             self._cancel_task(self._thinking_task)
             self._thinking_task = None
         await self._sink.play(ev.chunk, item_id=ev.item_id)
+
+    async def _on_tool_call(self, ev: ToolCallRequested) -> None:
+        """The model requested a tool (§6.6, ADR-004) — a declared seam, not yet wired.
+
+        Dispatch to :class:`~avid.services.memory.MemoryService` (``recall``/``forget``/
+        ``remember_fact``), executing the tool and returning the result via
+        :meth:`RealtimeClient.send_tool_output`, lands in **#125**. Until then this handler logs
+        and drops the call — the same "declared seam, not a subscription" stance as the
+        ``behavior.trigger_fired`` origin (M6): the widened port and this pump case exist so #125
+        is a small, local addition, and so a ``tool_call`` replay fixture pumps cleanly today
+        rather than crashing the exhaustive ``match`` (this is the union member every consumer
+        must handle). It publishes no ``conversation.*`` fact — the seam is inert by design."""
+        _log.info(
+            "tool call %r requested [%s] — dispatch lands in #125, dropping for now",
+            ev.name,
+            self._corr(),
+        )
 
     async def _on_turn_done(self, ev: TurnDone) -> None:
         """The turn completed (``conversation.turn_ended``) — the sole cost-meter feed (AC-7).

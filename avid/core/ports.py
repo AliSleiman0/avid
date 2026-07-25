@@ -288,6 +288,18 @@ class RealtimeClient(Protocol):
         generating the interrupted turn."""
         ...
 
+    async def send_tool_output(self, call_id: str, output: str) -> None:
+        """Return a tool's result to the model — the §6.6 return leg (ADR-004).
+
+        The model asks for a tool via a :class:`~avid.core.realtime.ToolCallRequested` on
+        :meth:`events`; the dispatcher executes it and hands the result back here, ``output``
+        already serialised to a string, ``call_id`` echoed from the request. The adapter then
+        **must** prompt the model to speak (``response.create``) or it silently swallows the
+        turn — §6.6's number-one "why is it doing nothing" bug (the step-5 trap), so that follow
+        is the adapter's responsibility, not the caller's. Tool *declarations* are session-level
+        (part of the cached prefix, §6.2.2), so they are configured at construction, not here."""
+        ...
+
 
 @runtime_checkable
 class TurnSink(Protocol):
