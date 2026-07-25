@@ -5,36 +5,47 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = 30387f4` · tree: only this file dirty · gh `AliSleiman0`.
+**As of:** 2026-07-25 · `main = fa1e9bb` · tree: only this file dirty · gh `AliSleiman0`.
 **M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
-Latest merge: **#118** (PR #135) — the `Embedder` port + stdlib-only `FakeEmbedder` + its P6 contract.
-The port speaks `Sequence[float]` (not numpy — core/domain stay numpy-free, P1); `embed` is async so
-the real ONNX adapter offloads inference (P8), the fake computes in-process. `FakeEmbedder` is
-`sha256`-seeded (never the `PYTHONHASHSEED`-salted builtin `hash()`) so vectors are byte-identical
-across a process restart — the M7 gate's requirement, proven by a subprocess test — and a per-token
-bag-of-words sum gives pre-normalised output (§8.2) + useful geometry (shared words pull texts closer).
-Wired into `main.py` now (build-and-hold like camera/servo): a `[adapters] embedder` switch +
-`_build_embedder` asserting `dimensions == [memory] dimensions` at composition (AC-6). Prior this run
-of the milestone: **#117** (schema v1 + migration runner + `FactRepository` port + `SqliteFactRepo`),
-**#116** (`Fact` + four `memory.*` events + §7.7 scoring), **#115** (retrieval eval set), **#130**
-(P8 gate exempts one-time real-hardware init). The **camera real leg is contract-proven** (ov5647,
-11/11) — all five HALs are hardware-present, so the four Pi gates (#57/#75/#91/#106) are pure
-demonstration ceremonies batched for one bench day. M7 is the active zero-hardware queue: **4 of 15
-done**, next is #120 / #122 (#124 parallel).
+Latest merge: **#120** (PR #136) — the memory **read path**: `HybridRetriever` (FTS5 keyword ∪ vector
+cosine over the §8.5 write-through numpy index, scored by #116's `rank_candidates`, publishes
+`memory.recall_completed`). It is a **portless** adapter like `HealthServer`, injected with
+`FactRepository` + `Embedder` + `EventBus` + `Clock`. The one port touch is `FactRepository.keyword_search`
+(FTS5 `MATCH`, live-only, bm25 — a method on a shipped port, not a new Protocol). `pack_embedding` is
+**stdlib** (`array`, §8.2 LE f32) so numpy never loads on the write path; `rebuild()`'s stack + numpy
+import run **off-loop** via `asyncio.to_thread` while the matmul stays inline (P8, ~8 ms at 3k facts).
+Build-and-hold in `main` (`[adapters] store` + `_build_fact_repository`/`_build_retriever`); numpy is a
+new lazy `memory` extra (CI `test`+`async-debug` get `--extra memory`, mypy stays numpy-free). **AC-8:
+the eval harness now scores the real retriever — recall@5 = 0.54** (proper_noun 0.80, direct 0.80;
+paraphrase/negative are the honest limits of the bag-of-words `FakeEmbedder` + the deferred relevance
+floor). Prior this milestone: **#118** (`Embedder` port + `FakeEmbedder`), **#117** (schema v1 +
+`FactRepository` + `SqliteFactRepo`), **#116** (`Fact` + `memory.*` + §7.7 scoring), **#115** (eval set),
+**#130** (P8 hw-init carve-out). The **camera real leg is contract-proven** (ov5647, 11/11) — all five
+HALs are hardware-present, so the four Pi gates (#57/#75/#91/#106) are pure demonstration ceremonies
+batched for one bench day. M7 is the active zero-hardware queue: **5 of 15 done**, next is **#122**
+(#124 parallel).
 
 ---
 
 ## ⭐ Next session — two tracks: M7 build (laptop, active) · Pi seal day (below)
 
 The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117 +
-#118 are merged (4/15); with the store **and** the embedder in, the next pickups are **#120** (hybrid
-FTS5∪vector retrieval — where #116's `rank_candidates` gets its first real caller and the §8.5 numpy
-matrix is built from `SqliteFactRepo.load_embeddings()` and `FakeEmbedder`'s vectors; `← #116/#117/#118`,
-numpy joins via the new `memory` extra here), and **#122** (`MemoryService` — calls the repo + embedder,
-publishes the `memory.*` events, and finally wires `SqliteFactRepo` into `main.py`, which #117 deferred
-by design; `← #117`). The `Embedder` is already built-and-held in `main.py` (#118), so #122's wiring
-inherits the AC-6 dimension guard. **#124** (RealtimeClient tool-call widening) is also startable in
-parallel — it touches the M5 seam, not the store. Full dependency order is in epic #114.
+#118 + #120 are merged (5/15); the store, the embedder, **and** the retriever are all in and
+build-and-held in `main`. The next pickup is **#122** (`MemoryService` — the §9.2 exception: a
+direct-call `store_fact`/`retrieve`/`top_facts`/`forget` surface, each durable before it returns, then
+publishing the `memory.*` events; it wires `SqliteFactRepo` + the `HybridRetriever` into `main`'s
+`_wire_services`, calls `retriever.rebuild()` at boot and `append`/`remove` write-through, and inherits
+#118's AC-6 dimension guard; `← #117/#120/#121`). Note **#121** (soft supersession on write) is also a
+`retrieve`-dependent pickup. ⚠️ #122 edits `tests/test_main.py`'s exact-set subscription assertion — the
+same collision that bit #104/#105. **#124** (RealtimeClient tool-call widening) is startable in parallel
+— it touches the M5 seam, not the store. Full dependency order is in epic #114.
+
+> Retriever design note for #122: `HybridRetriever` is portless (no `Retriever` Protocol), so
+> `MemoryService` holds it as a concrete collaborator constructed in `main` (its ports stay
+> `FactRepository`/`Embedder`/…). `retrieve()` already publishes `memory.recall_completed` and accepts a
+> `correlation_id` (thread the turn's id from the `recall` tool). The relevance floor that makes negative
+> queries return empty was **deliberately deferred** (out of #120's ACs; it's what drags eval `negative`
+> to 0.00) — decide in #122/#124 whether it lives in the retriever or the tool engine.
 
 **Pi track (queued for a full-bench day): seal M2 → M3 → M4 → M5 in one sitting.** All four open
 gate issues are now **pure on-Pi ceremonies** — every child issue and code dependency is closed, and
@@ -109,37 +120,40 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
   one full-bench day.
 - **M5 "It talks" (milestone #6): 7 of 9 sealed, laptop-COMPLETE.** #99–#105 merged & closed. Only
   #106 (gate) + #98 (epic) open.
-- **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 2 closed.** The
+- **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 5 closed.** The
   active **laptop queue**. Pure Python + SQLite + local embeddings; depends on no hardware except its
-  own two Pi gates (#127 SPK-3, #129 gate). **#115 (eval set) + #116 (domain) merged.** Next: **#117**
-  (schema + `FactRepository` + `SqliteFactRepo`) or **#118** (`Embedder` port + fake), both `← #116`;
-  **#124** parallel. ⚠️ Decomposition labels ~16.75 IED vs PMP's 13-IED line — recorded honestly in
-  the epic; the §7.3 cut (drop semantic retrieval, ~5 IED, loses UC-05) is the documented lever.
-  numpy → a `memory` optional-dep group at #120 (CI `--extra memory`; ADR-012 pydantic-only runtime
-  preserved). See [[avid-issue-tracker-state]].
+  own two Pi gates (#127 SPK-3, #129 gate). **#115 + #116 + #117 + #118 + #120 merged.** Next: **#122**
+  (`MemoryService` — the store/retrieve/forget surface + `main` wiring; `← #117/#120/#121`); **#121**
+  (soft supersession) and **#124** (tool-call widening) also startable. ⚠️ Decomposition labels
+  ~16.75 IED vs PMP's 13-IED line — recorded honestly in the epic; the §7.3 cut (drop semantic
+  retrieval, ~5 IED, loses UC-05) is the documented lever. numpy is now the lazy `memory` extra
+  (CI `--extra memory` on test+async-debug; ADR-012 pydantic-only default runtime preserved). See
+  [[avid-issue-tracker-state]].
 - **M0 / M1 sealed** (`v0.M0.0` / `v0.M1.0`).
 
 ## What just shipped (this session)
 
-- **#116 (PR #133, squash `c008860`)** — the pure layer M7 is built on: new `avid/domain/memory.py`
-  = **`Fact`** (the §8.3 columns the app reasons over, **minus the embedding BLOB** — vectors belong
-  to the index §8.5, which keeps the domain numpy-free; timestamps are epoch **seconds** per §8.2,
-  `source_correlation_id: UUID | None`), **`FactKind` + `FACT_KINDS`** (matches the §8.3 `CHECK`
-  exactly, drift-tested), the **four `memory.*` events** (`MemoryFactStored/Superseded/Deleted/
-  RecallCompleted`), and **§7.7 scoring** (`recency_decay` = `0.5**(Δdays/half_life)`, 14-day
-  half-life, Δt injected; `rank_candidates` over a decoupled scalar `RetrievalCandidate` — each
-  component min-max normalised, equal-weight Park baseline, `(-score, fact_id)` tie-break, `k`
-  injected). 100% cover, all CI green first run.
-- **#115 (PR #132, squash `aeb7596`)** — M7's deliberate first issue: `assets/eval/retrieval.json`
-  (44 facts + 50 queries in the user's voice, 5 categories incl. 7 negatives) + `tools/eval_recall.py`
-  recall@k harness (narrow injected `Retriever`, per-category breakdown, stub = recall@5 0.12). Tier 5
-  — always exits 0, never gates CI, not pytest-collected. Stdlib only.
-- **#130 (PR #131, squash `6a071df`)** — refined the P8 async-debug gate to **exempt one-time
-  real-hardware device init/teardown** (the pytest-asyncio fixture boundary, on-Pi only), kept strict
-  everywhere else (fake/CI + test bodies), unit-tested both branches. Unblocks all five HAL seals.
-  SDS §3.8.3 + §14.9. See [[avid-p8-hardware-init-carveout]].
-- **Camera real leg proven on the Pi** (cam-only bench): the last never-exercised HAL is now
-  contract-proven; near-black frames are env/lens-cap, not code. See [[avid-camera-hw-bringup]].
+- **#120 (PR #136, squash `fa1e9bb`)** — the M7 **read path**. New `avid/adapters/retrieval.py`:
+  **`HybridRetriever`** (portless adapter like `HealthServer`) owning the §8.5 write-through numpy
+  matrix + per-fact scoring metadata, `rebuild`/`append`/`remove`/`retrieve`; `retrieve()` embeds the
+  query → one matmul over pre-normalised vectors → **∪** an FTS5 keyword search → #116's
+  `rank_candidates` → publishes `memory.recall_completed` (latency from `monotonic_ns`). Plus
+  **`pack_embedding`** (stdlib `array`, the single §8.2 LE-f32 packer — off the write path so numpy
+  never loads there). **`FactRepository.keyword_search`** (FTS5 `MATCH`, live-only, bm25) is the one
+  port touch — a method on a shipped port, contract-tested, fake inherits it. **P8:** `rebuild`'s
+  stack + numpy import run off-loop via `asyncio.to_thread`; the matmul is inline (measured ~8 ms
+  loop-block at 3k facts). **main:** build-and-hold — `[adapters] store` + `_build_fact_repository` +
+  `_build_retriever`, health map gains `fact_store`+`retriever`; `MemoryService` (#122) drives the
+  lifecycle. **memory extra** (numpy>=1.24, lazy per ADR-012); CI test+async-debug get `--extra memory`.
+  **AC-8:** `eval_recall` now scores the real retriever — **recall@5 = 0.54** (proper_noun/direct 0.80;
+  paraphrase/negative limited by the bag-of-words fake + deferred relevance floor). 608 passed,
+  99.87% cover (main/ports/config 100%), clean under `PYTHONASYNCIODEBUG=1`, all CI green first run.
+- **#118 (PR #135, squash `30387f4`)** — `Embedder` port (`Sequence[float]`, async, numpy-free) +
+  stdlib `FakeEmbedder` (`sha256`-seeded → cross-process-stable, pre-normalised bag-of-words) + P6
+  contract; build-and-held in `main` with the AC-6 dimension guard.
+- **#117 (PR #134)** — SQLite schema v1 (`0001_initial.sql`) + checksummed migration runner +
+  `FactRepository` port + `SqliteFactRepo` / `:memory:` `FakeFactRepository` (main wiring deferred to
+  #122). **#116/#115/#130** shipped earlier this milestone (domain scoring / eval set / P8 carve-out).
 
 ## Standing gotchas (carry forward)
 
