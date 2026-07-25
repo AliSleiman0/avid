@@ -54,14 +54,21 @@ the Pi — the same assertions the fakes pass. That is the abstraction proving i
 re-runs on every on-Pi check, not a one-off. **Recording:** waived (solo maintainer); a
 photo/log/clip of the bench demo is the human evidence.
 
+**The captured proof lives in [`m2_evidence/`](m2_evidence/)** — the contract log (20 hardware
+legs, zero skips), a real OV5647 frame, two pixel-exact framebuffer snapshots, and a mic
+capture. See its README for how to read each one.
+
 Reproduce it on the Pi (full runbook, incl. wiring + ALSA routing, in `deploy/README.md` →
 "Prove the HAL on the Pi"):
 
-1. **Every real adapter passes its contract, none skipped:**
+1. **Every real hardware adapter passes its contract, none skipped:**
    ```
    cd /opt/avid
-   AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 /opt/avid/.venv/bin/python -m pytest tests/contract/ -q
+   AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/contract/ -m hardware -q
    ```
+   `-m hardware` selects exactly the real-device legs. A blanket no-skip over all of
+   `tests/contract/` is not achievable — the M5/M7 suites gate their real legs on
+   `OPENAI_API_KEY` + `AVID_LIVE`. See `deploy/README.md` for both commands.
 2. **Each device does something observable** — the bench exerciser (no driving service exists
    until M4+, so this stands in):
    ```

@@ -1,0 +1,39 @@
+# M2 gate (AVID-57) — on-Pi contract proof
+
+host:   Raspberry Pi 4 Model B Rev 1.5
+kernel: 6.12.93+rpt-rpi-v8
+python: Python 3.11.2
+commit: c7eeb1a fix(pi): cap numpy below 2.0 and correct the M2 HAL runbook (AVID-57)
+date:   2026-07-25T22:01:25+00:00
+
+## 1. Hardware real legs — zero skips tolerated
+$ AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/contract/ -m hardware --deselect tests/contract/test_vad.py -v
+tests/contract/test_camera.py::test_adapter_satisfies_the_camera_port[real] PASSED [  5%]
+tests/contract/test_camera.py::test_capture_returns_a_frame_matching_capabilities[real] PASSED [ 10%]
+tests/contract/test_camera.py::test_start_and_stop_are_idempotent_safe[real] PASSED [ 15%]
+tests/contract/test_camera.py::test_capture_does_not_block_the_loop[real] PASSED [ 20%]
+tests/contract/test_display.py::test_adapter_satisfies_the_display_port[real] PASSED [ 25%]
+tests/contract/test_display.py::test_resolution_is_a_pair_of_ints[real] PASSED [ 30%]
+tests/contract/test_display.py::test_render_completes_without_blocking_the_loop[real] PASSED [ 35%]
+tests/contract/test_microphone.py::test_adapter_satisfies_the_microphone_port[real] PASSED [ 40%]
+tests/contract/test_microphone.py::test_stream_yields_audio_chunks[real] PASSED [ 45%]
+tests/contract/test_microphone.py::test_stream_is_cancellable_and_cleans_up[real] PASSED [ 50%]
+tests/contract/test_microphone.py::test_bounded_read_does_not_stall_the_loop[real] PASSED [ 55%]
+tests/contract/test_servo.py::test_adapter_satisfies_the_servo_port[real] PASSED [ 60%]
+tests/contract/test_servo.py::test_clamps_beyond_limits[real] PASSED     [ 65%]
+tests/contract/test_servo.py::test_move_is_cancellable[real] PASSED      [ 70%]
+tests/contract/test_servo.py::test_relax_deenergises[real] PASSED        [ 75%]
+tests/contract/test_speaker.py::test_adapter_satisfies_the_speaker_port[real] PASSED [ 80%]
+tests/contract/test_speaker.py::test_play_accepts_a_chunk[real] PASSED   [ 85%]
+tests/contract/test_speaker.py::test_play_file_plays_a_wav[real] PASSED  [ 90%]
+tests/contract/test_speaker.py::test_stop_is_immediate_and_idempotent[real] PASSED [ 95%]
+tests/contract/test_speaker.py::test_stop_interrupts_playback[real] PASSED [100%]
+================ 20 passed, 200 deselected, 4 warnings in 7.23s ================
+
+## 2. Full contract suite
+$ AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/contract/ -q
+        # Print a warning if user passed providers to InferenceSession() but the SessionOptions instance
+                "passed to InferenceSession()."
+E           onnxruntime.capi.onnxruntime_pybind11_state.NoSuchFile: [ONNXRuntimeError] : 3 : NO_SUCHFILE : Load model from /var/lib/robot/models/silero_vad.onnx failed:Load model /var/lib/robot/models/silero_vad.onnx failed. File doesn't exist
+FAILED tests/contract/test_vad.py::test_is_speech_returns_a_bool[real] - onnx...
+1 failed, 209 passed, 10 skipped, 4 warnings in 21.49s
