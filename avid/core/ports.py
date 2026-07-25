@@ -257,8 +257,19 @@ class RealtimeClient(Protocol):
     an explicit lifecycle rather than a constructor detail.
     """
 
-    async def open(self) -> None:
-        """Open a fresh session (instructions + tools + injected memory) — cold, no resume."""
+    async def open(self, *, memory: Awaitable[str] | None = None) -> None:
+        """Open a fresh session (instructions + tools + injected memory) — cold, no resume.
+
+        ``memory`` is an awaitable resolving to the §6.7-path-1 **layer-4 instruction block** — the
+        pre-session facts (§6.4), already composed to text and bounded by the caller (#126). The
+        adapter awaits it **concurrently with the socket connect** (``asyncio.gather``), not after, so
+        the ~30 ms local retrieval overlaps the ~150 ms WSS setup and costs zero wall-clock time
+        (AC-1); the single ``session.update`` then carries layers 1–3 (the static cached prefix,
+        §6.2.2) **plus** that block appended as layer 4, so the prefix stays byte-identical and cached
+        (AC-2). ``None`` (or an empty resolved string) seeds the stateless M5 instruction unchanged
+        (AC-4). Every open re-runs it — a reconnect is a cold session re-seeded with memory (§6.2.3,
+        AC-5). The caller owns the fetch's error/empty/timeout handling, so what crosses here is only
+        ever a ready string."""
         ...
 
     async def aclose(self) -> None:
@@ -567,6 +578,13 @@ class MemoryTools(Protocol):
         """The `recall` tool (§6.7 path 2, UC-05): the top facts for ``query``, best first. ``k`` is
         the model-requested cap (default 5, §7.7). Publishes ``memory.recall_completed`` via the
         retriever; a read, so it bumps no access counts here."""
+        ...
+
+    async def top_facts(self) -> Sequence[Fact]:
+        """Pre-session injection (§6.7 path 1, #126): identity + active routines + recent
+        high-importance facts, bounded by count **and** a token estimate (§6.7). A pure read over the
+        live facts — publishes nothing (no catalogued event). ``ConversationService`` composes the
+        result into the layer-4 instruction block it injects at session open."""
         ...
 
     async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int:

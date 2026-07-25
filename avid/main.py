@@ -593,10 +593,11 @@ def _wire_services(
         client=realtime,
         sink=audio,
         cues=cues,
-        # The MemoryTools port for the §6.6 tool dispatch (#125) — the concrete MemoryService,
-        # injected as the port so ConvSvc names no service module (P2/P5).
+        # The MemoryTools port for the §6.6 tool dispatch (#125) + §6.7-path-1 pre-injection (#126) —
+        # the concrete MemoryService, injected as the port so ConvSvc names no service module (P2/P5).
         memory=memory,
         session_idle_close_s=config.gate.session_idle_close_s,
+        memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
     )
     # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
     # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so

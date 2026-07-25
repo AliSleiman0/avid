@@ -798,7 +798,7 @@ class VoiceActivityDetector(Protocol):   # §6.3 / ADR-007 — the session gate
 
 
 class RealtimeClient(Protocol):          # the vendor boundary (§6.2, R-10)
-    async def open(self) -> None: ...                          # cold session; no resumption (§6.2.3)
+    async def open(self, *, memory: Awaitable[str] | None = None) -> None: ...  # cold session (§6.2.3); memory = §6.7-path-1 layer-4 block, gathered with the connect (#126)
     async def aclose(self) -> None: ...
     async def send_audio(self, chunk: AudioChunk) -> None: ... # mic PCM up
     def events(self) -> AsyncIterator[RealtimeEvent]: ...      # neutral, typed, vendor-free
@@ -1215,6 +1215,8 @@ Silero fires → [parallel] ──┬─→ open WSS connection      (~150ms)
 Retrieval runs **concurrently with connection setup**, so it costs zero wall-clock time. It is off the turn path entirely (§2.8.1's "no per-turn embedding round-trips"). This is the payoff of the gate: because we open a session on speech detection, we have a natural ~150 ms window in which to do memory work for free.
 
 What goes in: identity facts, active routines, recent high-importance facts. ~600 tokens, ~10-15 facts. Covers UC-01, UC-02, UC-03 without a single `recall` call.
+
+**Implemented (#126):** `ConversationService` composes the top-facts block and hands it to `RealtimeClient.open(memory=...)` as an awaitable; the adapter `asyncio.gather`s it with the socket connect (the overlap above) and appends it as instruction **layer 4** in the one `session.update`, leaving layers 1–3 the byte-identical cached prefix (§6.2.2). The fetch is bounded (`[gate] memory_inject_timeout_s`); an empty or failed retrieval degrades to the stateless instruction — a robot that talks but does not remember, never one that does not talk — and every cold reconnect re-seeds it (§6.2.3).
 
 ### Path 2 — `recall` tool (the long tail)
 

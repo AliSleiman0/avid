@@ -46,10 +46,11 @@ root or a test fixture (P3); everything else depends on the port (P2).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import wave
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from pathlib import Path
 from typing import Any, assert_never
 
@@ -156,6 +157,7 @@ class ReplayRealtimeClient:
         self.sent: list[AudioChunk] = []
         self.truncations: list[tuple[str, int]] = []
         self.tool_outputs: list[tuple[str, str]] = []
+        self.injected: list[str] = []
         self.cancels = 0
         self.opened = False
         self.closed = False
@@ -180,9 +182,16 @@ class ReplayRealtimeClient:
         ]
         return cls(clock=clock, timeline=timeline)
 
-    async def open(self) -> None:
+    async def open(self, *, memory: Awaitable[str] | None = None) -> None:
         """Open a fresh session — cold, no resume (SDS §6.2.3). Rewinds so a re-open replays
-        from the top, clearing any prior :meth:`aclose`."""
+        from the top, clearing any prior :meth:`aclose`.
+
+        A replay carries recorded instructions, so it does not seed a ``session.update`` — but it
+        **awaits** the injected ``memory`` block (#126) so the top-facts fetch actually runs on every
+        open (the cold re-seed, AC-5) and does not leak an un-awaited coroutine, recording the resolved
+        text on the off-port :attr:`injected` trace for the dispatch tests, like :attr:`truncations`."""
+        if memory is not None:
+            self.injected.append(await memory)
         self.opened = True
         self.closed = False
 
@@ -339,14 +348,22 @@ class OpenAIRealtimeClient:
         """Key-free repr (AC-6): the secret must never reach a log line via ``repr``."""
         return f"OpenAIRealtimeClient(model={self._model!r}, voice={self._voice!r})"
 
-    def _session_config(self) -> dict[str, Any]:
+    def _session_config(self, memory_block: str = "") -> dict[str, Any]:
         """The ``session.update`` payload (SDS §6.2.2). ``instructions``/``voice``/``model`` are the
         cacheable, session-static prefix (§6.10.2, Fact 1); ``max_output_tokens`` is a cost
         guardrail (§6.10). ``create_response``/``interrupt_response`` let the server VAD drive
         turn-taking and barge-in. ``tools`` rides the same static payload (§6.6) — part of the
-        cached prefix, so declared once here and never mutated mid-session (§6.2.2)."""
+        cached prefix, so declared once here and never mutated mid-session (§6.2.2).
+
+        ``memory_block`` is the §6.7-path-1 layer-4 injection (#126): **appended after** the static
+        instructions (layers 1–3), never interleaved, so those layers stay byte-identical and the
+        cached prefix survives (§6.2.2, AC-2). Empty by default → the instruction string is exactly
+        the stateless prefix (AC-4)."""
+        instructions = self._instructions
+        if memory_block:
+            instructions = f"{instructions}\n\n{memory_block}"
         config: dict[str, Any] = {
-            "instructions": self._instructions,
+            "instructions": instructions,
             "audio": {
                 "input": {
                     "format": "pcm16",
@@ -364,24 +381,38 @@ class OpenAIRealtimeClient:
             config["tools"] = list(self._tools)  # §6.6 — static for the session's life
         return config
 
-    async def open(self) -> None:
+    async def open(self, *, memory: Awaitable[str] | None = None) -> None:
         """Connect a fresh cold session and send ``session.update`` (SDS §6.2.2/§6.2.3).
 
         The lazy ``websockets`` import (AC-2) keeps the vendor transport out of module scope. The
         key builds the ``Authorization`` header and nothing else (AC-6). ``model`` is fixed in the
-        URL at connect (§6.2.2 — model/voice cannot change within a session)."""
+        URL at connect (§6.2.2 — model/voice cannot change within a session).
+
+        The §6.7-path-1 memory injection (#126): ``memory`` — an awaitable resolving to the layer-4
+        block — is awaited **concurrently with the socket connect** (``asyncio.gather``), so the
+        ~30 ms local retrieval overlaps the ~150 ms WSS setup and adds no wall-clock latency to
+        time-to-session-ready (AC-1). Only the single ``session.update`` that follows depends on the
+        block, and it carries the static prefix + that block as layer 4 (§6.2.2, AC-2)."""
         import websockets  # lazy, adapter-local optional group (AC-2, ADR-008)
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "OpenAI-Beta": "realtime=v1",
         }
-        self._ws = await websockets.connect(
+        connect = websockets.connect(
             f"{_REALTIME_URL}?model={self._model}", additional_headers=headers
         )
+        if memory is None:
+            self._ws = await connect
+            block = ""
+        else:
+            # Overlap the ~150 ms connect with the ~30 ms retrieval — the payoff of the gate (§6.7).
+            self._ws, block = await asyncio.gather(connect, memory)
         self._closed = False
         self._truncation_pending = False
-        await self._send({"type": "session.update", "session": self._session_config()})
+        await self._send(
+            {"type": "session.update", "session": self._session_config(block)}
+        )
 
     async def aclose(self) -> None:
         """Tear the session down and release the socket (idempotent). A subsequent
@@ -501,8 +532,8 @@ class CapturingRealtimeClient:
         self._last_ns: int | None = None
         self._flushed = False
 
-    async def open(self) -> None:
-        await self._inner.open()
+    async def open(self, *, memory: Awaitable[str] | None = None) -> None:
+        await self._inner.open(memory=memory)
 
     async def aclose(self) -> None:
         """Close the inner session, then flush the recording once (idempotent)."""
