@@ -5,7 +5,7 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = f4a2bdb` · tree: only this file dirty · gh `AliSleiman0`.
+**As of:** 2026-07-25 · `main = f4a2bdb` · tree CLEAN · gh `AliSleiman0`.
 **M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
 Latest merge: **#124** (PR #139) — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004: the model
 gets tools). **Purely the transport seam** — the tool *schemas* + dispatch to `MemoryService` are **#125**.
