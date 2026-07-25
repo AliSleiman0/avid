@@ -1,30 +1,43 @@
-"""Contract suite for the ``Embedder`` port (#118, SDS §9.3).
+"""Contract suite for the ``Embedder`` port (#118/#119, SDS §9.3).
 
 A port's contract test runs against *every* adapter, real and fake, so the fake can never quietly
-drift from the real thing (P6, SDS §3.9.2). The shared tier below is parametrized over the adapters
-that exist today — only :class:`FakeEmbedder`, since the real ONNX ``LocalMiniLmEmbedder`` lands in a
-later issue — and is written so that adapter joins as one extra ``params`` entry, no test-body change.
+drift from the real thing (P6, SDS §3.9.2). The shared tier below is parametrized over the M2.0
+hardware seam (:data:`FAKE_REAL_PARAMS`): the ``"fake"`` case runs everywhere; the ``"real"`` case
+skips off the Pi (SDS §14.4) and, on the Pi, exercises the real ONNX :class:`LocalMiniLmEmbedder`
+against the provisioned model — CI proves the mapping and the fake, the device proves the model.
 
-Two clauses get their own proofs beyond the shared invariants: the fake's *useful geometry* (AC-4 —
-shared content words pull texts together, so downstream retrieval tests mean something) and its
+Beyond the shared invariants, three clauses get their own proofs: the fake's *useful geometry* (AC-4
+— shared content words pull texts together, so downstream retrieval tests mean something) and its
 *cross-process determinism* (AC-3 — a subprocess must return byte-identical vectors, which holds only
-because the seed is ``sha256`` and not the per-process-salted builtin ``hash()``).
+because the seed is ``sha256`` and not the per-process-salted builtin ``hash()``); and, on the Pi,
+the real model's *reference vector* (AC-1 — a fixed sentence embeds to a committed known-good vector,
+which catches a mis-wired pooling or tokenizer that would silently poison every embedding).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import pytest
 
-from avid.adapters.embedder import FakeEmbedder
+from avid.adapters.embedder import FakeEmbedder, LocalMiniLmEmbedder
 from avid.core.ports import Embedder
 
+from ._hardware import FAKE_REAL_PARAMS, skip_off_pi
+
 _DIMS = 384
+
+# The AC-1 reference: a fixed sentence and the unit vector the real model produced for it, captured
+# at the pinned model revision (tools/fetch_minilm.py). Cross-checked on the Pi by cosine tolerance,
+# not exact bytes — ARM vs x86 BLAS rounding differs, but a pooling/tokenizer bug collapses the
+# cosine far below the threshold, which is the regression this guards.
+_REFERENCE_PATH = Path(__file__).parent / "minilm_reference.json"
 
 
 def _norm(v: Sequence[float]) -> float:
@@ -38,13 +51,28 @@ def _dot(a: Sequence[float], b: Sequence[float]) -> float:
 # --- shared contract: every Embedder adapter must satisfy it ----------------
 
 
-@pytest.fixture(params=["fake"])
-def embedder(request: pytest.FixtureRequest) -> Embedder:
-    if request.param == "fake":
-        return FakeEmbedder(dimensions=_DIMS)
-    raise AssertionError(
-        f"unknown embedder param {request.param!r}"
-    )  # pragma: no cover
+@pytest.fixture(params=FAKE_REAL_PARAMS)
+def make_embedder(request: pytest.FixtureRequest) -> Callable[[], Embedder]:
+    """A factory for the current param's adapter, so a test can build a *fresh* instance of the same
+    type (the cross-instance determinism proof needs two). The ``"real"`` case skips off the Pi; on
+    the Pi it builds :class:`LocalMiniLmEmbedder` at its default on-device model path (P3/§14.4)."""
+    param = request.param
+    if param == "real":
+        skip_off_pi(
+            "LocalMiniLmEmbedder needs the on-Pi model blob (real adapter, §14.4)"
+        )
+
+    def build() -> Embedder:
+        if param == "fake":
+            return FakeEmbedder(dimensions=_DIMS)
+        return LocalMiniLmEmbedder(dimensions=_DIMS)
+
+    return build
+
+
+@pytest.fixture
+def embedder(make_embedder: Callable[[], Embedder]) -> Embedder:
+    return make_embedder()
 
 
 def test_adapter_satisfies_the_embedder_port(embedder: Embedder) -> None:
@@ -60,15 +88,18 @@ def test_dimensions_matches_the_vector_length(embedder: Embedder) -> None:
 def test_vectors_are_pre_normalised(embedder: Embedder) -> None:
     """AC-2: ‖v‖ ≈ 1, so cosine similarity is a plain dot product (§8.2/§7.7)."""
     for text in ("hello world", "a", "coffee, black, no sugar", "  spaced  out  "):
-        assert _norm(await_embed(embedder, text)) == pytest.approx(1.0, abs=1e-6)
+        assert _norm(await_embed(embedder, text)) == pytest.approx(1.0, abs=1e-5)
 
 
-def test_embedding_is_deterministic_across_instances(embedder: Embedder) -> None:
+def test_embedding_is_deterministic_across_instances(
+    embedder: Embedder, make_embedder: Callable[[], Embedder]
+) -> None:
     """AC-3 (in-process half): the same text embeds to the identical vector, even from a *fresh*
-    instance — so the vectors cannot depend on per-instance state, only on the text."""
+    instance — so the vectors cannot depend on per-instance state, only on the text. Holds for both
+    adapters: the fake reseeds from the text, and the real model is deterministic on one machine."""
     text = "my name is Ali and I drink oat milk"
     first = await_embed(embedder, text)
-    fresh = await_embed(FakeEmbedder(dimensions=_DIMS), text)
+    fresh = await_embed(make_embedder(), text)
     assert tuple(first) == tuple(fresh)
 
 
@@ -82,7 +113,7 @@ def test_empty_string_is_defined_not_a_crash(embedder: Embedder) -> None:
     for text in ("", "   ", "!!!"):
         v = await_embed(embedder, text)
         assert len(v) == _DIMS
-        assert _norm(v) == pytest.approx(1.0, abs=1e-6)
+        assert _norm(v) == pytest.approx(1.0, abs=1e-5)
 
 
 # --- FakeEmbedder-specific: geometry and cross-process determinism ----------
@@ -120,6 +151,28 @@ def test_embedding_is_deterministic_across_processes() -> None:
     )
     subprocess_vec = tuple(float.fromhex(x) for x in proc.stdout.strip().split(","))
     assert subprocess_vec == in_process
+
+
+# --- LocalMiniLmEmbedder-specific: the real model's reference vector (Pi-gated) ----
+
+
+@pytest.mark.hardware
+def test_real_embedder_matches_reference_vector() -> None:
+    """AC-1: on the Pi, a fixed sentence embeds to the committed known-good vector.
+
+    Asserted by cosine (both are unit vectors, so the dot product *is* the cosine) with a loose
+    floor: ARM-vs-x86 BLAS rounding shifts individual components slightly, but a wrong pooling
+    (CLS-only instead of mean, or the mask dropped) or the wrong tokenizer collapses the cosine far
+    below this, which is exactly the silent quality bug this test exists to catch (§7.4)."""
+    skip_off_pi("reference vector needs the on-Pi MiniLM model (real adapter, §14.4)")
+    reference = json.loads(_REFERENCE_PATH.read_text())
+    v = await_embed(LocalMiniLmEmbedder(dimensions=_DIMS), reference["sentence"])
+    assert len(v) == _DIMS
+    assert _norm(v) == pytest.approx(1.0, abs=1e-5)
+    cosine = _dot(v, reference["vector"])
+    assert cosine > 0.999, (
+        f"cosine {cosine:.6f} vs reference — pooling/tokenizer regression?"
+    )
 
 
 # --- tiny async bridge ------------------------------------------------------

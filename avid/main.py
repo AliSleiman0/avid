@@ -39,6 +39,7 @@ from avid.adapters import (
     FramebufferDisplay,
     HealthServer,
     HybridRetriever,
+    LocalMiniLmEmbedder,
     OpenAIRealtimeClient,
     OpenAiTextModel,
     Pca9685Servo,
@@ -302,12 +303,13 @@ def _build_vad(config: Config) -> VoiceActivityDetector:
 
 
 def _build_embedder(config: Config) -> Embedder:
-    """Select the ``Embedder`` adapter named by ``[adapters] embedder`` (#118, SDS §9.3).
+    """Select the ``Embedder`` adapter named by ``[adapters] embedder`` (#118/#119, SDS §9.3).
 
     ``fake`` is the laptop/sim default — the stdlib, dependency-free :class:`FakeEmbedder`, the CI
-    embedder and simulator (P6); ``local_minilm`` is the real ONNX all-MiniLM-L6-v2 adapter (a later
-    issue, its ``onnxruntime``/``numpy`` in the ``memory`` extra, ADR-008). The vector width is
-    injected from ``[memory] dimensions`` (P7).
+    embedder and simulator (P6); ``local_minilm`` is the real ONNX all-MiniLM-L6-v2 adapter (#119,
+    its ``onnxruntime``/``numpy``/``tokenizers`` in the Pi-only ``pi`` extra, ADR-008 — model/tokenizer
+    paths take their in-adapter defaults, mirroring ``_build_vad``). The vector width is injected from
+    ``[memory] dimensions`` (P7).
 
     The returned embedder's :attr:`~avid.core.ports.Embedder.dimensions` is asserted equal to
     ``[memory] dimensions`` (AC-6): a fixed-dim real model paired with a mismatched config must fail
@@ -320,11 +322,8 @@ def _build_embedder(config: Config) -> Embedder:
             embedder: Embedder = FakeEmbedder(dimensions=config.memory.dimensions)
         case (
             "local_minilm"
-        ):  # pragma: no cover - real ONNX adapter lands in a later issue
-            raise NotImplementedError(
-                "embedder adapter 'local_minilm' is not available yet — only 'fake' exists "
-                "(#118 ships the port + fake; the ONNX adapter follows)"
-            )
+        ):  # pragma: no cover - real ONNX adapter, Pi-gated (#119, §14.4)
+            embedder = LocalMiniLmEmbedder(dimensions=config.memory.dimensions)
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
                 f"embedder adapter {other!r} is not available — only 'fake' and "

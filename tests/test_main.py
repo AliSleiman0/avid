@@ -145,9 +145,10 @@ def test_build_vad_selects_fake() -> None:
 
 
 def test_build_embedder_selects_fake_at_the_configured_dimension() -> None:
-    # sim.toml (and pi.toml) set embedder = "fake"; the local_minilm ONNX branch lands in a later
-    # issue. The AC-6 guard's happy path — dimensions match [memory] dimensions — runs here (the
-    # mismatch branch is only reachable by a real fixed-dim model, so it is pragma-excluded).
+    # sim.toml (and pi.toml) set embedder = "fake"; the local_minilm ONNX branch is real now (#119)
+    # but Pi-gated/pragma-excluded — CI never builds it. The AC-6 guard's happy path — dimensions
+    # match [memory] dimensions — runs here (the mismatch branch is only reachable by a real
+    # fixed-dim model, so it too is pragma-excluded).
     config = load_config(_SIM_TOML)
     embedder = _build_embedder(config)
     assert isinstance(embedder, FakeEmbedder)
