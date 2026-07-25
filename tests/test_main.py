@@ -31,6 +31,7 @@ from avid.adapters import (
     FakeVoiceActivityDetector,
     HybridRetriever,
     OpenAIRealtimeClient,
+    OpenAiTextModel,
     ReplayRealtimeClient,
     SqliteFactRepo,
     SystemdNotifier,
@@ -174,10 +175,35 @@ async def test_build_retriever_wires_the_store_and_embedder_from_config() -> Non
 
 
 def test_build_text_model_selects_fake_for_sim() -> None:
-    # sim.toml defaults [adapters] text_model = "fake" → the deterministic §7.8 supersession judge;
-    # the real OpenAI text adapter (the 'openai' branch) lands with #121 and is pragma-excluded.
+    # sim.toml defaults [adapters] text_model = "fake" → the deterministic §7.8 supersession judge.
     config = load_config(_SIM_TOML)
     assert isinstance(_build_text_model(config), FakeTextModel)
+
+
+def test_build_text_model_selects_openai_with_the_injected_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # text_model = "openai" builds the real chat-completions client (#121), fed the pinned [ai] text_model
+    # snapshot and the key read once from the env as a SecretStr (P7). Construction only — the openai SDK
+    # is imported lazily on the first call, so this stays network-free.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+    toml = tmp_path / "openai.toml"
+    toml.write_text('[adapters]\ntext_model = "openai"\n', encoding="utf-8")
+    config = load_config(toml)
+    assert isinstance(_build_text_model(config), OpenAiTextModel)
+
+
+def test_build_text_model_openai_without_a_key_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The 'openai' text adapter needs OPENAI_API_KEY; absent, the composition root refuses loudly rather
+    # than constructing a keyless client that would fail obscurely on the first call (AC-6, like realtime).
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    toml = tmp_path / "openai.toml"
+    toml.write_text('[adapters]\ntext_model = "openai"\n', encoding="utf-8")
+    config = load_config(toml)
+    with pytest.raises(RuntimeError):
+        _build_text_model(config)
 
 
 def test_build_realtime_selects_replay() -> None:

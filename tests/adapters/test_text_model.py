@@ -1,14 +1,19 @@
-"""FakeTextModel — the deterministic §7.8 supersession judge (#122).
+"""TextModel adapters — the deterministic ``FakeTextModel`` (#122) and the real ``OpenAiTextModel`` (#121).
 
-The P6 fake and simulator, and §7.8's tier-1 test double. It supersedes a **literal restatement** (high
-word-token Jaccard) and nothing else — the honest conservative call a dependency-free stand-in can make
-without confabulating a semantic shift (§7.8: "unknown is valid; a confabulated answer is a bug").
-Adapters are coverage-omitted (P6), so this suite is the proof.
+``FakeTextModel`` is the P6 fake, simulator, and §7.8's tier-1 test double: it supersedes a **literal
+restatement** (high word-token Jaccard) and nothing else — the honest conservative call a dependency-free
+stand-in can make without confabulating a semantic shift (§7.8: "unknown is valid; a confabulated answer
+is a bug"). The ``OpenAiTextModel`` cases below cover the two things provable without a socket — its
+key-free ``repr`` (SECURITY.md) and port shape, and the pure ``_parse_superseded`` / ``_build_messages``
+translation (canned strings, no network, mirroring ``realtime._translate``). The live judgment is the
+network-gated ``openai`` leg of ``tests/contract/test_text_model.py``. Adapters are coverage-omitted (P6),
+so this suite is the proof.
 """
 
 from __future__ import annotations
 
-from avid.adapters import FakeTextModel
+from avid.adapters import FakeTextModel, OpenAiTextModel
+from avid.core.ports import TextModel
 
 
 async def test_supersedes_a_literal_restatement() -> None:
@@ -71,3 +76,16 @@ async def test_threshold_is_configurable() -> None:
         )
         == []
     )
+
+
+# --- OpenAiTextModel (#121): the two things provable without a socket --------------------------
+
+
+def test_openai_text_model_repr_never_leaks_the_key() -> None:
+    """AC-6: the injected key must not reach a log line via ``repr`` (SECURITY.md) — like the Realtime
+    client, the model is constructed key-free-visible and is port-shaped without ever connecting (P6)."""
+    model = OpenAiTextModel(
+        api_key="sk-super-secret-value", model="gpt-4o-mini-2024-07-18"
+    )
+    assert "sk-super-secret-value" not in repr(model)
+    assert isinstance(model, TextModel)  # port-shaped without a client
