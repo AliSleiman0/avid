@@ -820,6 +820,14 @@ class MemoryTools(Protocol):             # the §6.6 tool surface ConvSvc dispat
     async def recall(self, query: str, *, k: int = 5,
                      correlation_id: UUID | None = None) -> Sequence[Fact]: ...  # §6.7 path 2
     async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int: ...  # §7.10 hard delete
+
+
+class EpisodeStore(Protocol):            # the §7.5 raw-transcript tier EpisodeRecorder writes (#123)
+    async def start_episode(self, correlation_id: UUID, *, at: int) -> None: ...  # ensure a row, started_at
+    async def append(self, correlation_id: UUID, line: str, *, at: int) -> None: ...  # accumulate transcript, ended_at
+    async def end_turn(self, correlation_id: UUID, *, at: int) -> None: ...       # turn_count++, ended_at
+    async def prune(self, *, older_than: int, limit: int) -> int: ...             # bounded 90-day retention delete
+    async def aclose(self) -> None: ...
 ```
 
 `RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap). The tool *dispatch* is `ConversationService`'s (#125): it parses the call and runs it against the injected **`MemoryTools`** port — never the concrete `MemoryService` (P2/P5) — so the composition root injects the service and `ConvSvc` names only the port. The three tool *declarations* (`TOOL_SCHEMA`, §6.6) and the §7.6 capability instructions ship in `services/tools.py` and are seeded into the session's cached prefix by `main` (a `remember_fact` on a barge-in-approximate turn is declined — §6.2.4/§7.6). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
@@ -1389,6 +1397,8 @@ Both OpenAI v3 models support Matryoshka truncation — a 256-dim 3-large vector
 ## 7.5 Episodic memory
 
 Raw transcripts, `correlation_id`-keyed, 90-day retention. Not retrieved during conversation — it exists for debugging (§3.12.2), for reflection (§7.9), and for the M7 eval set. Pruned on a schedule because §2.7.1 says the SD card is the binding constraint.
+
+**Implemented (#123):** `EpisodeRecorder` (`services/episode_recorder.py`) is a **write-only observer** — it subscribes to the four `conversation.*` facts that carry a turn's shape (`turn_started` / `user_transcribed` / `assistant_responded` / `turn_ended`) and mirrors each into the `episodes` table behind the `EpisodeStore` port, keyed by the turn's `correlation_id`, accumulating the transcript and maintaining `started_at` / `ended_at` / `turn_count`. It **publishes nothing and is read by no retrieval path** (a failure inside it is swallowed by the bus and can never affect a turn), and a barge-in `is_approximate` transcript is recorded **with its flag** (§6.2.4). It owns the 90-day prune: a scheduled loop on the injected `Clock`, deleting a **bounded** batch per pass so a large table never stalls the loop (P8). The store reuses the `[adapters] store` switch (facts and episodes are one SQLite file).
 
 ## 7.6 Fact extraction pipeline
 
@@ -2018,10 +2028,10 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
-| `conversation.turn_started` | `initiator: "user" \| "proactive"` | ConversationService | Observability | DROP_NEWEST |
+| `conversation.turn_started` | `initiator: "user" \| "proactive"` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
 | `conversation.user_transcribed` | `text: str`, `is_approximate: bool` | ConversationService | StateManager, EpisodeRecorder | DROP_NEWEST |
 | `conversation.assistant_responded` | `text: str`, `item_id: str` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
-| `conversation.turn_ended` | `duration_ms: int`, `usage: TokenUsage` | ConversationService | Observability (cost meter, §6.10.6) | DROP_NEWEST |
+| `conversation.turn_ended` | `duration_ms: int`, `usage: TokenUsage` | ConversationService | EpisodeRecorder, Observability (cost meter, §6.10.6) | DROP_NEWEST |
 | `conversation.session_lost` | `cause: str`, `was_mid_turn: bool` | ConversationService | StateManager, ExpressionService | DROP_NEWEST |
 
 `is_approximate` is not a hedge — it's §6.2.4's truncation consequence made explicit. `conversation.item.truncate` drops the transcript for unplayed audio, and audio/transcript alignment is imprecise, so a barge-in leaves the tail of the transcript unreliable. Anything downstream that treats this text as ground truth (fact extraction, episode recording) must consult the flag.

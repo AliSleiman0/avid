@@ -28,6 +28,7 @@ from avid.adapters import (
     FakeCamera,
     FakeDisplay,
     FakeEmbedder,
+    FakeEpisodeStore,
     FakeFactRepository,
     FakeMicrophone,
     FakeServiceNotifier,
@@ -44,6 +45,7 @@ from avid.adapters import (
     Picamera2Camera,
     ReplayRealtimeClient,
     SileroVad,
+    SqliteEpisodeStore,
     SqliteFactRepo,
     SystemClock,
     SystemdNotifier,
@@ -57,6 +59,7 @@ from avid.core.ports import (
     Clock,
     Display,
     Embedder,
+    EpisodeStore,
     EventBus,
     FactRepository,
     Microphone,
@@ -79,6 +82,7 @@ from avid.services import (
     ConversationService,
     CostMeterService,
     CueBank,
+    EpisodeRecorder,
     ExpressionService,
     MemoryService,
 )
@@ -359,6 +363,29 @@ def _build_fact_repository(config: Config, *, clock: Clock) -> FactRepository:
     return repo
 
 
+def _build_episode_store(config: Config, *, clock: Clock) -> EpisodeStore:
+    """Select the ``EpisodeStore`` adapter for the §7.5 transcript tier (#123, SDS §8.3).
+
+    Reuses the **same** ``[adapters] store`` switch as the fact repository — facts and episodes
+    are one SQLite database file, so one real/fake toggle governs both (no separate axis). ``sqlite``
+    is the file-backed :class:`SqliteEpisodeStore` at ``[memory] db_path`` (a second connection to
+    that file; WAL makes two writers safe, §8.4); ``fake`` is :class:`FakeEpisodeStore` at
+    ``":memory:"`` — same schema, no file — the laptop/sim default. Neither is Pi-gated (SQLite is
+    not a device); the connection opens lazily, so building it here touches no file.
+    """
+    match config.adapters.store:
+        case "fake":
+            store: EpisodeStore = FakeEpisodeStore(clock=clock)
+        case "sqlite":
+            store = SqliteEpisodeStore(db_path=config.memory.db_path, clock=clock)
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"store adapter {other!r} is not available — only 'sqlite' and "
+                f"'fake' exist (#117)"
+            )
+    return store
+
+
 def _build_retriever(
     config: Config,
     *,
@@ -509,6 +536,7 @@ def _wire_services(
     text_model: TextModel,
     fact_store: FactRepository,
     retriever: Retriever,
+    episode_store: EpisodeStore,
     cues: CueBank,
     config: Config,
 ) -> Sequence[Service]:
@@ -604,7 +632,27 @@ def _wire_services(
     # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
     # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
     cost_meter = CostMeterService(bus=bus, model=config.ai.model)
-    for service in (affect, expression, audio, conversation, cost_meter, memory):
+    # The episode recorder (#123, SDS §7.5): the write-only transcript observer. Subscribes to the four
+    # conversation.* facts and mirrors each into the episodes table, keyed by correlation_id; it
+    # publishes nothing (no bus handed to it) and reads nothing back into any flow (AC-4). It owns one
+    # task — the 90-day prune loop — so it is returned to the lifecycle like AudioService. The store is
+    # injected as the EpisodeStore port (P2), the same real/fake as the fact store (one DB file).
+    episode_recorder = EpisodeRecorder(
+        clock=clock,
+        store=episode_store,
+        retention_days=config.memory.episode_retention_days,
+        prune_interval_s=config.memory.episode_prune_interval_s,
+        prune_batch=config.memory.episode_prune_batch,
+    )
+    for service in (
+        affect,
+        expression,
+        audio,
+        conversation,
+        cost_meter,
+        memory,
+        episode_recorder,
+    ):
         for sub in service.subscriptions():
             bus.subscribe(
                 sub.event_type,
@@ -614,10 +662,11 @@ def _wire_services(
                 maxsize=sub.maxsize,
             )
     # The services that own tasks need lifecycle management: MemoryService's boot rebuild + store close,
-    # AudioService's mic loop, ConversationService's per-session pump/mic/idle. Memory is started first so
-    # the index is ready before a session ever asks for top_facts. The reactive services (the two faces,
-    # the cost meter) own no task and are kept alive by their bound-method subscriptions above.
-    return (memory, audio, conversation)
+    # AudioService's mic loop, ConversationService's per-session pump/mic/idle, EpisodeRecorder's prune
+    # loop + store close. Memory is started first so the index is ready before a session ever asks for
+    # top_facts. The reactive services (the two faces, the cost meter) own no task and are kept alive by
+    # their bound-method subscriptions above.
+    return (memory, audio, conversation, episode_recorder)
 
 
 async def _run(config: Config) -> int:
@@ -636,6 +685,7 @@ async def _run(config: Config) -> int:
     vad = _build_vad(config)
     embedder = _build_embedder(config)
     fact_store = _build_fact_repository(config, clock=clock)
+    episode_store = _build_episode_store(config, clock=clock)
     text_model = _build_text_model(config)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
@@ -659,6 +709,7 @@ async def _run(config: Config) -> int:
         "speaker": True,
         "embedder": True,
         "fact_store": True,
+        "episode_store": True,
         "retriever": True,
         "text_model": True,
         "notifier": True,
@@ -681,6 +732,7 @@ async def _run(config: Config) -> int:
         text_model=text_model,
         fact_store=fact_store,
         retriever=retriever,
+        episode_store=episode_store,
         cues=cues,
         config=config,
     )

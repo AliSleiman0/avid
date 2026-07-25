@@ -9,7 +9,7 @@ Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clo
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
 :class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
 :class:`TurnSink`, :class:`FactRepository`, :class:`Embedder`, :class:`Retriever`,
-:class:`TextModel`, :class:`MemoryTools`.
+:class:`TextModel`, :class:`MemoryTools`, :class:`EpisodeStore`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -425,6 +425,55 @@ class FactRepository(Protocol):
         error. Filtered to **live facts** (``superseded_by IS NULL``, §7.8) like every retrieval
         path — history stays stored but never contaminates recall. Returns ``()`` for a query with
         no searchable terms."""
+        ...
+
+    async def aclose(self) -> None:
+        """Close the connection and shut the writer thread down. Idempotent."""
+        ...
+
+
+@runtime_checkable
+class EpisodeStore(Protocol):
+    """Durable raw-transcript storage, as ``EpisodeRecorder`` needs it (SDS §7.5, §8.3, ADR-003).
+
+    The ``episodes`` table behind a port — the §7.5 debugging/reflection tier, **write-only with
+    respect to the conversation flow** (AC-4): nothing in any retrieval path reads it, so a failure
+    here can never affect a turn. Defined by *what the recorder needs* — key a turn's transcript by
+    its ``correlation_id`` (§3.12.2), accumulate lines, count turns, and prune the old — never by
+    what SQLite offers.
+
+    Every method is ``async`` because ``sqlite3`` is blocking I/O that must never touch the event
+    loop (P8, §3.8.2): the one real adapter offloads each call to a dedicated writer thread, so the
+    port is async even though SQLite is not. Timestamps crossing here are epoch **seconds**, UTC
+    (§8.2) — the ``Fact``/episode convention, deliberately *not* the ``Event`` envelope's
+    ``timestamp_ms`` (do not cross the two). ``correlation_id`` is the key throughout; the
+    single-writer serialisation is what lets the write ops be insert-if-absent-then-update without a
+    ``UNIQUE`` constraint (§8.3's table has only a non-unique index), so an out-of-order event
+    (§9.1.5: the bus is FIFO per subscriber, not across) still lands on the right row.
+    """
+
+    async def start_episode(self, correlation_id: UUID, *, at: int) -> None:
+        """Ensure an episode row exists for ``correlation_id``, stamping ``started_at`` = ``at`` on
+        creation (§7.5). Idempotent: a second call for a live episode is a no-op, so the turn origin
+        need not be the first event this recorder happens to process (§9.1.5)."""
+        ...
+
+    async def append(self, correlation_id: UUID, line: str, *, at: int) -> None:
+        """Append ``line`` to the episode's accumulated transcript and advance ``ended_at`` to ``at``
+        (§7.5, AC-2). Creates the row if it does not yet exist (insert-if-absent), so a transcript
+        line that arrives before its ``start_episode`` is never dropped."""
+        ...
+
+    async def end_turn(self, correlation_id: UUID, *, at: int) -> None:
+        """Record a completed turn: increment ``turn_count`` and advance ``ended_at`` to ``at``
+        (§7.5, AC-2). Creates the row if absent, like :meth:`append`."""
+        ...
+
+    async def prune(self, *, older_than: int, limit: int) -> int:
+        """Delete up to ``limit`` episodes whose ``started_at`` is before ``older_than`` (epoch
+        seconds), returning how many were removed — the §7.5 90-day retention. **Bounded per call**
+        (AC-3): a huge backlog drains over successive passes rather than stalling the loop on one
+        giant ``DELETE`` (P8). ``older_than`` and ``limit`` are injected from config (P7)."""
         ...
 
     async def aclose(self) -> None:

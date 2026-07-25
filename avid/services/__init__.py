@@ -10,6 +10,7 @@ from avid.services.audio import AudioService
 from avid.services.conversation import ConversationService
 from avid.services.cost_meter import CostMeterService
 from avid.services.cue_bank import CUE_FILES, CueBank
+from avid.services.episode_recorder import EpisodeRecorder
 from avid.services.expression import ExpressionService
 from avid.services.memory import MemoryService
 from avid.services.tools import CAPABILITY_INSTRUCTIONS, TOOL_SCHEMAS
@@ -31,6 +32,8 @@ __all__ = [
     "CostMeterService",
     # The degraded-mode WAV cue bank (AVID-80)
     "CueBank",
+    # The write-only §7.5 transcript observer + 90-day prune (#123)
+    "EpisodeRecorder",
     # The drawer (AVID-72) — the other half of the SDS §3.6.1 split
     "ExpressionService",
     # The sole writer/reader of persistent memory — §9.1.4 direct-call surface (#122)

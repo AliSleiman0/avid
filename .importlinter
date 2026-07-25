@@ -64,6 +64,7 @@ modules =
     avid.services.affect
     avid.services.audio
     avid.services.conversation
+    avid.services.episode_recorder
     avid.services.expression
     avid.services.memory
 # P5: no module reaches through another — cross-module effect happens via the bus,
