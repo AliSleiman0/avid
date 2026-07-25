@@ -20,11 +20,12 @@ avid = "avid.main:main"
 # (ADR-008). It is imported only inside Picamera2Camera.
 #
 # `adafruit-circuitpython-servokit` drives the PCA9685 (AVID-52) and `pyalsaaudio` captures
-# from the USB mic (AVID-53); `onnxruntime`+`numpy` run the Silero v5 VAD model (AVID-77). All
+# from the USB mic (AVID-53); `onnxruntime`+`numpy` run the Silero v5 VAD model (AVID-77) and the
+# all-MiniLM-L6-v2 embedder (#119), and `tokenizers` is that embedder's WordPiece tokenizer. All
 # ARE pip-installable and belong to this Pi-only extra (`uv sync --extra pi` on the Pi). Each is
 # imported only inside its one adapter, lazily, so the modules load off-Pi where the extra is
-# absent. (Silero is pure-CPU and would run off-Pi too, but its contract's real leg is Pi-gated
-# like the other HALs — SDS §14.4 — so the ~1 MB model and these libs never ship to CI.)
+# absent. (Silero/MiniLM are pure-CPU and would run off-Pi too, but their contract real legs are
+# Pi-gated like the other HALs — SDS §14.4 — so the model blobs and these libs never ship to CI.)
 #
 # `numpy` is capped below 2.0 deliberately (AVID-57). The venv is built with
 # `--system-site-packages` so `picamera2` resolves from apt, and the apt `simplejpeg` it
@@ -37,6 +38,7 @@ pi = [
     "pyalsaaudio>=0.10",
     "onnxruntime>=1.16",
     "numpy>=1.24,<2",
+    "tokenizers>=0.20",
 ]
 # The live OpenAI Realtime client (#105). `websockets` is the WSS transport
 # (SDS §6.2.1, ADR-010); `openai` rounds out the vendor SDK per the issue's AC-2. Both are
@@ -109,7 +111,8 @@ files = ["avid"]
 
 # picamera2/libcamera (AVID-51), adafruit_servokit (AVID-52), alsaaudio (AVID-53) and
 # onnxruntime+numpy (AVID-77) are Pi-only (the `pi` extra), unstubbed *in the CI/mypy env where
-# the extra is absent* (ADR-008, SPK-5). openai+websockets (#105) are the same case for the
+# the extra is absent* (ADR-008, SPK-5). tokenizers (#119) is the same case — the MiniLM
+# WordPiece tokenizer, lazy-imported only inside LocalMiniLmEmbedder. openai+websockets (#105) are the same case for the
 # networked `openai` extra — imported lazily only inside OpenAIRealtimeClient (AC-6). Each is
 # imported lazily only inside its one adapter; this override lets mypy resolve those imports as Any
 # instead of erroring, without a per-line `# type: ignore`. numpy is here for the same reason the
@@ -123,6 +126,7 @@ module = [
     "alsaaudio.*",
     "onnxruntime.*",
     "numpy.*",
+    "tokenizers.*",
     "openai.*",
     "websockets.*",
 ]

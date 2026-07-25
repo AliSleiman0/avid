@@ -1394,6 +1394,8 @@ Both OpenAI v3 models support Matryoshka truncation — a 256-dim 3-large vector
 
 **Escape hatch:** `Embedder` is a port. `LocalMiniLmEmbedder` / `OpenAiEmbedder` / `FakeEmbedder`. If R-07 fires (retrieval feels senile), swapping is one config line and a re-embed migration.
 
+**Implementation (#119).** `LocalMiniLmEmbedder` (`avid/adapters/embedder.py`) runs the model via ONNX Runtime and follows `SileroVad` (§14.4): `onnxruntime` / `numpy` / `tokenizers` are lazy-imported inside the adapter (the Pi-only `pi` extra, ADR-008), so the module loads off-Pi where the fake path and CI live. It tokenizes with the model's WordPiece `tokenizer.json`, **mean-pools the token embeddings (`last_hidden_state`) with the attention mask applied**, and L2-normalises to the §8.2 unit vector — the pooling matches sentence-transformers, and the exact vector is pinned as a Pi-gated reference test (a mis-wired pooling/tokenizer is the classic silent quality bug). Because inference is *tens of ms* (not sub-ms like Silero), `embed` runs **off the event loop** via `asyncio.to_thread` (P8) and logs its own per-embed latency so the §7.4 number is recorded at the gate, not assumed. The ~86 MB model + tokenizer are **not committed**; `tools/fetch_minilm.py` downloads them to `/var/lib/robot/models/` (beside `silero_vad.onnx`) and verifies each against a pinned SHA-256, and a missing blob fails with an actionable error naming that script.
+
 ## 7.5 Episodic memory
 
 Raw transcripts, `correlation_id`-keyed, 90-day retention. Not retrieved during conversation — it exists for debugging (§3.12.2), for reflection (§7.9), and for the M7 eval set. Pruned on a schedule because §2.7.1 says the SD card is the binding constraint.
