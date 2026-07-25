@@ -32,12 +32,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
-from array import array
 from collections.abc import Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
+from avid.core.embedding import EMBEDDING_DTYPE
 from avid.core.envelope import envelope
 from avid.core.ports import Clock, Embedder, EventBus, FactRepository
 from avid.domain import (
@@ -53,10 +52,6 @@ _log = logging.getLogger("avid.adapters.retrieval")
 # The §9.1.3 catalog name an operator reads to know who published a recall.
 _SOURCE = "HybridRetriever"
 
-# The §8.2 embedding dtype: 384 × float32, **little-endian**, pre-normalised. Packing and
-# unpacking both pin ``<f4`` so a vector round-trips byte-identically regardless of host order.
-_DTYPE = "<f4"
-
 # How many facts the *vector* side contributes to the candidate union before §7.7 scoring narrows
 # to top_k. Larger than top_k so a fact the keyword branch would miss still gets a fair score;
 # small enough that the union stays tiny. Not a config knob — unlike top_k/weights/half-life
@@ -65,22 +60,6 @@ _VECTOR_POOL = 50
 
 # 86,400 seconds per day — Fact timestamps are epoch **seconds** (§8.2), age is in days (§7.7).
 _SECONDS_PER_DAY = 86_400.0
-
-
-def pack_embedding(vector: Sequence[float]) -> bytes:
-    """Pack a pre-normalised embedding into the §8.2 384×float32 LE BLOB (:meth:`FactRepository.add`).
-
-    The single home of the on-disk vector format: the writer (#122) packs with this before storing,
-    and the boot rebuild unpacks the same ``<f4`` bytes back into a matrix row. Deliberately
-    **stdlib** (``array``), not ``numpy`` — this runs on the write path (a fact store), and pulling
-    in numpy's one-time ~200 ms import there would block the event loop (P8); the heavy numpy work
-    stays in :meth:`~HybridRetriever.rebuild`, off the loop. ``array('f')`` is native-endian float32,
-    byte-swapped on a big-endian host so the bytes are always the little-endian §8.2 layout.
-    """
-    packed = array("f", vector)
-    if sys.byteorder == "big":  # pragma: no cover - CI/Pi are little-endian
-        packed.byteswap()
-    return packed.tobytes()
 
 
 def _stack(blobs: Sequence[bytes]) -> Any:
@@ -93,7 +72,9 @@ def _stack(blobs: Sequence[bytes]) -> Any:
 
     if not blobs:
         return None
-    return np.vstack([np.frombuffer(b, dtype=_DTYPE) for b in blobs]).astype(np.float32)
+    return np.vstack([np.frombuffer(b, dtype=EMBEDDING_DTYPE) for b in blobs]).astype(
+        np.float32
+    )
 
 
 class HybridRetriever:
@@ -159,7 +140,11 @@ class HybridRetriever:
             return
         import numpy as np
 
-        row = np.frombuffer(embedding, dtype=_DTYPE).astype(np.float32).reshape(1, -1)
+        row = (
+            np.frombuffer(embedding, dtype=EMBEDDING_DTYPE)
+            .astype(np.float32)
+            .reshape(1, -1)
+        )
         self._matrix = row if self._matrix is None else np.vstack([self._matrix, row])
         self._row_of[fact.id] = len(self._ids)
         self._ids.append(fact.id)
@@ -181,6 +166,31 @@ class HybridRetriever:
         if self._matrix.shape[0] == 0:
             self._matrix = None
         self._row_of = {fid: i for i, fid in enumerate(self._ids)}
+
+    async def similar(
+        self, vector: Sequence[float], *, threshold: float, k: int
+    ) -> tuple[int, ...]:
+        """Near-duplicate search: live fact ids with cosine ≥ ``threshold``, best first, capped at ``k``.
+
+        The §7.8 supersession pre-check — a write embeds the new fact, then asks the index which existing
+        facts are near-enough duplicates to be candidates for contradiction. One matmul over
+        pre-normalised vectors (cosine *is* the dot product, §8.2), filtered by ``threshold`` and
+        truncated to ``k`` by descending cosine. Publishes nothing (unlike :meth:`retrieve`, this is not
+        a recall). Returns ``()`` when the index holds no vectors."""
+        if self._matrix is None:
+            return ()
+        import numpy as np
+
+        q = np.asarray(vector, dtype=np.float32)
+        scores = self._matrix @ q  # (N,) cosines — both operands are unit vectors
+        hits: list[int] = []
+        for r in np.argsort(-scores)[
+            :k
+        ]:  # descending, so the first sub-threshold ends it
+            if float(scores[int(r)]) < threshold:
+                break
+            hits.append(self._ids[int(r)])
+        return tuple(hits)
 
     async def retrieve(
         self, query: str, *, correlation_id: UUID | None = None

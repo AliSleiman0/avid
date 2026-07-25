@@ -250,3 +250,56 @@ def rank_candidates(
     ]
     scored.sort(key=lambda s: (-s.score, s.fact_id))
     return tuple(scored[:k])
+
+
+# ── §6.7 pre-injection selection — the top_facts block MemoryService injects at session open. Pure:
+# the caller passes the live facts (already recency-ordered from fetch_live); no clock, no I/O. ──
+
+# The set of always-included kinds (§6.7): "who the user is" (identity) and "what they do" (routine),
+# the durable facts UC-01/02/03 turn on — taken ahead of everything else, in the caller's recency order.
+_PRE_INJECT_KINDS: frozenset[FactKind] = frozenset({"identity", "routine"})
+
+# ~4 characters per token, the OpenAI rule of thumb (§6.7). The budget is a soft ceiling on a cached
+# instruction prefix, not a billing figure, so an estimate is all that is needed.
+_CHARS_PER_TOKEN = 4
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count for a fact's text (~4 chars/token, §6.7) — at least 1 for any non-empty fact."""
+    return max(1, len(text) // _CHARS_PER_TOKEN)
+
+
+def select_top_facts(
+    facts: Sequence[Fact], *, max_facts: int, max_tokens: int
+) -> tuple[Fact, ...]:
+    """Choose the §6.7 pre-session injection set: identity + active routines + recent high-importance.
+
+    The ~10–15-fact / ~600-token block that lands in instruction layer 4 before a session opens, so it
+    is cached prefix (§6.4) and must stay bounded by **both** a count and a token estimate — unbounded
+    growth silently inflates every turn's cost. Pure and deterministic: ``facts`` are the live facts,
+    already ``last_accessed_at``-descending from :meth:`~avid.core.ports.FactRepository.fetch_live`; this
+    reads no clock and does no I/O.
+
+    Priority: every ``identity`` fact and every live ``routine`` first (in the caller's recency order),
+    then the remaining facts by importance, recency breaking ties (a stable sort over the recency-ordered
+    input). Selection stops at whichever bound binds first; the first fact is always admitted even if it
+    alone exceeds ``max_tokens`` — an empty injection block would be worse than a slightly over-budget one.
+    """
+    must = [f for f in facts if f.kind in _PRE_INJECT_KINDS]
+    rest = sorted(
+        (f for f in facts if f.kind not in _PRE_INJECT_KINDS),
+        key=lambda f: (
+            -f.importance
+        ),  # stable: equal importance keeps the input's recency order
+    )
+    chosen: list[Fact] = []
+    tokens = 0
+    for fact in (*must, *rest):
+        if len(chosen) >= max_facts:
+            break
+        cost = _estimate_tokens(fact.text)
+        if chosen and tokens + cost > max_tokens:
+            break
+        chosen.append(fact)
+        tokens += cost
+    return tuple(chosen)

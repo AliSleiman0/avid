@@ -10,6 +10,7 @@ where a precise cosine geometry is what is under test.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import AsyncIterator, Sequence
 from typing import NamedTuple
@@ -246,6 +247,66 @@ async def test_superseded_facts_never_surface(rig: Rig) -> None:
     assert (
         old not in result
     )  # history is retained in SQLite (§7.8) but excluded from recall
+
+
+# --- similar(): the §7.8 supersession pre-check — cosine-threshold search, best-first, no event ---
+
+
+async def test_similar_returns_only_facts_at_or_above_the_threshold_best_first() -> (
+    None
+):
+    """``similar`` surfaces the ids whose cosine ≥ threshold, ordered by descending cosine. A scripted
+    geometry pins the exact cosines against the query ``[1, 0, 0]`` so the cut is unambiguous."""
+    q = "the user drinks coffee"
+    same = "the user drinks coffee still"  # cosine 1.0
+    near = "the user drinks coffee at 8am"  # cosine 0.9
+    far = "the user has a cat"  # cosine 0.3
+    table = {
+        q: [1.0, 0.0, 0.0],
+        same: [1.0, 0.0, 0.0],
+        near: [0.9, math.sqrt(1 - 0.9**2), 0.0],
+        far: [0.3, math.sqrt(1 - 0.3**2), 0.0],
+    }
+    embedder = _ScriptedEmbedder(table, dimensions=3)
+    async for rig in _make_rig(embedder=embedder):
+        same_id = await _seed(rig, same)
+        near_id = await _seed(rig, near)
+        far_id = await _seed(rig, far)
+        await rig.retriever.rebuild()
+
+        hits = await rig.retriever.similar(table[q], threshold=0.85, k=5)
+        assert hits == (
+            same_id,
+            near_id,
+        )  # best-first; far (0.3) is below the threshold
+        assert far_id not in hits
+
+
+async def test_similar_caps_at_k() -> None:
+    """With more near-duplicates than ``k``, only the ``k`` best are returned."""
+    table = {name: [1.0, 0.0] for name in ("q", "a", "b", "c")}
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder):
+        for name in ("a", "b", "c"):
+            await _seed(rig, name)
+        await rig.retriever.rebuild()
+        assert len(await rig.retriever.similar(table["q"], threshold=0.9, k=2)) == 2
+
+
+async def test_similar_on_an_empty_index_returns_nothing(rig: Rig) -> None:
+    await rig.retriever.rebuild()  # nothing seeded → no matrix
+    assert await rig.retriever.similar([1.0, 0.0], threshold=0.5, k=5) == ()
+
+
+async def test_similar_publishes_no_recall_event(rig: Rig) -> None:
+    """Unlike :meth:`retrieve`, a near-duplicate search is not a recall — it must stay silent."""
+    await _seed(rig, "the user's name is Ali", kind="identity")
+    await rig.retriever.rebuild()
+    vector = await rig.embedder.embed("the user's name is Ali")  # type: ignore[attr-defined]
+    hits = await rig.retriever.similar(vector, threshold=0.5, k=5)
+    assert hits  # the self-match clears the threshold
+    await asyncio.sleep(0)  # give any stray publish a chance to land
+    assert rig.recalls == []
 
 
 # --- AC-7: publishes memory.recall_completed, latency from monotonic_ns ------------------------

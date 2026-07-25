@@ -59,6 +59,10 @@ class AdaptersConfig(_Section):
     # same SQL, no file — the laptop/sim default. A fake-vs-real switch, distinct from ``[memory]``
     # settings (db_path, dimensions, weights), which configure whichever store is chosen (P7).
     store: Literal["sqlite", "fake"] = "fake"
+    # The cheap, off-turn-path text model for §7.8 supersession (and §7.9 reflection later) (#122).
+    # ``fake`` is the deterministic laptop default — a literal-restatement judge, no network; ``openai``
+    # is the real HTTPS text client (a later issue, #121). A fake-vs-real switch like the others.
+    text_model: Literal["openai", "fake"] = "fake"
     realtime: Literal["openai", "replay"] = "replay"
     # The process supervisor (AVID-38). ``systemd`` speaks sd_notify to
     # ``$NOTIFY_SOCKET``; ``fake`` records the calls and is the laptop default — the
@@ -262,6 +266,14 @@ class MemoryConfig(_Section):
     top_k: int = 5
     recency_half_life_days: float = 14.0
     weights: WeightsConfig = WeightsConfig()
+    # §7.8 supersession-on-write (#122): a stored fact whose embedding cosine ≥ this against an existing
+    # live fact becomes a candidate the text model judges; at most this many candidates are considered.
+    supersession_threshold: float = 0.85
+    supersession_k: int = 5
+    # §6.7 pre-injection budget (#122): the top_facts block is cached instruction prefix, so it is capped
+    # by BOTH a fact count (~10–15) and a token estimate (~600) — unbounded growth inflates every turn.
+    top_facts_max: int = 15
+    top_facts_token_budget: int = 600
 
 
 class QuietHours(_Section):

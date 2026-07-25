@@ -33,6 +33,7 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FakeTextModel,
     FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
@@ -59,10 +60,12 @@ from avid.core.ports import (
     FactRepository,
     Microphone,
     RealtimeClient,
+    Retriever,
     Service,
     ServiceNotifier,
     Servo,
     Speaker,
+    TextModel,
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
@@ -74,6 +77,7 @@ from avid.services import (
     CostMeterService,
     CueBank,
     ExpressionService,
+    MemoryService,
 )
 
 _log = logging.getLogger(__name__)
@@ -385,6 +389,29 @@ def _build_retriever(
     )
 
 
+def _build_text_model(config: Config) -> TextModel:
+    """Select the ``TextModel`` adapter named by ``[adapters] text_model`` (#122, SDS §7.8).
+
+    ``fake`` is the laptop/sim default — :class:`FakeTextModel`, the deterministic §7.8 supersession
+    judge (a literal-restatement rule, no network), the P6 fake and simulator; ``openai`` is the real
+    HTTPS text client (a later issue, #121). The cheap text model is off the turn path, so it never
+    touches the audio loop (P8). Any other value fails loudly rather than silently doing nothing.
+    """
+    match config.adapters.text_model:
+        case "fake":
+            return FakeTextModel()
+        case "openai":  # pragma: no cover - real OpenAI text adapter lands with #121
+            raise NotImplementedError(
+                "text_model adapter 'openai' is not available yet — only 'fake' exists "
+                "(#122 ships the port + fake; the OpenAI text adapter follows in #121)"
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"text_model adapter {other!r} is not available — only 'openai' and "
+                f"'fake' exist (#122)"
+            )
+
+
 def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
     """Select the ``RealtimeClient`` adapter named by ``[adapters] realtime`` (#101/#105).
 
@@ -459,6 +486,10 @@ def _wire_services(
     speaker: Speaker,
     vad: VoiceActivityDetector,
     realtime: RealtimeClient,
+    embedder: Embedder,
+    text_model: TextModel,
+    fact_store: FactRepository,
+    retriever: Retriever,
     cues: CueBank,
     config: Config,
 ) -> Sequence[Service]:
@@ -494,6 +525,11 @@ def _wire_services(
     ``ConversationService``'s ``sink``, so a turn's audio crosses the two services through the
     port without either importing the other (P5). ``loopback=False`` selects the M5 seam; the #91
     transport-gate demo constructs its own AudioService with ``loopback=True``.
+
+    ``MemoryService`` (#122) is the §9.1.4 exception: it subscribes to **nothing** (so it adds no edge
+    to the graph), but it owns the store + index lifecycle — ``start`` rebuilds the §8.5 index — so it is
+    **returned** for the lifecycle to ``start``/``stop`` like ``AudioService``. It is handed the store,
+    the retriever, the embedder and the text model as **ports** (P2); ``main`` built the concretes.
     """
     affect = AffectService(bus=bus, clock=clock)
     expression = ExpressionService(bus=bus, display=display, clock=clock)
@@ -524,7 +560,22 @@ def _wire_services(
     # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
     # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
     cost_meter = CostMeterService(bus=bus, model=config.ai.model)
-    for service in (affect, expression, audio, conversation, cost_meter):
+    # The memory service (#122): the sole writer/reader of persistent facts, reached by direct call, so
+    # its subscriptions() is empty — it appears in the loop only for uniformity. Injected the store,
+    # index, embedder and text model as ports (P2); it owns their rebuild/close lifecycle.
+    memory = MemoryService(
+        bus=bus,
+        clock=clock,
+        repo=fact_store,
+        retriever=retriever,
+        embedder=embedder,
+        text_model=text_model,
+        supersession_threshold=config.memory.supersession_threshold,
+        supersession_k=config.memory.supersession_k,
+        top_facts_max=config.memory.top_facts_max,
+        top_facts_token_budget=config.memory.top_facts_token_budget,
+    )
+    for service in (affect, expression, audio, conversation, cost_meter, memory):
         for sub in service.subscriptions():
             bus.subscribe(
                 sub.event_type,
@@ -533,10 +584,11 @@ def _wire_services(
                 policy=sub.policy,
                 maxsize=sub.maxsize,
             )
-    # The services that own tasks need lifecycle management (AudioService's mic loop,
-    # ConversationService's per-session pump/mic/idle tasks); the two reactive services are
-    # kept alive by their bound-method subscriptions above.
-    return (audio, conversation)
+    # The services that own tasks need lifecycle management: MemoryService's boot rebuild + store close,
+    # AudioService's mic loop, ConversationService's per-session pump/mic/idle. Memory is started first so
+    # the index is ready before a session ever asks for top_facts. The reactive services (the two faces,
+    # the cost meter) own no task and are kept alive by their bound-method subscriptions above.
+    return (memory, audio, conversation)
 
 
 async def _run(config: Config) -> int:
@@ -555,6 +607,7 @@ async def _run(config: Config) -> int:
     vad = _build_vad(config)
     embedder = _build_embedder(config)
     fact_store = _build_fact_repository(config, clock=clock)
+    text_model = _build_text_model(config)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
@@ -563,8 +616,8 @@ async def _run(config: Config) -> int:
     # The one state machine (SDS §3.8.4). Built here so every future service shares this
     # instance rather than growing a private copy — the lifecycle drives it to IDLE.
     state = StateManager(bus=bus, clock=clock)
-    # The memory read path (#120): the retriever owns the store + embedder + bus. Built after the
-    # bus (it publishes memory.recall_completed) and held — MemoryService (#122) drives rebuild/close.
+    # The memory read path (#120): the retriever owns the store + embedder + bus. Built after the bus
+    # (it publishes memory.recall_completed); MemoryService (#122) drives its rebuild/close lifecycle.
     retriever = _build_retriever(
         config, repo=fact_store, embedder=embedder, bus=bus, clock=clock
     )
@@ -578,6 +631,7 @@ async def _run(config: Config) -> int:
         "embedder": True,
         "fact_store": True,
         "retriever": True,
+        "text_model": True,
         "notifier": True,
         "health": True,
     }
@@ -594,19 +648,20 @@ async def _run(config: Config) -> int:
         speaker=speaker,
         vad=vad,
         realtime=realtime,
+        embedder=embedder,
+        text_model=text_model,
+        fact_store=fact_store,
+        retriever=retriever,
         cues=cues,
         config=config,
     )
-    # ``camera``, ``servo`` and ``retriever`` are still constructed only to realize the switch and
-    # appear in the health map: driving the camera is the vision service's job (M8), moving the servo
-    # is MotionService's (M9), and the retriever (which now holds ``embedder`` + ``fact_store``) is
-    # consumed by ``MemoryService`` (#122) — all later issues. Building the embedder here still buys
-    # #118's AC-6 dimension check, and building the retriever realizes the ``[adapters] store`` switch
-    # end-to-end. ``display`` (AVID-73) and ``microphone``/``speaker``/``vad`` (AVID-89) have left this
-    # list; their services own them.
+    # ``camera`` and ``servo`` are still constructed only to realize the switch and appear in the health
+    # map: driving the camera is the vision service's job (M8) and moving the servo is MotionService's
+    # (M9) — both later issues. The store, embedder, retriever and text model are now **owned** by
+    # ``MemoryService`` (#122, wired above), so they are no longer held here. ``display`` (AVID-73) and
+    # ``microphone``/``speaker``/``vad`` (AVID-89) left this list earlier; their services own them.
     _ = camera
     _ = servo
-    _ = retriever
     return await lifecycle.run(
         bus=bus,
         clock=clock,

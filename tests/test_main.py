@@ -27,6 +27,7 @@ from avid.adapters import (
     FakeServiceNotifier,
     FakeServo,
     FakeSpeaker,
+    FakeTextModel,
     FakeVoiceActivityDetector,
     HybridRetriever,
     OpenAIRealtimeClient,
@@ -59,11 +60,17 @@ from avid.main import (
     _build_retriever,
     _build_servo,
     _build_speaker,
+    _build_text_model,
     _build_vad,
     _wire_services,
     main,
 )
-from avid.services import AudioService, ConversationService, CueBank
+from avid.services import (
+    AudioService,
+    ConversationService,
+    CueBank,
+    MemoryService,
+)
 
 # The exact subscriber graph the composition root is expected to build (SDS §9.1.3). Spelled
 # out rather than derived from the services, so that a service silently dropping or renaming
@@ -166,6 +173,13 @@ async def test_build_retriever_wires_the_store_and_embedder_from_config() -> Non
     await repo.aclose()
 
 
+def test_build_text_model_selects_fake_for_sim() -> None:
+    # sim.toml defaults [adapters] text_model = "fake" → the deterministic §7.8 supersession judge;
+    # the real OpenAI text adapter (the 'openai' branch) lands with #121 and is pragma-excluded.
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_text_model(config), FakeTextModel)
+
+
 def test_build_realtime_selects_replay() -> None:
     # sim.toml (and pi.toml) set realtime = "replay": the replay client is built from
     # [realtime] session_dir on the injected clock (#101), no key, no network.
@@ -245,6 +259,7 @@ def test_main_wires_and_delegates_to_lifecycle(
         "embedder": True,
         "fact_store": True,
         "retriever": True,
+        "text_model": True,
         "notifier": True,
         "health": True,
     }
@@ -253,10 +268,12 @@ def test_main_wires_and_delegates_to_lifecycle(
     assert isinstance(captured["notifier"], FakeServiceNotifier)
     assert captured["health"] is not None
     assert captured["watchdog_interval_s"] == 15.0
-    # The lifecycle-managed services — the two that own tasks (AudioService's mic loop,
-    # ConversationService's per-session pump/mic/idle) — are handed to the lifecycle to
-    # start/stop; the two reactive services are not (they own no task). See ``_wire_services``.
+    # The lifecycle-managed services — the ones that own a task: MemoryService (boot rebuild +
+    # store close, started first so the index is ready), AudioService's mic loop, and
+    # ConversationService's per-session pump/mic/idle — are handed to the lifecycle to start/stop;
+    # the reactive services (the two faces, the cost meter) are not. See ``_wire_services``.
     assert [type(s) for s in captured["services"]] == [
+        MemoryService,
         AudioService,
         ConversationService,
     ]
@@ -361,7 +378,13 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
     # The audio loop is constructed here (the real #89 wiring) but deliberately NOT started —
     # ``services=`` is left off ``lifecycle.run`` below — so this stays a pure face-render
     # assertion (the running loop is #90's). A cheap silent ``pcm`` skips FakeMicrophone's tone
-    # synth, which under coverage would trip the P8 slow-callback gate at construction.
+    # synth, which under coverage would trip the P8 slow-callback gate at construction. The memory
+    # collaborators are built too (MemoryService is wired but, like the audio loop, not started).
+    fact_store = FakeFactRepository(clock=clock)
+    embedder = FakeEmbedder()
+    retriever = _build_retriever(
+        config, repo=fact_store, embedder=embedder, bus=bus, clock=clock
+    )
     _wire_services(
         bus=bus,
         clock=clock,
@@ -373,6 +396,10 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         speaker=FakeSpeaker(out_dir=tmp_path),
         vad=FakeVoiceActivityDetector(),
         realtime=ReplayRealtimeClient(clock=clock, timeline=()),
+        embedder=embedder,
+        text_model=FakeTextModel(),
+        fact_store=fact_store,
+        retriever=retriever,
         cues=CueBank(speaker=FakeSpeaker(out_dir=tmp_path), asset_dir=None),
         config=config,
     )

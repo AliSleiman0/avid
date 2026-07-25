@@ -8,7 +8,8 @@ these structurally; ``main.py`` alone wires which one (P2, P3).
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
 :class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
-:class:`TurnSink`, :class:`FactRepository`, :class:`Embedder`.
+:class:`TurnSink`, :class:`FactRepository`, :class:`Embedder`, :class:`Retriever`,
+:class:`TextModel`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -34,6 +35,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from uuid import UUID
 
 from avid.core.event_bus import E, Subscription
 from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
@@ -439,6 +441,76 @@ class Embedder(Protocol):
         """The fixed vector length this embedder produces (384 for MiniLM, §7.4). Checked against
         ``[memory] dimensions`` at composition (P7) so a model/config mismatch fails loudly at
         startup rather than silently corrupting an index discovered wrong only at the gate."""
+        ...
+
+
+@runtime_checkable
+class Retriever(Protocol):
+    """The memory read path + its write-through vector index, as ``MemoryService`` needs it (§7.7, §8.5).
+
+    Promoted to a port for #122: ``MemoryService`` is a *service*, and adapters sit above services
+    (P1), so it may not import the concrete ``HybridRetriever`` — it depends on this Protocol and the
+    composition root injects the adapter (P2). Defined by *what the application needs* — reconcile the
+    index, retrieve, find near-duplicates for a supersession check, and keep the index in step with a
+    write — never by ``numpy``: the ``N×384`` matrix (§8.5) and the matmul are the adapter's business,
+    so every signature here is ``numpy``-free (``Sequence[float]`` in, ``tuple[int, ...]`` out).
+
+    ``rebuild`` / ``retrieve`` / ``similar`` are ``async`` (the store I/O and any model inference stay
+    off the loop, P8); ``append`` / ``remove`` are synchronous in-memory matrix upkeep (§8.5).
+    """
+
+    async def rebuild(self) -> None:
+        """Reconcile the in-memory index from the store (§8.5) — the boot reconciliation, and the only
+        one. SQLite is truth, the matrix is a write-through cache; ``MemoryService.start`` calls this."""
+        ...
+
+    async def retrieve(
+        self, query: str, *, correlation_id: UUID | None = None
+    ) -> tuple[int, ...]:
+        """The top-k live fact ids for ``query``, best first — hybrid FTS5 ∪ cosine, §7.7-scored.
+        Publishes ``memory.recall_completed`` **itself** (§9.1.3), so the caller must not re-publish it.
+        ``correlation_id`` is the turn this recall serves; a fresh id is minted when a recall stands
+        alone."""
+        ...
+
+    async def similar(
+        self, vector: Sequence[float], *, threshold: float, k: int
+    ) -> tuple[int, ...]:
+        """The live fact ids whose embedding cosine ≥ ``threshold``, best first, capped at ``k`` — the
+        §7.8 near-duplicate search a write runs *before* deciding supersession. Pre-normalised vectors
+        (§8.2) mean cosine is a dot product; publishes nothing (it is not a recall)."""
+        ...
+
+    def append(self, fact: Fact, embedding: bytes | None) -> None:
+        """Write-through: reflect a just-stored fact in the index (§8.5), **after** its row is durable —
+        scoring metadata always, a matrix row when it carries an embedding."""
+        ...
+
+    def remove(self, fact_id: int) -> None:
+        """Write-through: drop a fact from the index (§8.5) — the matrix half of a supersede or a
+        ``forget``, called only after the fact is gone/superseded in SQLite."""
+        ...
+
+
+@runtime_checkable
+class TextModel(Protocol):
+    """A cheap, off-turn-path text model for memory-write reasoning (SDS §7.8, §9.4 catalog).
+
+    The vendor boundary as a port (CLAUDE.md §3): its one real adapter is an OpenAI text client over
+    HTTPS, its fake is ``FakeTextModel`` (the P6 simulator and §7.8's tier-1 test double). Defined by
+    *what the application needs* — a supersession judgment — never by a vendor's chat-completion shapes:
+    the prompt and the response parsing are the adapter's private business, so no OpenAI type crosses
+    this port. Reflection (§7.9, M10) will add its own method; the port grows only as a need arrives.
+    """
+
+    async def judge_supersession(
+        self, *, new_fact: str, candidates: Sequence[tuple[int, str]]
+    ) -> Sequence[int]:
+        """Given ``new_fact`` and its near-duplicate ``(id, text)`` ``candidates`` (§7.8 step 3), return
+        the candidate ids ``new_fact`` **updates or contradicts** — a subset of the input ids, ``()``
+        when none. ``async`` because the real adapter runs HTTPS inference it must keep off the loop
+        (P8); the fake decides in-process. Confabulation is a bug (§7.8): return only ids genuinely
+        superseded — *unknown* is a valid "not superseded", never a guess."""
         ...
 
 

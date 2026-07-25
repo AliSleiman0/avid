@@ -25,6 +25,7 @@ from avid.domain import (
     ScoreWeights,
     rank_candidates,
     recency_decay,
+    select_top_facts,
     validate_event_name,
 )
 
@@ -266,3 +267,72 @@ def test_returns_scored_candidates() -> None:
         [_cand(1, 5, 3.0, 0.7)], weights=_EQUAL, half_life_days=14.0, k=5
     )
     assert isinstance(ranked[0], ScoredCandidate)
+
+
+# ── §6.7 pre-injection selection (select_top_facts, #122) ─────────────────────
+
+
+def _tf(
+    text: str, *, kind: str = "other", importance: int = 5, last_accessed: int = 1000
+) -> Fact:
+    return Fact(
+        id=0,
+        text=text,
+        kind=kind,  # type: ignore[arg-type]
+        importance=importance,
+        created_at=last_accessed,
+        last_accessed_at=last_accessed,
+    )
+
+
+def test_select_top_facts_leads_with_identity_and_routine() -> None:
+    """§6.7: identity + active routines are always in, ahead of even a higher-importance 'other'."""
+    facts = [
+        _tf("a random note", importance=9),
+        _tf("the user's name is Ali", kind="identity", importance=1),
+        _tf("the user runs at 7am", kind="routine", importance=1),
+    ]
+    chosen = select_top_facts(facts, max_facts=10, max_tokens=10_000)
+    assert chosen[0].kind == "identity"  # must-includes lead, in fetch_live order
+    assert chosen[1].kind == "routine"
+    assert {"identity", "routine"} <= {f.kind for f in chosen}
+
+
+def test_select_top_facts_fills_the_rest_by_importance() -> None:
+    facts = [
+        _tf("low", importance=2),
+        _tf("high", importance=9),
+        _tf("mid", importance=5),
+    ]
+    chosen = select_top_facts(facts, max_facts=2, max_tokens=10_000)
+    assert [f.text for f in chosen] == ["high", "mid"]
+
+
+def test_select_top_facts_breaks_importance_ties_by_recency_order() -> None:
+    """fetch_live hands facts most-recently-accessed first; the stable importance sort preserves that."""
+    facts = [
+        _tf("recent", importance=5, last_accessed=3000),
+        _tf("older", importance=5, last_accessed=1000),
+    ]
+    assert select_top_facts(facts, max_facts=1, max_tokens=10_000)[0].text == "recent"
+
+
+def test_select_top_facts_caps_by_count() -> None:
+    facts = [_tf(f"note {i}", importance=5) for i in range(20)]
+    assert len(select_top_facts(facts, max_facts=15, max_tokens=100_000)) == 15
+
+
+def test_select_top_facts_caps_by_token_estimate() -> None:
+    """~4 chars/token: a 40-char fact ≈ 10 tokens, so a 15-token budget admits one and stops."""
+    facts = [_tf("x" * 40), _tf("y" * 40)]
+    assert len(select_top_facts(facts, max_facts=10, max_tokens=15)) == 1
+
+
+def test_select_top_facts_always_admits_the_first_even_over_budget() -> None:
+    """An empty injection block is worse than a slightly over-budget one — the first fact is always in."""
+    facts = [_tf("z" * 400, importance=5)]  # ~100 tokens, far over the budget
+    assert len(select_top_facts(facts, max_facts=10, max_tokens=10)) == 1
+
+
+def test_select_top_facts_empty_input() -> None:
+    assert select_top_facts([], max_facts=10, max_tokens=600) == ()
