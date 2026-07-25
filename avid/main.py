@@ -39,6 +39,7 @@ from avid.adapters import (
     HealthServer,
     HybridRetriever,
     OpenAIRealtimeClient,
+    OpenAiTextModel,
     Pca9685Servo,
     Picamera2Camera,
     ReplayRealtimeClient,
@@ -394,16 +395,25 @@ def _build_text_model(config: Config) -> TextModel:
 
     ``fake`` is the laptop/sim default — :class:`FakeTextModel`, the deterministic §7.8 supersession
     judge (a literal-restatement rule, no network), the P6 fake and simulator; ``openai`` is the real
-    HTTPS text client (a later issue, #121). The cheap text model is off the turn path, so it never
-    touches the audio loop (P8). Any other value fails loudly rather than silently doing nothing.
+    HTTPS text client (#121), fed the pinned ``[ai] text_model`` snapshot and the injected key. The cheap
+    text model is off the turn path, so it never touches the audio loop (P8). Any other value fails loudly
+    rather than silently doing nothing.
     """
     match config.adapters.text_model:
         case "fake":
             return FakeTextModel()
-        case "openai":  # pragma: no cover - real OpenAI text adapter lands with #121
-            raise NotImplementedError(
-                "text_model adapter 'openai' is not available yet — only 'fake' exists "
-                "(#122 ships the port + fake; the OpenAI text adapter follows in #121)"
+        case "openai":
+            # The key is unwrapped once here (P7, SECURITY.md), as ``_build_realtime`` does: read as a
+            # SecretStr in load_config, handed to the adapter only to build the client. Absent → refuse
+            # loudly rather than construct a keyless client that fails obscurely on the first call.
+            if config.openai_api_key is None:
+                raise RuntimeError(
+                    "text_model adapter 'openai' requires OPENAI_API_KEY in the environment "
+                    "(read once as SecretStr, SECURITY.md/P7) — none was injected"
+                )
+            return OpenAiTextModel(
+                api_key=config.openai_api_key.get_secret_value(),
+                model=config.ai.text_model,
             )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(

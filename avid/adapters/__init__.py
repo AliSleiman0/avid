@@ -25,7 +25,7 @@ from avid.adapters.realtime import (
 from avid.adapters.retrieval import HybridRetriever
 from avid.adapters.servo import FakeServo, Pca9685Servo
 from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
-from avid.adapters.text_model import FakeTextModel
+from avid.adapters.text_model import FakeTextModel, OpenAiTextModel
 from avid.adapters.turn_sink import FakeTurnSink
 from avid.adapters.vad import FakeVoiceActivityDetector, SileroVad
 
@@ -75,6 +75,7 @@ __all__ = [
     # Hybrid retriever + §8.2 vector packing (#120) — the memory read path
     "HybridRetriever",
     "pack_embedding",
-    # TextModel (#122) — §7.8 supersession fake; real OpenAI text adapter lands with #121
+    # TextModel (#122 fake, #121 real) — §7.8 supersession judge
     "FakeTextModel",
+    "OpenAiTextModel",
 ]

@@ -15,9 +15,12 @@ and the fake text model decides in-process.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import NamedTuple
 from uuid import uuid4
+
+import pytest
 
 from avid.adapters import (
     FakeEmbedder,
@@ -103,6 +106,18 @@ class _AlwaysSupersede:
         self, *, new_fact: str, candidates: Sequence[tuple[int, str]]
     ) -> Sequence[int]:
         return [cid for cid, _ in candidates]
+
+
+class _BoomTextModel:
+    """A text model that always raises — the real ``openai`` adapter's failure modes (timeout, API error,
+    an unparseable reply) all surface at this seam as an exception. AC-9: a judge failure inside a tool
+    handler must degrade to no supersession, never lose the write or crash (the ``FakeTextModel`` never
+    raises, so this stand-in is the only thing that exercises the guard)."""
+
+    async def judge_supersession(
+        self, *, new_fact: str, candidates: Sequence[tuple[int, str]]
+    ) -> Sequence[int]:
+        raise RuntimeError("text model timed out")
 
 
 class Rig(NamedTuple):
@@ -270,6 +285,41 @@ async def test_store_fact_supersedes_a_contradicting_fact() -> None:
         event = superseded[0]
         assert isinstance(event, MemoryFactSuperseded)
         assert event.old_id == old_id and event.new_id == new_id
+
+
+async def test_a_failing_text_model_degrades_to_storing_without_supersession(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-9: the new fact clears the cosine pre-check (so the judge *is* consulted), but the judge raises.
+    The write must still commit — the fact is stored and its id returned — nothing is superseded (history
+    is not rewritten this time), and the failure is logged with the turn's correlation id."""
+    old_text = "the user drinks coffee"
+    new_text = "the user switched to tea"
+    table = {
+        old_text: [1.0, 0.0],
+        new_text: [1.0, 0.0],
+    }  # cosine 1.0 ≥ 0.85 → a candidate
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder, text_model=_BoomTextModel()):
+        await rig.memory.start()
+        old_id = await rig.memory.store_fact(_fact(old_text, kind="routine"))
+        corr = uuid4()
+        with caplog.at_level(logging.WARNING):
+            new_id = await rig.memory.store_fact(
+                _fact(new_text, kind="routine"), correlation_id=corr
+            )
+
+        assert (
+            await rig.repo.get(new_id) is not None
+        )  # the write survived the judge failure
+        old = await rig.repo.get(old_id)
+        assert old is not None and old.superseded_by is None  # nothing was superseded
+        assert "supersession judge failed" in caplog.text
+        assert str(corr) in caplog.text  # logged with the turn's correlation id (AC-9)
+
+        await _drain(rig)
+        assert _of(rig, MemoryFactSuperseded) == []
+        assert len(_of(rig, MemoryFactStored)) == 2  # both facts stored, both notified
 
 
 async def test_store_fact_without_contradiction_publishes_only_fact_stored() -> None:

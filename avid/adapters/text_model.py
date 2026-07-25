@@ -1,21 +1,34 @@
-"""``TextModel`` adapters — the deterministic fake for §7.8 supersession (#122).
+"""``TextModel`` adapters — the deterministic fake and the real OpenAI client for §7.8 (#122/#121).
 
-The port behind which the cheap, off-turn-path text model hides (SDS §7.8, §9.4 catalog): its one real
-adapter is an OpenAI text client over HTTPS (a later issue, #121); :class:`FakeTextModel` is the P6 fake
-and simulator, and §7.8's tier-1 test double. A supersession judgment on a real LLM is genuine semantic
-reasoning ("I switched to tea" contradicts "I drink coffee") that no dependency-free stand-in can
-replicate — so the fake makes the *honest* conservative call: it supersedes only a **literal
-restatement**, measured by word-token overlap, and never confabulates a semantic shift (§7.8: "unknown
-is a valid answer; a confabulated one is a bug"). Tests that need the semantic case script a decision
-directly, exactly as ``tests/adapters/test_retrieval.py`` scripts an embedder.
+The port behind which the cheap, off-turn-path text model hides (SDS §7.8, §9.4 catalog). Two adapters:
 
-Stdlib only (P1/ADR-012): no vendor import, no ``numpy`` — the fake ships everywhere the sim runs.
+* :class:`FakeTextModel` (#122) — the P6 fake, simulator, and §7.8's tier-1 test double. A supersession
+  judgment on a real LLM is genuine semantic reasoning ("I switched to tea" contradicts "I drink coffee")
+  that no dependency-free stand-in can replicate — so the fake makes the *honest* conservative call: it
+  supersedes only a **literal restatement**, measured by word-token overlap, and never confabulates a
+  semantic shift (§7.8: "unknown is a valid answer; a confabulated one is a bug"). Stdlib only.
+* :class:`OpenAiTextModel` (#121) — the **real** client over the OpenAI chat-completions HTTPS API. It
+  **seals the vendor inside** (CLAUDE.md §3, R-10): the ``openai`` SDK is imported **lazily** inside
+  :meth:`~OpenAiTextModel.judge_supersession` (the ``openai`` optional group is absent off a networked
+  host, so keeping it out of module scope lets this file load everywhere, exactly as
+  ``OpenAIRealtimeClient`` does for ``websockets``), and no vendor type ever crosses the port. The two
+  network-free, testable pieces — :func:`_build_messages` and :func:`_parse_superseded` — live at module
+  scope and are unit-tested offline with canned strings (the only part provable without a socket, mirroring
+  ``realtime._translate``). The key is injected already-unwrapped and used only to build the client; the
+  ``__repr__`` is key-free (SECURITY.md). A genuine failure (network/timeout/API error, or an unparseable
+  reply) **raises** — ``MemoryService`` catches it and degrades to storing the fact without supersession
+  (AC-9), the one place with the turn's correlation id to log.
+
+Tests that need the semantic case script a decision directly, exactly as ``tests/adapters/test_retrieval.py``
+scripts an embedder.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
+from typing import Any
 
 # The word tokeniser and the tiny stop set the Jaccard overlap ignores, so "I live in Boston" and
 # "I live in Seattle" are compared on {live, boston} vs {live, seattle} rather than being dragged
@@ -96,4 +109,111 @@ class FakeTextModel:
         return superseded
 
 
-__all__ = ["FakeTextModel"]
+# --- OpenAiTextModel (#121): the real chat-completions client ------------------------------
+
+# The §7.8 judge prompt (SDS 1465-1466: "Does F_new update or contradict any of these? Return ids").
+# Session-static, so it names the confabulation rule explicitly — "unknown is a valid empty answer" —
+# because the whole point of the write-time check is that a *wrong* supersession silently deletes a true
+# fact from the present. JSON-object output is forced at the call site, so the shape is contractual.
+_SYSTEM_PROMPT = (
+    "You decide whether a new fact about a user updates or contradicts any existing facts. "
+    "You are given a NEW FACT and a numbered list of EXISTING FACTS. Return a JSON object "
+    '{"superseded": [ids]} listing the ids of existing facts the new fact makes no longer '
+    "true (it updates or contradicts them). Include an id ONLY when you are confident the new "
+    "fact replaces it — an unrelated or merely similar fact is NOT superseded. If none apply, "
+    'return {"superseded": []}. Never invent an id that is not listed. Unknown is a valid, '
+    "expected empty answer; a confabulated supersession is a bug."
+)
+
+
+def _build_messages(
+    new_fact: str, candidates: Sequence[tuple[int, str]]
+) -> list[dict[str, str]]:
+    """The chat messages for one §7.8 judgment — a fixed system rule plus the new fact and the numbered
+    ``id: text`` candidates. Pure and vendor-free (a plain ``list[dict]``), so it is unit-tested offline
+    with no client, exactly as ``realtime._translate`` is."""
+    existing = "\n".join(f"{cid}: {text}" for cid, text in candidates)
+    user = f"NEW FACT:\n{new_fact}\n\nEXISTING FACTS:\n{existing}"
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def _parse_superseded(content: str, valid_ids: set[int]) -> tuple[int, ...]:
+    """Parse the model's ``{"superseded": [ids]}`` reply into the subset of ``valid_ids`` it names, best
+    effort and order-stable (AC-1's "a subset of the input ids").
+
+    The subset intersection is the structural enforcement of §7.8's "confabulation is a bug": an id the
+    model invents that was never a candidate is **dropped**, never stored, so a hallucinated reply can only
+    ever supersede *fewer* facts, never a fact it did not see. A malformed or wrong-shaped reply is a
+    "nonsense reply" (AC-9) and :class:`ValueError` — ``MemoryService`` catches it and stores the fact
+    without supersession, logging the turn's correlation id."""
+    try:
+        payload = json.loads(content)
+        raw = payload["superseded"]
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        raise ValueError(f"unparseable supersession reply: {content!r}") from exc
+    if not isinstance(raw, list):
+        raise ValueError(f"'superseded' is not a list: {raw!r}")
+    result: list[int] = []
+    for item in raw:
+        try:
+            fact_id = int(item)
+        except (TypeError, ValueError):
+            continue  # a non-int entry cannot name a fact — drop it, do not fail the whole write
+        if fact_id in valid_ids and fact_id not in result:
+            result.append(fact_id)
+    return tuple(result)
+
+
+class OpenAiTextModel:
+    """The real :class:`~avid.core.ports.TextModel`, over the OpenAI chat-completions API (#121, §7.8).
+
+    Maps the §7.8 supersession question onto one cheap, JSON-forced completion and **seals the vendor
+    inside** (CLAUDE.md §3, R-10): the ``openai`` SDK is imported lazily in :meth:`judge_supersession` so
+    the module loads without the ``openai`` extra, and no vendor type crosses the port — the request is
+    built by :func:`_build_messages`, the reply parsed by :func:`_parse_superseded`, both plain values.
+    The model is a pinned dated snapshot (``[ai] text_model``, §6.10); ``temperature=0`` and
+    ``response_format`` make the judgment deterministic and the shape contractual. Stateless
+    request/response, so there is no session lifecycle — the ``AsyncOpenAI`` client is built once, on the
+    first call, and lives for the process. Constructed only by the composition root (P3); the key is
+    injected already-unwrapped, used only to build the client, and never reaches ``repr`` (AC-6)."""
+
+    def __init__(self, *, api_key: str, model: str) -> None:
+        self._api_key = (
+            api_key  # private; only ever handed to the AsyncOpenAI client (AC-6)
+        )
+        self._model = model
+        self._client: Any = None  # the AsyncOpenAI client, untyped (lazy vendor import)
+
+    def __repr__(self) -> str:
+        """Key-free repr (AC-6): the secret must never reach a log line via ``repr`` (SECURITY.md)."""
+        return f"OpenAiTextModel(model={self._model!r})"
+
+    async def judge_supersession(
+        self, *, new_fact: str, candidates: Sequence[tuple[int, str]]
+    ) -> Sequence[int]:
+        """Ask the model which ``candidates`` ``new_fact`` supersedes (§7.8 step 3), returning the subset
+        of their ids. Short-circuits with no API call when there are no candidates (the check only fires on
+        a near-duplicate, so the common write never reaches here). Raises on a transport/API failure or an
+        unparseable reply — the caller's AC-9 guard degrades to no supersession."""
+        if not candidates:
+            return ()
+        from openai import (
+            AsyncOpenAI,  # lazy, adapter-local optional group (AC-2, ADR-008)
+        )
+
+        if self._client is None:
+            self._client = AsyncOpenAI(api_key=self._api_key)
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=_build_messages(new_fact, candidates),
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        content = response.choices[0].message.content or ""
+        return _parse_superseded(content, {cid for cid, _ in candidates})
+
+
+__all__ = ["FakeTextModel", "OpenAiTextModel"]

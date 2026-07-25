@@ -193,6 +193,11 @@ class AiConfig(_Section):
 
     model: str = "gpt-realtime-mini-2025-12-15"
     voice: str = "cedar"
+    # The cheap, off-turn-path text model the ``openai`` ``TextModel`` adapter calls for §7.8 supersession
+    # (and §7.9 reflection later) (#121). Pinned to a dated snapshot for the same reason as ``model`` —
+    # the family churns — but a different, cheaper model: this runs off every latency path, so quality
+    # tolerance is generous. The ``[adapters] text_model = "openai"`` counterpart; ``fake`` ignores it.
+    text_model: str = "gpt-4o-mini-2024-07-18"
     max_output_tokens: int = 512
     personality: str = "config/personality/default.toml"
     instructions: str = (

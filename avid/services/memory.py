@@ -123,11 +123,11 @@ class MemoryService:
         back to the turn that produced it (§3.12.2); ``created_at`` / ``last_accessed_at`` default to now
         when the caller left them unset.
         """
+        corr = correlation_id or fact.source_correlation_id or uuid4()
         vector = await self._embedder.embed(fact.text)
         blob = pack_embedding(vector)
-        superseded_ids = await self._resolve_supersession(fact.text, vector)
+        superseded_ids = await self._resolve_supersession(fact.text, vector, corr)
 
-        corr = correlation_id or fact.source_correlation_id or uuid4()
         now = self._clock.now()
         to_store = replace(
             fact,
@@ -216,12 +216,19 @@ class MemoryService:
     # --- helpers -------------------------------------------------------------------------
 
     async def _resolve_supersession(
-        self, new_text: str, vector: Sequence[float]
+        self, new_text: str, vector: Sequence[float], correlation_id: UUID
     ) -> Sequence[int]:
         """§7.8 steps 2–3: the near-duplicate ids the new fact supersedes, or ``()`` if none.
 
         Only fires the (cheap, off-turn-path) text-model call when the index actually holds a
-        near-duplicate — the common write has no candidates and skips it entirely."""
+        near-duplicate — the common write has no candidates and skips it entirely.
+
+        **AC-9 graceful degradation:** the real :class:`~avid.core.ports.TextModel` can time out, error,
+        or return nonsense — and this runs inside a tool handler, where a raise would abandon the whole
+        write. So a judge failure is caught, logged with the turn's ``correlation_id`` (§3.12.2), and read
+        as *no supersession*: the fact is still stored (the caller inserts it regardless), history is
+        simply not rewritten this time. Never losing the write, never crashing, is the invariant (§3.7.3);
+        the ``FakeTextModel`` never raises, so this guard exists for the ``openai`` adapter (#121)."""
         candidate_ids = await self._retriever.similar(
             vector, threshold=self._supersession_threshold, k=self._supersession_k
         )
@@ -234,9 +241,17 @@ class MemoryService:
                 candidates.append((cid, existing.text))
         if not candidates:
             return ()
-        return await self._text_model.judge_supersession(
-            new_fact=new_text, candidates=candidates
-        )
+        try:
+            return await self._text_model.judge_supersession(
+                new_fact=new_text, candidates=candidates
+            )
+        except Exception:
+            _log.warning(
+                "supersession judge failed [%s] — storing the fact without supersession",
+                correlation_id,
+                exc_info=True,
+            )
+            return ()
 
     async def _hydrate(self, ids: Sequence[int]) -> Sequence[Fact]:
         """Load full facts for ``ids``, dropping any that vanished between ranking and read (a concurrent
