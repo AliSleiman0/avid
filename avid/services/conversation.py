@@ -47,8 +47,16 @@ re-minted** (SDS §3.12.2): every fact and every transition carries the id Audio
 ``audio.speech_started``, so one grep reconstructs the turn.
 
 **Stateless instruction in M5.** ``open()`` is where the personality + (later) memory context
-is seeded; M5 seeds instructions only. The memory-injection seam is deliberately left empty —
-that is M7.
+is seeded; M5 seeds instructions only. Pre-session memory *injection* (§6.7 path 1, the
+``top_facts`` block) is still an empty seam — that is #126.
+
+**Memory tools (#125, §6.6, ADR-004).** The model does not own memory; it *gets tools*. When it
+invokes one, a :class:`~avid.core.realtime.ToolCallRequested` reaches :meth:`_on_tool_call`, which
+dispatches it against the injected :class:`~avid.core.ports.MemoryTools` port
+(``remember_fact``/``recall``/``forget``) via :func:`~avid.services.tools.dispatch_tool_call` and
+returns the result through :meth:`~avid.core.ports.RealtimeClient.send_tool_output`. The service
+depends only on the port, never the concrete ``MemoryService`` (P2/P5) — the composition root
+injects it. This is the read/write path (§6.7 path 2); the pre-injection path 1 is #126.
 """
 
 from __future__ import annotations
@@ -67,7 +75,7 @@ from avid.core.event_bus import (
     OverflowPolicy,
     Subscription,
 )
-from avid.core.ports import Clock, EventBus, RealtimeClient, TurnSink
+from avid.core.ports import Clock, EventBus, MemoryTools, RealtimeClient, TurnSink
 from avid.core.realtime import (
     AssistantAudioChunk,
     AssistantTranscript,
@@ -93,6 +101,7 @@ from avid.domain import (
     Trigger,
 )
 from avid.services.cue_bank import CueBank
+from avid.services.tools import dispatch_tool_call
 
 _log = logging.getLogger(__name__)
 
@@ -126,6 +135,7 @@ class ConversationService:
         client: RealtimeClient,
         sink: TurnSink,
         cues: CueBank,
+        memory: MemoryTools,
         session_idle_close_s: int,
     ) -> None:
         self._bus = bus
@@ -134,6 +144,7 @@ class ConversationService:
         self._client = client
         self._sink = sink
         self._cues = cues
+        self._memory = memory
         self._idle_close_s = session_idle_close_s
 
         # Session lifecycle. The lock guards every open/teardown/degraded mutation so the
@@ -146,6 +157,10 @@ class ConversationService:
         self._turn_active = False  # between conversation.turn_started and turn_ended
         self._turn_started_ns: int | None = None  # monotonic, for turn_ended duration
         self._first_audio = False  # has this turn's first assistant delta arrived yet?
+        # Whether this turn's user transcript is approximate (a barge-in truncated the tail,
+        # §6.2.4). A remember_fact on such a turn is declined — a half-heard sentence stored as
+        # fact is exactly the confabulation §7.6 guards against (#125).
+        self._turn_approximate = False
         # Barge-in (§6.2.4 step 6): the response item whose in-flight audio deltas must be
         # dropped after a truncation, until the next assistant item begins. None = not muting.
         self._muted_item: str | None = None
@@ -311,6 +326,9 @@ class ConversationService:
         self._turn_active = True
         self._turn_started_ns = self._clock.monotonic_ns()
         self._first_audio = False
+        self._turn_approximate = (
+            ev.is_approximate
+        )  # gates remember_fact this turn (#125)
         await self._publish(ConversationTurnStarted(**self._env(), initiator="user"))
         await self._publish(
             ConversationUserTranscribed(
@@ -349,21 +367,26 @@ class ConversationService:
         await self._sink.play(ev.chunk, item_id=ev.item_id)
 
     async def _on_tool_call(self, ev: ToolCallRequested) -> None:
-        """The model requested a tool (§6.6, ADR-004) — a declared seam, not yet wired.
+        """The model requested a tool (§6.6, ADR-004) — execute it against memory and return (#125).
 
-        Dispatch to :class:`~avid.services.memory.MemoryService` (``recall``/``forget``/
-        ``remember_fact``), executing the tool and returning the result via
-        :meth:`RealtimeClient.send_tool_output`, lands in **#125**. Until then this handler logs
-        and drops the call — the same "declared seam, not a subscription" stance as the
-        ``behavior.trigger_fired`` origin (M6): the widened port and this pump case exist so #125
-        is a small, local addition, and so a ``tool_call`` replay fixture pumps cleanly today
-        rather than crashing the exhaustive ``match`` (this is the union member every consumer
-        must handle). It publishes no ``conversation.*`` fact — the seam is inert by design."""
-        _log.info(
-            "tool call %r requested [%s] — dispatch lands in #125, dropping for now",
-            ev.name,
-            self._corr(),
+        The dispatch half of "the model gets tools": :func:`~avid.services.tools.dispatch_tool_call`
+        parses the call, runs it against the injected :class:`~avid.core.ports.MemoryTools` port
+        (``remember_fact``/``recall``/``forget``, never the concrete service — P2/P5), and produces
+        the model's tool output; :meth:`RealtimeClient.send_tool_output` returns it **and** sends the
+        mandatory ``response.create`` (§6.6's step-5 trap is the adapter's job, not ours), so the
+        model speaks its reply. A bad call — unknown tool, malformed arguments, a raising handler — is
+        turned into a tool *error* output by the dispatcher and the turn continues; nothing here
+        raises into the pump (AC-6). ``_turn_approximate`` gates ``remember_fact`` against the
+        §6.2.4/§7.6 barge-in trap. This publishes no ``conversation.*`` fact: the memory write's
+        notification is ``memory.fact_stored``, published by ``MemoryService`` itself after the
+        durable write (§9.1.4)."""
+        output = await dispatch_tool_call(
+            self._memory,
+            ev,
+            correlation_id=self._corr(),
+            approximate=self._turn_approximate,
         )
+        await self._client.send_tool_output(ev.call_id, output)
 
     async def _on_turn_done(self, ev: TurnDone) -> None:
         """The turn completed (``conversation.turn_ended``) — the sole cost-meter feed (AC-7).
