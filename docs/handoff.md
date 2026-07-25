@@ -5,47 +5,55 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = fa1e9bb` · tree: only this file dirty · gh `AliSleiman0`.
+**As of:** 2026-07-25 · `main = 429292c` · tree: only this file dirty · gh `AliSleiman0`.
 **M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
-Latest merge: **#120** (PR #136) — the memory **read path**: `HybridRetriever` (FTS5 keyword ∪ vector
-cosine over the §8.5 write-through numpy index, scored by #116's `rank_candidates`, publishes
-`memory.recall_completed`). It is a **portless** adapter like `HealthServer`, injected with
-`FactRepository` + `Embedder` + `EventBus` + `Clock`. The one port touch is `FactRepository.keyword_search`
-(FTS5 `MATCH`, live-only, bm25 — a method on a shipped port, not a new Protocol). `pack_embedding` is
-**stdlib** (`array`, §8.2 LE f32) so numpy never loads on the write path; `rebuild()`'s stack + numpy
-import run **off-loop** via `asyncio.to_thread` while the matmul stays inline (P8, ~8 ms at 3k facts).
-Build-and-hold in `main` (`[adapters] store` + `_build_fact_repository`/`_build_retriever`); numpy is a
-new lazy `memory` extra (CI `test`+`async-debug` get `--extra memory`, mypy stays numpy-free). **AC-8:
-the eval harness now scores the real retriever — recall@5 = 0.54** (proper_noun 0.80, direct 0.80;
-paraphrase/negative are the honest limits of the bag-of-words `FakeEmbedder` + the deferred relevance
-floor). Prior this milestone: **#118** (`Embedder` port + `FakeEmbedder`), **#117** (schema v1 +
-`FactRepository` + `SqliteFactRepo`), **#116** (`Fact` + `memory.*` + §7.7 scoring), **#115** (eval set),
+Latest merge: **#122** (PR #137) — **`MemoryService`**, the sole writer/reader of persistent memory
+(§3.6.1) and the §9.1.4 exception to the bus: `store_fact`/`retrieve`/`top_facts`/`forget` are direct
+awaited calls, **durable before they return**, that then publish `memory.*`; `subscriptions()` is empty;
+`start()` = §8.5 boot rebuild, `stop()` = store close. `store_fact` does the **full §7.8
+supersession-on-write** (embed → `Retriever.similar(cosine ≥ threshold)` → `TextModel.judge_supersession`
+→ `mark_superseded` + drop from live index → insert + publish). `forget` = hard cascading DELETE (§7.10,
+SQLite→matrix); `top_facts` = §6.7 pre-injection selection (count + token bounded). Scoped **full** per a
+session decision — it stood up the **`TextModel` port + `FakeTextModel`**, so **#121 now narrows to just
+the real OpenAI text adapter** (commented there). Two ports were forced by P1 (**a service may not import
+an adapter**): `HybridRetriever` was promoted to a **`Retriever` Protocol** (was portless), and `TextModel`
+is new; `main` injects both concretes. `pack_embedding` **moved** `adapters/retrieval.py` → `core/embedding.py`
+(both the service write path and the index adapter need the §8.2 format without crossing layers). Prior this
+milestone: **#120** (`HybridRetriever` read path, recall@5 = 0.54), **#118** (`Embedder` + `FakeEmbedder`),
+**#117** (schema v1 + `FactRepository`), **#116** (`Fact` + `memory.*` + §7.7 scoring), **#115** (eval set),
 **#130** (P8 hw-init carve-out). The **camera real leg is contract-proven** (ov5647, 11/11) — all five
 HALs are hardware-present, so the four Pi gates (#57/#75/#91/#106) are pure demonstration ceremonies
-batched for one bench day. M7 is the active zero-hardware queue: **5 of 15 done**, next is **#122**
-(#124 parallel).
+batched for one bench day. M7 is the active zero-hardware queue: **6 of 15 done**, next is **#121**
+(now just the OpenAI `TextModel` adapter) / **#124** (tool-call widening).
 
 ---
 
 ## ⭐ Next session — two tracks: M7 build (laptop, active) · Pi seal day (below)
 
 The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117 +
-#118 + #120 are merged (5/15); the store, the embedder, **and** the retriever are all in and
-build-and-held in `main`. The next pickup is **#122** (`MemoryService` — the §9.2 exception: a
-direct-call `store_fact`/`retrieve`/`top_facts`/`forget` surface, each durable before it returns, then
-publishing the `memory.*` events; it wires `SqliteFactRepo` + the `HybridRetriever` into `main`'s
-`_wire_services`, calls `retriever.rebuild()` at boot and `append`/`remove` write-through, and inherits
-#118's AC-6 dimension guard; `← #117/#120/#121`). Note **#121** (soft supersession on write) is also a
-`retrieve`-dependent pickup. ⚠️ #122 edits `tests/test_main.py`'s exact-set subscription assertion — the
-same collision that bit #104/#105. **#124** (RealtimeClient tool-call widening) is startable in parallel
-— it touches the M5 seam, not the store. Full dependency order is in epic #114.
+#118 + #120 + #122 are merged (6/15); the store, the embedder, the retriever **and** `MemoryService`
+(store/retrieve/forget + supersession + boot rebuild) are all in and wired in `main`. The remaining
+laptop pickups are **#121** and **#124**:
+- **#121 — now just the real OpenAI `TextModel` adapter.** #122 already shipped the `TextModel` port +
+  `FakeTextModel` + the full §7.8 supersession-on-write inside `MemoryService.store_fact` + the
+  `[adapters] text_model` / `_build_text_model` wiring (the `"openai"` branch is a `NotImplementedError`
+  pragma today). #121 fills that branch: a concrete `TextModel` that composes the "does F_new
+  update/contradict any of these? return ids" prompt over an OpenAI text/chat call and parses the ids —
+  network-gated like `OpenAIRealtimeClient` (#105). No domain/service change; the port + consumer exist.
+- **#124 — RealtimeClient tool-call widening** (the `recall`/`forget` tool exposure to the model): the
+  model calls `recall(query)` / `forget(query)`, the handler calls `MemoryService.retrieve`/`forget`
+  directly (§9.1.4). ⚠️ **#124 adds subscriptions** and so edits `tests/test_main.py`'s exact-set
+  `_EXPECTED_SUBSCRIPTIONS` + `set(bus._subs)` — the #104/#105 collision. (#122 did **not** touch the
+  subscription set — MemoryService subscribes to nothing — it edited the *services list* + health map.)
 
-> Retriever design note for #122: `HybridRetriever` is portless (no `Retriever` Protocol), so
-> `MemoryService` holds it as a concrete collaborator constructed in `main` (its ports stay
-> `FactRepository`/`Embedder`/…). `retrieve()` already publishes `memory.recall_completed` and accepts a
-> `correlation_id` (thread the turn's id from the `recall` tool). The relevance floor that makes negative
-> queries return empty was **deliberately deferred** (out of #120's ACs; it's what drags eval `negative`
-> to 0.00) — decide in #122/#124 whether it lives in the retriever or the tool engine.
+Full dependency order is in epic #114.
+
+> Notes for #124 / later: (1) `MemoryService.retrieve` returns hydrated `Fact`s (best-first); `forget`
+> returns a delete count; thread the turn's `correlation_id` into both. (2) The **relevance floor** that
+> would make negative queries return empty is still **deferred** (out of #120/#122's ACs; it's what drags
+> eval `negative`/`paraphrase` down) — decide in #124 whether it lives in the retriever or the tool engine.
+> (3) `store_fact` takes an already-built `Fact` — **fact extraction** (turn → `Fact` via `remember_fact`,
+> §7.6) is a separate upstream tool handler, not yet built.
 
 **Pi track (queued for a full-bench day): seal M2 → M3 → M4 → M5 in one sitting.** All four open
 gate issues are now **pure on-Pi ceremonies** — every child issue and code dependency is closed, and
@@ -120,40 +128,49 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
   one full-bench day.
 - **M5 "It talks" (milestone #6): 7 of 9 sealed, laptop-COMPLETE.** #99–#105 merged & closed. Only
   #106 (gate) + #98 (epic) open.
-- **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 5 closed.** The
+- **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 6 closed.** The
   active **laptop queue**. Pure Python + SQLite + local embeddings; depends on no hardware except its
-  own two Pi gates (#127 SPK-3, #129 gate). **#115 + #116 + #117 + #118 + #120 merged.** Next: **#122**
-  (`MemoryService` — the store/retrieve/forget surface + `main` wiring; `← #117/#120/#121`); **#121**
-  (soft supersession) and **#124** (tool-call widening) also startable. ⚠️ Decomposition labels
-  ~16.75 IED vs PMP's 13-IED line — recorded honestly in the epic; the §7.3 cut (drop semantic
-  retrieval, ~5 IED, loses UC-05) is the documented lever. numpy is now the lazy `memory` extra
+  own two Pi gates (#127 SPK-3, #129 gate). **#115 + #116 + #117 + #118 + #120 + #122 merged.** Next:
+  **#121** (now just the real OpenAI `TextModel` adapter — port + fake + supersession already shipped in
+  #122) and **#124** (recall/forget tool-call widening; ⚠️ edits the exact-set subscription assertion).
+  ⚠️ Decomposition labels ~16.75 IED vs PMP's 13-IED line — recorded honestly in the epic; the §7.3 cut
+  (drop semantic retrieval, ~5 IED, loses UC-05) is the documented lever. numpy is the lazy `memory` extra
   (CI `--extra memory` on test+async-debug; ADR-012 pydantic-only default runtime preserved). See
   [[avid-issue-tracker-state]].
 - **M0 / M1 sealed** (`v0.M0.0` / `v0.M1.0`).
 
 ## What just shipped (this session)
 
-- **#120 (PR #136, squash `fa1e9bb`)** — the M7 **read path**. New `avid/adapters/retrieval.py`:
-  **`HybridRetriever`** (portless adapter like `HealthServer`) owning the §8.5 write-through numpy
-  matrix + per-fact scoring metadata, `rebuild`/`append`/`remove`/`retrieve`; `retrieve()` embeds the
-  query → one matmul over pre-normalised vectors → **∪** an FTS5 keyword search → #116's
-  `rank_candidates` → publishes `memory.recall_completed` (latency from `monotonic_ns`). Plus
-  **`pack_embedding`** (stdlib `array`, the single §8.2 LE-f32 packer — off the write path so numpy
-  never loads there). **`FactRepository.keyword_search`** (FTS5 `MATCH`, live-only, bm25) is the one
-  port touch — a method on a shipped port, contract-tested, fake inherits it. **P8:** `rebuild`'s
-  stack + numpy import run off-loop via `asyncio.to_thread`; the matmul is inline (measured ~8 ms
-  loop-block at 3k facts). **main:** build-and-hold — `[adapters] store` + `_build_fact_repository` +
-  `_build_retriever`, health map gains `fact_store`+`retriever`; `MemoryService` (#122) drives the
-  lifecycle. **memory extra** (numpy>=1.24, lazy per ADR-012); CI test+async-debug get `--extra memory`.
-  **AC-8:** `eval_recall` now scores the real retriever — **recall@5 = 0.54** (proper_noun/direct 0.80;
-  paraphrase/negative limited by the bag-of-words fake + deferred relevance floor). 608 passed,
-  99.87% cover (main/ports/config 100%), clean under `PYTHONASYNCIODEBUG=1`, all CI green first run.
-- **#118 (PR #135, squash `30387f4`)** — `Embedder` port (`Sequence[float]`, async, numpy-free) +
-  stdlib `FakeEmbedder` (`sha256`-seeded → cross-process-stable, pre-normalised bag-of-words) + P6
-  contract; build-and-held in `main` with the AC-6 dimension guard.
-- **#117 (PR #134)** — SQLite schema v1 (`0001_initial.sql`) + checksummed migration runner +
-  `FactRepository` port + `SqliteFactRepo` / `:memory:` `FakeFactRepository` (main wiring deferred to
-  #122). **#116/#115/#130** shipped earlier this milestone (domain scoring / eval set / P8 carve-out).
+- **#122 (PR #137, squash `429292c`)** — **`MemoryService`** (`avid/services/memory.py`), the §9.1.4
+  direct-call surface. `store_fact`/`retrieve`/`top_facts`/`forget`, each durable-before-return then
+  publishing `memory.*`; `subscriptions()` empty (§3.6.1); `start()` = §8.5 boot `rebuild`, `stop()` =
+  store close. **`store_fact` = full §7.8:** embed once → `Retriever.similar(cosine ≥ threshold)` →
+  `TextModel.judge_supersession` → `mark_superseded` + `Retriever.remove` from live index → `repo.add`
+  (durable) → `Retriever.append` → publish `fact_superseded`/`fact_stored`; stamps
+  `source_correlation_id`. **`forget`** = hard cascading DELETE (§7.10) resolving the query via
+  `retriever.retrieve`, SQLite then matrix, one `fact_deleted` each. **`top_facts`** = pure §6.7
+  `select_top_facts` (identity + routines + recent high-importance, count + token bounded).
+  - **Two new ports (forced by P1 — a service may not import an adapter):** `HybridRetriever` promoted
+    from portless to a **`Retriever` Protocol** (rebuild/retrieve/**similar**/append/remove; `similar` is
+    the new §7.8 cosine-threshold search); **`TextModel`** (vendor-agnostic supersession judge) + P6
+    **`FakeTextModel`** (deterministic Jaccard literal-restatement rule). `main` injects both concretes.
+  - **`pack_embedding` moved** `adapters/retrieval.py` → **`core/embedding.py`** (write path + index
+    adapter share the §8.2 format without crossing layers); still re-exported from the adapters package.
+  - **domain:** pure `select_top_facts`. **config:** `[adapters] text_model` + `[memory]`
+    supersession_threshold/supersession_k/top_facts_max/top_facts_token_budget. **main:**
+    `_build_text_model`; `MemoryService` wired **first** in `_wire_services` (owns store/index/embedder/
+    text-model lifecycle), `text_model` in the health map, `_ = retriever` dropped. **`.importlinter`:**
+    `services.memory` added to the P5 independence contract.
+  - **Gates:** ruff + format clean, mypy numpy-free clean, lint-imports 4/4, **638 passed on 3.11+3.13**,
+    coverage **99%** (main/ports/config/embedding/domain 100%; services/memory 99% — one defensive branch),
+    recall@5 = 0.54 unchanged. **All 5 CI checks green first run** (async-debug included — the local
+    Windows P8 warnings were confirmed transient jitter on pre-existing tests). **#121 narrowed** to the
+    real OpenAI text adapter (commented, not closed).
+- **#120 (PR #136, squash `fa1e9bb`)** — the M7 **read path**: `HybridRetriever` (FTS5 ∪ cosine over the
+  §8.5 write-through numpy index → #116 `rank_candidates` → `memory.recall_completed`) +
+  `FactRepository.keyword_search`; build-and-held in `main`; recall@5 = 0.54. **#118** — `Embedder` +
+  `FakeEmbedder`. **#117** — SQLite schema v1 + `FactRepository` + `SqliteFactRepo`/`FakeFactRepository`.
+  **#116/#115/#130** — domain scoring / eval set / P8 carve-out.
 
 ## Standing gotchas (carry forward)
 
@@ -162,10 +179,19 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
   item-add` takes the **number** — use `2`. Added 16 M7 items to `1` by mistake this session and had
   to move them. Status field `PVTSSF_lAHOBcHqys4BdmkkzhYG9VM`; options `Backlog=8c0884d4`
   `Ready=a0c1d59b` `Done=c9ce2b3d` ([[avid-project-board-ids]]).
-- ⚠️ **Two PRs that both edit the same exact-set assertion collide.** Multiple M7 services add
-  subscriptions; each edits `tests/test_main.py`'s `_EXPECTED_SUBSCRIPTIONS` + the `set(bus._subs)`
-  assertion. Merge one, then `git merge origin/main` into the next and **union-resolve**. Bit
-  #104/#105.
+- ⚠️ **Two PRs that both edit the same exact-set assertion collide.** `tests/test_main.py` pins the
+  exact **subscription set** (`_EXPECTED_SUBSCRIPTIONS` + `set(bus._subs)`), the **services list**
+  (`[type(s) …]`), and the **health map**. Any two M7 PRs touching the same one collide — merge one, then
+  `git merge origin/main` into the next and **union-resolve**. Bit #104/#105. (#122 edited the services
+  list + health map, *not* the subscription set — MemoryService subscribes to nothing; **#124 will edit
+  the subscription set** when it adds the recall/forget handlers.)
+- ⚠️ **A service may not import an adapter (P1 `layers`: `adapters` sits *above* `services`).** So a
+  service that needs an adapter's behaviour depends on a **Protocol** in `core/ports.py`, and `main`
+  (the composition root, which *may* import adapters) injects the concrete. This is why #122 had to
+  **promote `HybridRetriever` to a `Retriever` port** (#120's "portless, held concretely by #122" note
+  was wrong — #122 is a service, not `main`). Rule of thumb: the moment application code needs to name
+  an adapter, that's a new port, not an import. A pure encoder both layers share (e.g. `pack_embedding`,
+  the §8.2 packer) belongs in `core`, not the adapter — that's why it now lives in `core/embedding.py`.
 - ⚠️ **The vendor transport is a live-only path.** `OpenAIRealtimeClient` + `--capture` are
   network-gated (`OPENAI_API_KEY` + `AVID_LIVE`), never run in CI; only `_translate` + the capture
   round-trip are proven offline. Verify at #106.
