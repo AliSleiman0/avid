@@ -210,6 +210,76 @@ Flip the adapters in `/etc/robot/config.toml` (`camera = "picamera2"`, `servo = 
 `SupplementaryGroups=video gpio i2c audio` to the unit, then `sudo systemctl restart robot`
 and confirm `systemctl status robot` reaches `active (running)` (= IDLE) with `/health` ok.
 
+## Prove the face on the Pi (M3 gate — AVID-75)
+
+Hardware: **the display only**. Evidence from the sealing run is in `docs/demos/m3_evidence/`.
+
+### 1. Select the real panel
+
+`config/pi.toml` now ships `display = "framebuffer"`, but a Pi provisioned before the M3 seal
+has `display = "fake"` baked into `/etc/robot/config.toml`. Check, and flip if needed:
+
+```sh
+grep -n '^display' /etc/robot/config.toml
+sudo sed -i 's/^display *= *"fake"/display    = "framebuffer"/' /etc/robot/config.toml
+```
+
+Geometry needs no edit — `device`/`width`/`height` default to `/dev/fb0` and 480×320, which is
+what the Elecrow ILI9486 enumerates as on this headless Pi (it takes index **0**, not `fb1`).
+
+### 2. The affect tour (the acceptance criterion)
+
+```sh
+cd /opt/avid
+.venv/bin/python docs/demos/face_pi.py --config /etc/robot/config.toml
+```
+
+Eight faces, ~2 s each, with a per-affect latency table and a `PASS`/`FAIL` verdict — it
+**exits non-zero if the 150 ms budget is blown**, so it is a gate, not a demo. Sealing run:
+`min 7.8 / median 9.6 / max 11.2 ms`.
+
+If `fbcon` overdraws the faces, disable the console cursor first:
+
+```sh
+echo 0 | sudo tee /sys/class/graphics/fbcon/cursor_blink
+sudo sh -c "setterm --cursor off --term linux > /dev/tty1"
+```
+
+### 3. Watching the panel from a laptop (optional)
+
+You do not have to stand at the bench. Snapshot `/dev/fb0` (geometry from
+`/sys/class/graphics/fb0/`, XRGB8888 → RGB, zlib PNG — stdlib plus numpy, ~10 ms/frame) and
+serve it over HTTP **bound to `127.0.0.1`**, then reach it through an SSH tunnel:
+
+```sh
+ssh -N -L 8088:127.0.0.1:8088 alisleiman0@AVID     # from the laptop
+```
+
+Localhost-binding is the authentication (`CLAUDE.md` §8) — never bind `0.0.0.0`, even for a
+throwaway dev tool. ~45 fps end to end over Wi-Fi at this panel size.
+
+### 4. Full DoD on the Pi
+
+```sh
+AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m ruff check . && .venv/bin/lint-imports && .venv/bin/python -m mypy --strict avid
+```
+
+Two traps, both hit during the seal:
+
+- The venv needs the **dev group** (`grimp` in particular, or `tests/domain/test_domain_purity.py`
+  fails to collect and aborts the entire run). Install *into the existing venv* — never
+  `uv run`, which rebuilds it without `--system-site-packages` and loses `picamera2`:
+  ```sh
+  uv pip install --python /opt/avid/.venv/bin/python import-linter ruff==0.15.22 mypy pytest-cov
+  ```
+- **Match `uv.lock`'s ruff version.** `pyproject.toml` says `ruff>=0.6` with no upper bound, so
+  a fresh install picks up whatever is newest and reports findings under rules that postdate
+  the code. CI is deterministic because it uses the lock; you should too.
+
+`test_vad.py`'s real leg fails until `/var/lib/robot/models/silero_vad.onnx` exists. That is
+**M4's** port (AVID-91), swept in by the shared `hardware` marker — not an M3 failure.
+
 ## Other M2 notes
 
 - **API key**: create `/etc/robot/robot.env`, `root:root`, `chmod 600`, containing

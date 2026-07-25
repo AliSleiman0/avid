@@ -80,6 +80,46 @@ Reproduce it on the Pi (full runbook, incl. wiring + ALSA routing, in `deploy/RE
 
 Tagged `v0.M2.0`.
 
+## M3 — The face lives
+
+**Gate (PMP §5.2):** all affects render on the physical 3.5″ display; a scripted affect
+sequence plays; measured affect→pixel latency **≤ 150 ms**.
+
+**Permanent proof:** `tests/e2e/test_m3_gate.py` drives the same eight-affect tour through the
+real `AsyncioEventBus`, the real `AffectService`, and the real `ExpressionService` into a
+`FakeDisplay` — no mocks — asserting eight *distinct* faces land, each within budget. It runs
+on every push, cross-platform. Its latencies are exactly `0.0` by construction (`FakeClock`
+does not advance), which is the point: CI proves the *wiring* deterministically, and the Pi
+run below proves the *timing* with real numbers. **Recording:** waived (solo maintainer); the
+live-viewed tour and the committed captures are the human evidence.
+
+**The captured proof lives in [`m3_evidence/`](m3_evidence/)** — all eight faces as
+pixel-exact framebuffer readbacks, plus the tour log. Measured on the bench:
+**max 11.2 ms, median 9.6 ms** against the 150 ms budget.
+
+On the count: PMP §5.2 says "all 7 affects" — 4 Tier-1 (IDLE/LISTENING/THINKING/SPEAKING) + 3
+Tier-2 (HAPPY/SAD/CONFUSED). `SLEEPING`, the presence-lost rest face, is an **eighth** and
+also renders, so the tour is eight. PMP §5.2 carries a footnote recording this.
+
+Reproduce it on the Pi (full runbook in `deploy/README.md` → "Prove the face on the Pi"):
+
+1. **The scripted tour, on the panel, within budget** — exits non-zero if the budget is
+   blown, so it is a gate and not a demo:
+   ```
+   cd /opt/avid
+   .venv/bin/python docs/demos/face_pi.py --config /etc/robot/config.toml
+   ```
+   Eight faces, ~2 s each; a per-affect latency table and a `PASS`/`FAIL` verdict. Requires
+   `display = "framebuffer"` in the config — which `config/pi.toml` now selects by default.
+2. **Full DoD on the Pi:**
+   ```
+   AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/ -q
+   ```
+   `test_vad.py`'s real leg fails until `/var/lib/robot/models/silero_vad.onnx` exists — that
+   is **M4's** port (AVID-91), swept in by the shared `hardware` marker, not an M3 failure.
+
+Tagged `v0.M3.0`.
+
 ## M4 — Audio loop
 
 **Gate (PMP §5.2):** speak into the mic, hear it from the speaker with **≤ 200 ms round-trip**;
@@ -115,4 +155,7 @@ Reproduce it — on a laptop (fakes, deterministic) or on the Pi (real `AlsaMicr
      --config config/pi.toml --wav ~/vad_10min.wav --labels ~/vad_10min.labels.json
    ```
 
-Tagged `v0.M4.0`.
+**Not yet tagged.** The M4 harness and its permanent test are merged, but the on-Pi gate
+(AVID-91) is still open: the ≤200 ms round-trip has not been measured on real ALSA, the
+10-minute VAD recording has not been run, and `/var/lib/robot/models/silero_vad.onnx` is not
+yet on the Pi. `v0.M4.0` lands with that gate, not before.

@@ -217,7 +217,7 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M0** | **Walking skeleton** | 0 | An event published in a test travels through the bus to a fake display, which asserts a frame. `pytest` green on a laptop. `import-linter` fails a deliberate violation. | **8** | H | 8 |
 | **M1** | **Pi boots to app** | 1 | Pi cold-boots, systemd starts the app, it reaches IDLE with all-fake adapters, watchdog restarts it when killed. | **5** | M | 13 |
 | **M2** | **HAL real** | 2 | Every port has a real adapter that passes the identical contract test suite as its fake. Camera, servo, mic, speaker, display all individually proven. | **8** | M | 21 |
-| **M3** | **The face lives** | 3 | All 7 affects render on the physical 3.5″ display; a scripted affect sequence plays; measured affect→pixel latency ≤150 ms. | **8** | M | 29 |
+| **M3** | **The face lives** | 3 | All 7 affects[^m3-affect-count] render on the physical 3.5″ display; a scripted affect sequence plays; measured affect→pixel latency ≤150 ms. | **8** | M | 29 |
 | **M4** | **Audio loop** | 4 | Speak into the USB mic, hear it from the speaker with ≤200 ms round-trip. Local VAD correctly gates speech vs. silence over a 10-minute recording. | **8** | M | 37 |
 | **M5** | **It talks** | 5 | Full UC-01. Two-minute conversation. Barge-in works. Latency histogram meets O1. Cost meter shows projected monthly spend meeting O7. Survives a Wi-Fi unplug and recovers. | **13** | **L** | 50 |
 | **M6** | **It has a personality** | 6 | Same question asked in two personality configs yields recognizably different responses. Affect inferred from response drives the face without `ai` importing `display`. | **5** | M | 55 |
@@ -226,6 +226,14 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M9** | **It moves** | 9 | Affect drives gesture. Nod, turn, idle micro-motion. No brown-out under stall. Servo relaxes when idle (no buzz). Gesture preemption works. | **5** | M | 81 |
 | **M10** | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
 | **M11** | **It's a product** | 11 | 30-day unattended soak. O5 met. Runbook written. v1.0.0 tagged. | **13** | M | 107 |
+
+[^m3-affect-count]: **"7 affects" counts 4 Tier-1 + 3 Tier-2** — IDLE, LISTENING, THINKING,
+    SPEAKING, plus HAPPY, SAD, CONFUSED. `Affect` also has an **eighth** member, `SLEEPING`
+    (the presence-lost rest face), which renders too; the M3 gate demo therefore tours
+    **eight** faces and satisfies this criterion *a fortiori*. Recorded here at the M3 seal
+    (AVID-75) so the 7-vs-8 discrepancy is not rediscovered as a defect. The affect `SLEEPING`
+    is orthogonal to the *operational* state `SLEEPING` (SDS §3.10.1) — an import-linter
+    contract enforces that they stay uncoupled.
 
 **Total: ~107 IED.**
 

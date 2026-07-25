@@ -1,0 +1,13 @@
+affect        latency
+---------- ----------
+LISTENING      9.1 ms
+THINKING      11.0 ms
+SPEAKING      10.0 ms
+HAPPY          8.8 ms
+SAD            8.9 ms
+CONFUSED       7.8 ms
+SLEEPING      10.8 ms
+IDLE          11.2 ms
+---------- ----------
+min 7.8 ms / median 9.6 ms / max 11.2 ms / count 8
+PASS: all 8 faces within the 150 ms budget
