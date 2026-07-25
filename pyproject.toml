@@ -41,6 +41,15 @@ openai = [
     "openai>=1",
     "websockets>=13",
 ]
+# The §8.5 in-memory vector index (#120). `numpy` runs the brute-force cosine matmul over the
+# pre-normalised 384-dim vectors — lazy-imported only inside HybridRetriever (and the
+# SileroVad path), so avid/adapters/retrieval.py loads on a host without this group. Unlike the
+# `pi` extra, numpy is a pure, platform-independent wheel, so CI installs it (`--extra memory`)
+# and actually exercises the ranking math. ADR-012 holds: numpy is an opt-in extra, never a
+# default install, and never enters `domain/` (the domain-purity test enforces it).
+memory = [
+    "numpy>=1.24",
+]
 
 [dependency-groups]
 dev = [

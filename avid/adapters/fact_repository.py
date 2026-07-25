@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,6 +46,21 @@ _FACT_COLUMNS = (
     "id, text, kind, importance, confidence, created_at, last_accessed_at, "
     "access_count, superseded_by, superseded_at, derived_from, source_correlation_id"
 )
+
+# FTS5 gives ``"``, ``*``, ``(``, ``:``, ``AND``/``OR``/``NOT`` special meaning, so a raw user
+# query ("What's Maya's number?") would surface as a MATCH syntax error, not a miss (§8.3). We
+# reduce the query to its word tokens, quote each so it is a literal FTS5 string, and OR them:
+# the keyword branch is meant to *widen* the candidate pool (recall), and §7.7's scoring — not
+# this SQL — decides final ordering. A token-less query yields no MATCH string, i.e. no rows.
+_WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def _fts_match(query: str) -> str | None:
+    """Turn a free-text query into a safe FTS5 ``MATCH`` string, or ``None`` if it has no terms."""
+    tokens = _WORD.findall(query)
+    if not tokens:
+        return None
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def _row_to_fact(row: Row) -> Fact:
@@ -196,6 +212,26 @@ class SqliteFactRepo:
             return [(int(row["id"]), bytes(row["embedding"])) for row in rows]
 
         return await self._run(_load)
+
+    async def keyword_search(self, query: str, *, limit: int) -> Sequence[int]:
+        match = _fts_match(query)
+        if match is None:
+            return []
+
+        def _search() -> list[int]:
+            conn = self._conn_sync()
+            # facts_fts.rowid == facts.id (content_rowid='id', §8.3), so the join filters to live
+            # facts; bm25(facts_fts) is smaller for better matches, hence plain ascending order.
+            rows = conn.execute(
+                "SELECT f.id FROM facts_fts "
+                "JOIN facts f ON f.id = facts_fts.rowid "
+                "WHERE facts_fts MATCH ? AND f.superseded_by IS NULL "
+                "ORDER BY bm25(facts_fts) LIMIT ?",
+                (match, limit),
+            ).fetchall()
+            return [int(row["id"]) for row in rows]
+
+        return await self._run(_search)
 
     async def aclose(self) -> None:
         if self._closed:

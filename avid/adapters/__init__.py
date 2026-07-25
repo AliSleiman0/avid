@@ -13,6 +13,7 @@ from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay, FramebufferDisplay
 from avid.adapters.embedder import FakeEmbedder
+from avid.adapters.fact_repository import FakeFactRepository, SqliteFactRepo
 from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
 from avid.adapters.notifier import FakeServiceNotifier, SystemdNotifier
@@ -21,6 +22,7 @@ from avid.adapters.realtime import (
     OpenAIRealtimeClient,
     ReplayRealtimeClient,
 )
+from avid.adapters.retrieval import HybridRetriever, pack_embedding
 from avid.adapters.servo import FakeServo, Pca9685Servo
 from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
 from avid.adapters.turn_sink import FakeTurnSink
@@ -61,4 +63,10 @@ __all__ = [
     "HealthServer",
     # Embedder (#118) — real LocalMiniLmEmbedder (ONNX) lands in a later issue
     "FakeEmbedder",
+    # FactRepository (#117) — SQLite store + in-memory fake
+    "SqliteFactRepo",
+    "FakeFactRepository",
+    # Hybrid retriever + §8.2 vector packing (#120) — the memory read path
+    "HybridRetriever",
+    "pack_embedding",
 ]

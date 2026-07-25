@@ -7,13 +7,13 @@ explicitly (`python tools/eval_recall.py`), never collected by the default `pyte
 it lives outside `avid/` so it is clear of mypy/coverage default scope — like
 `tools/generate_cue_bank.py`. CI lints the whole repo, so it stays ruff-clean and formatted.
 
-It exists **before any retrieval code does** (deliberately — R-07, PMP §9.2): the eval set is
-written first so its queries are not shaped by what an implementation already answers. Until
-the real hybrid retriever lands (§7.7, #120) the harness scores a deliberately-bad **stub**,
-which proves the measurement rig is wired end-to-end — the whole point of filing this first.
+It was written **before any retrieval code existed** (deliberately — R-07, PMP §9.2): the eval
+set came first so its queries were not shaped by what an implementation already answers. As of
+#120 it scores the **real** hybrid retriever (§7.7 — FTS5 ∪ cosine over the §8.5 index, the
+`FakeEmbedder` standing in for the ONNX model), and the recall@5 it prints is the R-07 tripwire.
 
-The scorer takes the retriever as a **narrow injected callable** (`Retriever`), not a class,
-so the same code scores today's stub and, later, the real retriever with no change here.
+The scorer takes the retriever as a **narrow injected callable** (`Retriever`), not a class, so
+the same code scored yesterday's stub and today's real retriever with no change to the scorer.
 
 Run:  ``python tools/eval_recall.py``  (optionally ``--path ...`` / ``--k 5``).
 """
@@ -21,11 +21,22 @@ Run:  ``python tools/eval_recall.py``  (optionally ``--path ...`` / ``--k 5``).
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from avid.adapters import (
+    FakeEmbedder,
+    FakeFactRepository,
+    HybridRetriever,
+    pack_embedding,
+)
+from avid.adapters.clock import FakeClock
+from avid.core.event_bus import AsyncioEventBus
+from avid.domain import Fact, ScoreWeights
 
 # The injected callable the scorer measures (AC-3): (query, k) -> ordered fact ids, most
 # relevant first. May return FEWER than k, **including empty** — an empty result is how a real
@@ -106,14 +117,63 @@ def recall_at_k(evalset: EvalSet, retriever: Retriever, k: int = _DEFAULT_K) -> 
     return Report(hits=hits, total=len(evalset.queries), per_category=per_category)
 
 
-def make_stub_retriever(evalset: EvalSet) -> Retriever:
-    """A deliberately-bad retriever: returns the first k fact ids in file order, ignoring the
-    query. It exists only to prove the harness is wired end-to-end (AC-4) — it will score a
-    real, low number and never a good one."""
-    ids = [f.id for f in evalset.facts]
+async def _compute_results(evalset: EvalSet, k: int) -> dict[str, tuple[str, ...]]:
+    """Build the real hybrid retriever over the eval facts and run every query through it once.
 
-    def _retrieve(query: str, k: int) -> Sequence[str]:
-        return ids[:k]
+    The eval set keys facts by string id; the store assigns integer rowids, so a small map carries
+    the retriever's int ids back to the eval ids the scorer compares. Facts are embedded with the
+    ``FakeEmbedder`` (the CI/sim embedder, P6) and stored with their §8.2 BLOB, then the index is
+    rebuilt from the store exactly as it is at boot (§8.5)."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    repo = FakeFactRepository(clock=clock)
+    embedder = FakeEmbedder()
+    retriever = HybridRetriever(
+        repo=repo,
+        embedder=embedder,
+        bus=bus,
+        clock=clock,
+        top_k=k,
+        half_life_days=14.0,
+        weights=ScoreWeights(),
+    )
+    await bus.start()
+    try:
+        eval_id: dict[int, str] = {}
+        now = clock.now()
+        for fact in evalset.facts:
+            vector = await embedder.embed(fact.text)
+            stored = Fact(
+                id=0,
+                text=fact.text,
+                kind="other",
+                importance=5,
+                created_at=now,
+                last_accessed_at=now,
+            )
+            rowid = await repo.add(stored, embedding=pack_embedding(vector))
+            eval_id[rowid] = fact.id
+        await retriever.rebuild()
+        results: dict[str, tuple[str, ...]] = {}
+        for query in evalset.queries:
+            ids = await retriever.retrieve(query.query)
+            results[query.query] = tuple(eval_id[i] for i in ids)
+        return results
+    finally:
+        await bus.stop()
+        await repo.aclose()
+
+
+def make_real_retriever(evalset: EvalSet, k: int) -> Retriever:
+    """The real §7.7 hybrid retriever as the scorer's injected callable (AC-8).
+
+    Retrieval is async and its store/index are built once, so results are computed up front in one
+    event loop; the returned callable is a pure lookup, keeping :func:`recall_at_k` synchronous and
+    retriever-agnostic."""
+    results = asyncio.run(_compute_results(evalset, k))
+
+    def _retrieve(query: str, _k: int) -> Sequence[str]:
+        return results.get(query, ())
 
     return _retrieve
 
@@ -149,10 +209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     evalset = load_eval_set(args.path)
-    # Retrieval does not exist yet — score the stub so the rig is proven before #120.
-    report = recall_at_k(evalset, make_stub_retriever(evalset), args.k)
+    report = recall_at_k(evalset, make_real_retriever(evalset, args.k), args.k)
     print(f"eval set: {len(evalset.facts)} facts, {len(evalset.queries)} queries")
-    print(f"retriever: stub (first-{args.k}, query-blind)")
+    print(f"retriever: hybrid FTS5 + cosine, FakeEmbedder (top-{args.k}, #120)")
     print()
     print(format_report(report, args.k))
     return 0

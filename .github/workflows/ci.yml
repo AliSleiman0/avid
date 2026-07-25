@@ -68,7 +68,9 @@ jobs:
       - uses: astral-sh/setup-uv@v8.3.2
         with:
           enable-cache: true
-      - run: uv sync --dev --frozen --python ${{ matrix.python-version }}
+        # `--extra memory` installs numpy (the §8.5 index): a pure, platform-independent wheel,
+        # so the hybrid-retrieval matmul (#120) is actually exercised on both interpreters.
+      - run: uv sync --dev --frozen --extra memory --python ${{ matrix.python-version }}
       - name: pytest + coverage
         run: uv run --python ${{ matrix.python-version }} pytest --cov
       - name: upload FakeDisplay frames
@@ -90,6 +92,8 @@ jobs:
       - uses: astral-sh/setup-uv@v8.3.2
         with:
           enable-cache: true
-      - run: uv sync --dev --frozen
+        # `--extra memory` (numpy): the retrieval suite must run here too, so the inline matmul
+        # is proven to stay off the loop under the 50 ms slow-callback gate (#120, P8).
+      - run: uv sync --dev --frozen --extra memory
       - name: pytest under asyncio debug (slow-callback > 50 ms fails)
         run: uv run pytest

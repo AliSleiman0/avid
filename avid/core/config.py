@@ -54,6 +54,11 @@ class AdaptersConfig(_Section):
     # ``openai``), which is the §7.4 which-real-model escape hatch — as ``[adapters] vad`` and
     # ``[gate] threshold`` are separate axes.
     embedder: Literal["local_minilm", "fake"] = "fake"
+    # The durable fact store (#117/#120). ``sqlite`` is the real file-backed ``SqliteFactRepo`` at
+    # ``[memory] db_path``; ``fake`` is the ``FakeFactRepository`` at ``":memory:"`` — same schema,
+    # same SQL, no file — the laptop/sim default. A fake-vs-real switch, distinct from ``[memory]``
+    # settings (db_path, dimensions, weights), which configure whichever store is chosen (P7).
+    store: Literal["sqlite", "fake"] = "fake"
     realtime: Literal["openai", "replay"] = "replay"
     # The process supervisor (AVID-38). ``systemd`` speaks sd_notify to
     # ``$NOTIFY_SOCKET``; ``fake`` records the calls and is the laptop default — the

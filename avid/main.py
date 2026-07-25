@@ -28,6 +28,7 @@ from avid.adapters import (
     FakeCamera,
     FakeDisplay,
     FakeEmbedder,
+    FakeFactRepository,
     FakeMicrophone,
     FakeServiceNotifier,
     FakeServo,
@@ -35,11 +36,13 @@ from avid.adapters import (
     FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
+    HybridRetriever,
     OpenAIRealtimeClient,
     Pca9685Servo,
     Picamera2Camera,
     ReplayRealtimeClient,
     SileroVad,
+    SqliteFactRepo,
     SystemClock,
     SystemdNotifier,
 )
@@ -52,6 +55,8 @@ from avid.core.ports import (
     Clock,
     Display,
     Embedder,
+    EventBus,
+    FactRepository,
     Microphone,
     RealtimeClient,
     Service,
@@ -61,6 +66,7 @@ from avid.core.ports import (
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
+from avid.domain import ScoreWeights
 from avid.services import (
     AffectService,
     AudioService,
@@ -323,6 +329,62 @@ def _build_embedder(config: Config) -> Embedder:
     return embedder
 
 
+def _build_fact_repository(config: Config, *, clock: Clock) -> FactRepository:
+    """Select the ``FactRepository`` adapter named by ``[adapters] store`` (#117/#120, SDS §8.3).
+
+    ``fake`` is the laptop/sim default — :class:`FakeFactRepository` at ``":memory:"``, the same
+    schema and SQL as the real store with no file, so it *is* the simulator (P6); ``sqlite`` is the
+    file-backed :class:`SqliteFactRepo` at ``[memory] db_path``. Both run everywhere (SQLite is not
+    a device), so neither branch is Pi-gated. The blocking ``sqlite3`` I/O rides the adapter's one
+    writer thread (§3.8.2); the connection opens lazily, so building the store here is inert until
+    ``MemoryService`` (#122) drives its lifecycle.
+    """
+    match config.adapters.store:
+        case "fake":
+            repo: FactRepository = FakeFactRepository(clock=clock)
+        case "sqlite":
+            repo = SqliteFactRepo(db_path=config.memory.db_path, clock=clock)
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"store adapter {other!r} is not available — only 'sqlite' and "
+                f"'fake' exist (#117)"
+            )
+    return repo
+
+
+def _build_retriever(
+    config: Config,
+    *,
+    repo: FactRepository,
+    embedder: Embedder,
+    bus: EventBus,
+    clock: Clock,
+) -> HybridRetriever:
+    """Build the §8.5 hybrid retriever over the store + embedder (#120, SDS §7.7).
+
+    A portless concrete adapter (like ``HealthServer``): the memory read path — FTS5 keyword ∪
+    cosine over the in-memory numpy index, scored by #116's pure ``rank_candidates``. ``top_k``, the
+    recency half-life and the three §7.7 weights are injected from ``[memory]`` (P7, AC-5), never
+    literals. Its ``rebuild()`` (boot) and write-through lifecycle are driven by ``MemoryService``
+    (#122); here it is built and held so the ``[adapters] store`` switch is realized end-to-end and
+    the retriever appears in the health map.
+    """
+    weights = config.memory.weights
+    return HybridRetriever(
+        repo=repo,
+        embedder=embedder,
+        bus=bus,
+        clock=clock,
+        top_k=config.memory.top_k,
+        half_life_days=config.memory.recency_half_life_days,
+        weights=ScoreWeights(
+            recency=weights.recency,
+            importance=weights.importance,
+            relevance=weights.relevance,
+        ),
+    )
+
+
 def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
     """Select the ``RealtimeClient`` adapter named by ``[adapters] realtime`` (#101/#105).
 
@@ -492,6 +554,7 @@ async def _run(config: Config) -> int:
     speaker = _build_speaker(config)
     vad = _build_vad(config)
     embedder = _build_embedder(config)
+    fact_store = _build_fact_repository(config, clock=clock)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
@@ -500,6 +563,11 @@ async def _run(config: Config) -> int:
     # The one state machine (SDS §3.8.4). Built here so every future service shares this
     # instance rather than growing a private copy — the lifecycle drives it to IDLE.
     state = StateManager(bus=bus, clock=clock)
+    # The memory read path (#120): the retriever owns the store + embedder + bus. Built after the
+    # bus (it publishes memory.recall_completed) and held — MemoryService (#122) drives rebuild/close.
+    retriever = _build_retriever(
+        config, repo=fact_store, embedder=embedder, bus=bus, clock=clock
+    )
     adapter_health = {
         "clock": True,
         "display": True,
@@ -508,6 +576,8 @@ async def _run(config: Config) -> int:
         "microphone": True,
         "speaker": True,
         "embedder": True,
+        "fact_store": True,
+        "retriever": True,
         "notifier": True,
         "health": True,
     }
@@ -527,15 +597,16 @@ async def _run(config: Config) -> int:
         cues=cues,
         config=config,
     )
-    # ``camera``, ``servo`` and ``embedder`` are still constructed only to realize the switch and
+    # ``camera``, ``servo`` and ``retriever`` are still constructed only to realize the switch and
     # appear in the health map: driving the camera is the vision service's job (M8), moving the servo
-    # is MotionService's (M9), and the embedder is consumed by the memory index (#120) / MemoryService
-    # (#122) — all later issues. Building the embedder here now still buys AC-6: its dimensions are
-    # checked against config at startup. ``display`` (AVID-73) and ``microphone``/``speaker``/``vad``
-    # (AVID-89) have left this list; their services own them.
+    # is MotionService's (M9), and the retriever (which now holds ``embedder`` + ``fact_store``) is
+    # consumed by ``MemoryService`` (#122) — all later issues. Building the embedder here still buys
+    # #118's AC-6 dimension check, and building the retriever realizes the ``[adapters] store`` switch
+    # end-to-end. ``display`` (AVID-73) and ``microphone``/``speaker``/``vad`` (AVID-89) have left this
+    # list; their services own them.
     _ = camera
     _ = servo
-    _ = embedder
+    _ = retriever
     return await lifecycle.run(
         bus=bus,
         clock=clock,
