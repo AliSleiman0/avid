@@ -413,3 +413,64 @@ async def test_a_raising_fact_stored_subscriber_does_not_undo_the_write() -> Non
         )  # committed regardless of the subscriber
         # the bus swallowed the raise and republished system.handler_failed (§3.5.2)
         await _wait(rig, lambda: bool(_of(rig, SystemHandlerFailed)))
+
+
+# --- #125 the MemoryTools tool surface (remember_fact / recall) --------------------------------
+
+
+async def test_remember_fact_builds_and_stores_the_fact() -> None:
+    # remember_fact(text, kind, importance) is the turn→Fact construction behind the port (§7.6): it
+    # builds the Fact the tool arguments imply and defers to store_fact, durable before it returns.
+    async for rig in _make_rig():
+        await rig.memory.start()
+        corr = uuid4()
+        fid = await rig.memory.remember_fact(
+            text="the user's dog is called biscuit",
+            kind="relationship",
+            importance=6,
+            correlation_id=corr,
+        )
+        stored = await rig.repo.get(fid)  # durable the instant it returns (AC-3)
+        assert stored is not None
+        assert stored.text == "the user's dog is called biscuit"
+        assert stored.kind == "relationship"
+        assert stored.importance == 6
+        assert stored.source_correlation_id == corr  # traces to the turn (§3.12.2)
+        await _drain(rig)
+        assert [e.fact_id for e in _of(rig, MemoryFactStored)] == [fid]
+
+
+async def test_remember_fact_rejects_an_unknown_kind() -> None:
+    # AC-2: a kind outside FACT_KINDS is refused before any write, so a bad tool argument becomes a
+    # tool error — never a row the §8.3 CHECK rejects only at COMMIT.
+    async for rig in _make_rig():
+        await rig.memory.start()
+        with pytest.raises(ValueError, match="unknown fact kind"):
+            await rig.memory.remember_fact(text="x", kind="mood", importance=5)
+
+
+@pytest.mark.parametrize("importance", [0, 11, -1])
+async def test_remember_fact_rejects_out_of_range_importance(importance: int) -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()
+        with pytest.raises(ValueError, match="importance"):
+            await rig.memory.remember_fact(
+                text="x", kind="other", importance=importance
+            )
+
+
+async def test_recall_returns_facts_capped_at_k() -> None:
+    # recall delegates to retrieve (which publishes memory.recall_completed) and truncates to the
+    # model-requested k, so a model asking for fewer than top_k gets exactly that many.
+    async for rig in _make_rig(embedder=_CheapEmbedder()):
+        await rig.memory.start()
+        for i in range(5):
+            await rig.memory.remember_fact(
+                text=f"fact number {i}", kind="other", importance=5
+            )
+            await asyncio.sleep(0)
+        got = await rig.memory.recall("fact number", k=2)
+        assert len(got) <= 2
+        assert all(isinstance(f, Fact) for f in got)
+        await _drain(rig)
+        assert len(_of(rig, MemoryRecallCompleted)) == 1  # the retriever published it

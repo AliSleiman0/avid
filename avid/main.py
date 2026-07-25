@@ -72,6 +72,8 @@ from avid.core.ports import (
 from avid.core.state_manager import StateManager
 from avid.domain import ScoreWeights
 from avid.services import (
+    CAPABILITY_INSTRUCTIONS,
+    TOOL_SCHEMAS,
     AffectService,
     AudioService,
     ConversationService,
@@ -450,9 +452,16 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
                 api_key=config.openai_api_key.get_secret_value(),
                 model=config.ai.model,
                 voice=config.ai.voice,
-                instructions=config.ai.instructions,
+                # The §6.4 capability layer (layer 3): the base identity prompt plus the §7.6
+                # remember_fact/recall/forget instructions (#125), so the model knows the tools
+                # exist and when to call them. Part of the static cached prefix (§6.2.2) — layer 2
+                # (personality) is M6, layer 4 (pre-injected memory) is #126.
+                instructions=config.ai.instructions + "\n\n" + CAPABILITY_INSTRUCTIONS,
                 max_output_tokens=config.ai.max_output_tokens,
                 turn_detection=config.ai.turn_detection.model_dump(),
+                # The §6.6 tool declarations (#125): recall/forget/remember_fact as JSON Schema,
+                # static for the session's life. Vendor-neutral dicts, injected like turn_detection.
+                tools=TOOL_SCHEMAS,
             )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
@@ -539,7 +548,11 @@ def _wire_services(
     ``MemoryService`` (#122) is the §9.1.4 exception: it subscribes to **nothing** (so it adds no edge
     to the graph), but it owns the store + index lifecycle — ``start`` rebuilds the §8.5 index — so it is
     **returned** for the lifecycle to ``start``/``stop`` like ``AudioService``. It is handed the store,
-    the retriever, the embedder and the text model as **ports** (P2); ``main`` built the concretes.
+    the retriever, the embedder and the text model as **ports** (P2); ``main`` built the concretes. It
+    is built **before** ``ConversationService`` and injected into it as the ``MemoryTools`` port (#125),
+    so the §6.6 tool dispatch reaches memory by **direct call** (§9.1.4) — ``ConvSvc`` names the port,
+    never the service module (P2/P5). Injecting the concrete here does not add a bus edge (the tool
+    dispatch rides the Realtime event pump, not the bus), so the subscriber graph is unchanged by #125.
     """
     affect = AffectService(bus=bus, clock=clock)
     expression = ExpressionService(bus=bus, display=display, clock=clock)
@@ -556,23 +569,11 @@ def _wire_services(
         silence_hold_ms=config.gate.silence_hold_ms,
         loopback=False,
     )
-    conversation = ConversationService(
-        bus=bus,
-        clock=clock,
-        state=state,
-        client=realtime,
-        sink=audio,
-        cues=cues,
-        session_idle_close_s=config.gate.session_idle_close_s,
-    )
-    # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
-    # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so
-    # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
-    # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
-    cost_meter = CostMeterService(bus=bus, model=config.ai.model)
     # The memory service (#122): the sole writer/reader of persistent facts, reached by direct call, so
     # its subscriptions() is empty — it appears in the loop only for uniformity. Injected the store,
-    # index, embedder and text model as ports (P2); it owns their rebuild/close lifecycle.
+    # index, embedder and text model as ports (P2); it owns their rebuild/close lifecycle. Built
+    # **before** ConversationService (#125) because that service is injected it as its ``MemoryTools``
+    # port — the concrete satisfies the port structurally, and the tool dispatch reaches it by call.
     memory = MemoryService(
         bus=bus,
         clock=clock,
@@ -585,6 +586,23 @@ def _wire_services(
         top_facts_max=config.memory.top_facts_max,
         top_facts_token_budget=config.memory.top_facts_token_budget,
     )
+    conversation = ConversationService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        client=realtime,
+        sink=audio,
+        cues=cues,
+        # The MemoryTools port for the §6.6 tool dispatch (#125) — the concrete MemoryService,
+        # injected as the port so ConvSvc names no service module (P2/P5).
+        memory=memory,
+        session_idle_close_s=config.gate.session_idle_close_s,
+    )
+    # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
+    # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so
+    # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
+    # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
+    cost_meter = CostMeterService(bus=bus, model=config.ai.model)
     for service in (affect, expression, audio, conversation, cost_meter, memory):
         for sub in service.subscriptions():
             bus.subscribe(

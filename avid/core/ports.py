@@ -9,7 +9,7 @@ Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clo
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
 :class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
 :class:`TurnSink`, :class:`FactRepository`, :class:`Embedder`, :class:`Retriever`,
-:class:`TextModel`.
+:class:`TextModel`, :class:`MemoryTools`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -523,6 +523,56 @@ class TextModel(Protocol):
         when none. ``async`` because the real adapter runs HTTPS inference it must keep off the loop
         (P8); the fake decides in-process. Confabulation is a bug (§7.8): return only ids genuinely
         superseded — *unknown* is a valid "not superseded", never a guess."""
+        ...
+
+
+@runtime_checkable
+class MemoryTools(Protocol):
+    """The three memory tools, as ``ConversationService`` needs them (SDS §6.6, §7.6, ADR-004).
+
+    Per ADR-004 the model does not own memory — it *gets tools*, and this is the surface the
+    tool dispatcher calls when the model invokes one. Promoted to a port for #125:
+    ``ConversationService`` is a *service* and adapters/services sit above it (P1/P5), so it may
+    not import the concrete ``MemoryService`` — it depends on this Protocol and the composition
+    root injects the service (P2, AC-1). Defined in the model's **tool vocabulary** — the three
+    §6.6 tools verbatim — never in the store's terms: fact *construction* (text/kind/importance →
+    :class:`~avid.domain.Fact`) lives behind :meth:`remember_fact`, so the conversation layer
+    never touches the domain-memory record.
+
+    ``kind`` crosses as a plain ``str`` because it arrives from the model as raw JSON; the
+    implementation validates it against ``FACT_KINDS`` (the §8.3 ``CHECK`` values) and raises on a
+    seventh, which the dispatcher turns into a tool error (AC-2/AC-6). Every method is ``async``
+    (the store I/O and any model inference stay off the loop, P8) and takes the turn's
+    ``correlation_id`` so the write/read traces back to the turn that caused it (§3.12.2).
+    """
+
+    async def remember_fact(
+        self,
+        text: str,
+        kind: str,
+        importance: int,
+        *,
+        correlation_id: UUID | None = None,
+    ) -> int:
+        """Store a fact the model extracted (§7.6, UC-02) and return its id — **durable before it
+        returns** (§3.7.3, AC-3): the model is told "remembered" only when the row is committed.
+        Runs the full §7.8 write (supersession included). Raises :class:`ValueError` on an invalid
+        ``kind`` (not in ``FACT_KINDS``) or ``importance`` (outside 1–10) rather than writing a bad
+        row — the dispatcher surfaces that as a tool error (AC-6)."""
+        ...
+
+    async def recall(
+        self, query: str, *, k: int = 5, correlation_id: UUID | None = None
+    ) -> Sequence[Fact]:
+        """The `recall` tool (§6.7 path 2, UC-05): the top facts for ``query``, best first. ``k`` is
+        the model-requested cap (default 5, §7.7). Publishes ``memory.recall_completed`` via the
+        retriever; a read, so it bumps no access counts here."""
+        ...
+
+    async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int:
+        """The `forget` tool (§7.10, UC-07, AC-5): hard-delete the facts matching ``query`` and
+        return the count — **durable before it returns** (losing a deletion is a privacy bug,
+        §3.7.3). A rights operation, never supersession."""
         ...
 
 

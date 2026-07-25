@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "purpose": "Extraction eval set for M7 memory — 30 transcripts scored as remember_fact fire-rate (SDS 14.7, O2, 7.6).",
+    "measures": "given the shipped tool schemas + 7.6 capability instructions, does the model call remember_fact exactly when it should?",
+    "voice": "transcripts are single user utterances in the user's own voice — the thing the model hears, NOT a database row.",
+    "scoring": "an item hits if the model's remember_fact firing matches expect_fire. Tracked over time, never gates CI; needs a live key.",
+    "categories": {
+      "positive": "a durable fact the user was told — remember_fact MUST fire (expect_kind names the expected kind)",
+      "negative-remark": "a passing remark / small talk — must NOT fire (7.6: 'do not store passing remarks')",
+      "negative-question": "the user is asking, not telling — must NOT fire (7.6: '...or questions')",
+      "negative-inferred": "something the model could infer but was NOT told — must NOT fire (7.6's load-bearing clause)"
+    }
+  },
+  "transcripts": [
+    { "id": "e01", "transcript": "my name is Ali", "expect_fire": true, "expect_kind": "identity", "category": "positive" },
+    { "id": "e02", "transcript": "i'm a night-shift nurse at the children's hospital downtown", "expect_fire": true, "expect_kind": "identity", "category": "positive" },
+    { "id": "e03", "transcript": "my sister's name is maya", "expect_fire": true, "expect_kind": "relationship", "category": "positive" },
+    { "id": "e04", "transcript": "i'm allergic to shellfish, badly", "expect_fire": true, "expect_kind": "identity", "category": "positive" },
+    { "id": "e05", "transcript": "i drink my coffee black, no sugar", "expect_fire": true, "expect_kind": "preference", "category": "positive" },
+    { "id": "e06", "transcript": "i go for a run every morning at six", "expect_fire": true, "expect_kind": "routine", "category": "positive" },
+    { "id": "e07", "transcript": "my dog biscuit is a border collie", "expect_fire": true, "expect_kind": "relationship", "category": "positive" },
+    { "id": "e08", "transcript": "i just moved to beirut two years ago, used to live in amman", "expect_fire": true, "expect_kind": "event", "category": "positive" },
+    { "id": "e09", "transcript": "i can't stand cilantro, it tastes like soap to me", "expect_fire": true, "expect_kind": "preference", "category": "positive" },
+    { "id": "e10", "transcript": "my daughter's birthday is the fourteenth of march", "expect_fire": true, "expect_kind": "event", "category": "positive" },
+    { "id": "e11", "transcript": "i take the last train home so i'm usually not back before midnight", "expect_fire": true, "expect_kind": "routine", "category": "positive" },
+    { "id": "e12", "transcript": "i'm learning to play the cello, been at it about a year", "expect_fire": true, "expect_kind": "identity", "category": "positive" },
+    { "id": "e13", "transcript": "my best friend from college is priya", "expect_fire": true, "expect_kind": "relationship", "category": "positive" },
+    { "id": "e14", "transcript": "i'm vegetarian, have been since i was sixteen", "expect_fire": true, "expect_kind": "preference", "category": "positive" },
+    { "id": "e15", "transcript": "we're planning a trip to lisbon next month", "expect_fire": true, "expect_kind": "event", "category": "positive" },
+    { "id": "e16", "transcript": "ugh, the weather is miserable today", "expect_fire": false, "expect_kind": null, "category": "negative-remark" },
+    { "id": "e17", "transcript": "that's a funny name for a robot, ha", "expect_fire": false, "expect_kind": null, "category": "negative-remark" },
+    { "id": "e18", "transcript": "hang on, let me grab my coffee", "expect_fire": false, "expect_kind": null, "category": "negative-remark" },
+    { "id": "e19", "transcript": "wow, it's already four in the afternoon", "expect_fire": false, "expect_kind": null, "category": "negative-remark" },
+    { "id": "e20", "transcript": "anyway, where were we", "expect_fire": false, "expect_kind": null, "category": "negative-remark" },
+    { "id": "e21", "transcript": "what did i tell you my sister's name was?", "expect_fire": false, "expect_kind": null, "category": "negative-question" },
+    { "id": "e22", "transcript": "can you remind me when my dentist appointment is?", "expect_fire": false, "expect_kind": null, "category": "negative-question" },
+    { "id": "e23", "transcript": "do you remember what coffee i like?", "expect_fire": false, "expect_kind": null, "category": "negative-question" },
+    { "id": "e24", "transcript": "what's the capital of portugal?", "expect_fire": false, "expect_kind": null, "category": "negative-question" },
+    { "id": "e25", "transcript": "how do i get soup stains out of a shirt?", "expect_fire": false, "expect_kind": null, "category": "negative-question" },
+    { "id": "e26", "transcript": "i'm so tired, i was up half the night", "expect_fire": false, "expect_kind": null, "category": "negative-inferred" },
+    { "id": "e27", "transcript": "ha, that joke was terrible", "expect_fire": false, "expect_kind": null, "category": "negative-inferred" },
+    { "id": "e28", "transcript": "i really should go to bed earlier", "expect_fire": false, "expect_kind": null, "category": "negative-inferred" },
+    { "id": "e29", "transcript": "this playlist is putting me in a good mood", "expect_fire": false, "expect_kind": null, "category": "negative-inferred" },
+    { "id": "e30", "transcript": "i wonder if it'll rain for the picnic", "expect_fire": false, "expect_kind": null, "category": "negative-inferred" }
+  ]
+}

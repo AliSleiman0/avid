@@ -812,9 +812,17 @@ class TurnSink(Protocol):                # the ConvSvc↔AudioSvc audio seam (§
     async def play(self, chunk: AudioChunk, *, item_id: str) -> None: ...  # assistant PCM down
     async def end_response(self) -> None: ...  # normal completion → playback_finished, SPEAKING→IDLE
     async def interrupt(self) -> int: ...  # barge-in; returns played_ms ACTUALLY emitted (§6.2.4)
+
+
+class MemoryTools(Protocol):             # the §6.6 tool surface ConvSvc dispatches to (#125, ADR-004)
+    async def remember_fact(self, text: str, kind: str, importance: int,
+                            *, correlation_id: UUID | None = None) -> int: ...  # §7.6, durable-before-return
+    async def recall(self, query: str, *, k: int = 5,
+                     correlation_id: UUID | None = None) -> Sequence[Fact]: ...  # §6.7 path 2
+    async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int: ...  # §7.10 hard delete
 ```
 
-`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap); the tool *dispatch* to `MemoryService` is `ConversationService`'s (#125). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
+`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap). The tool *dispatch* is `ConversationService`'s (#125): it parses the call and runs it against the injected **`MemoryTools`** port — never the concrete `MemoryService` (P2/P5) — so the composition root injects the service and `ConvSvc` names only the port. The three tool *declarations* (`TOOL_SCHEMA`, §6.6) and the §7.6 capability instructions ship in `services/tools.py` and are seeded into the session's cached prefix by `main` (a `remember_fact` on a barge-in-approximate turn is declined — §6.2.4/§7.6). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
 
 Three details worth defending:
 

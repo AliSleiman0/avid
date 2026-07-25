@@ -12,8 +12,13 @@ from avid.services.cost_meter import CostMeterService
 from avid.services.cue_bank import CUE_FILES, CueBank
 from avid.services.expression import ExpressionService
 from avid.services.memory import MemoryService
+from avid.services.tools import CAPABILITY_INSTRUCTIONS, TOOL_SCHEMAS
 
 __all__ = [
+    # The §7.6 capability instruction text + the §6.6 tool declarations (#125), seeded into the
+    # session by the composition root
+    "CAPABILITY_INSTRUCTIONS",
+    "TOOL_SCHEMAS",
     # cue→file manifest for the degraded WAV bank (AVID-80)
     "CUE_FILES",
     # The affect decider (AVID-71)

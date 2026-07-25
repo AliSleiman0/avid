@@ -25,6 +25,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from avid.adapters import (
+    FakeEmbedder,
+    FakeFactRepository,
+    FakeTextModel,
+    HybridRetriever,
+)
 from avid.adapters.clock import FakeClock
 from avid.adapters.microphone import FakeMicrophone
 from avid.adapters.realtime import ReplayRealtimeClient
@@ -34,6 +40,7 @@ from avid.adapters.vad import FakeVoiceActivityDetector
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import AudioChunk
+from avid.core.realtime import ToolCallRequested, TurnDone, UserTranscript
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioPlaybackFinished,
@@ -45,7 +52,10 @@ from avid.domain import (
     ConversationTurnStarted,
     ConversationUserTranscribed,
     Event,
+    Fact,
+    MemoryFactStored,
     RobotState,
+    ScoreWeights,
     StateTransitioned,
     SystemDegradedEntered,
     SystemDegradedExited,
@@ -53,7 +63,7 @@ from avid.domain import (
     TokenUsage,
     Trigger,
 )
-from avid.services import CueBank
+from avid.services import CueBank, MemoryService
 from avid.services.audio import AudioService
 from avid.services.conversation import ConversationService
 
@@ -95,6 +105,39 @@ class _Collector:
             await asyncio.sleep(0)
 
 
+class _StubMemory:
+    """A :class:`~avid.core.ports.MemoryTools` double that records its calls — a fake, not a mock
+    (SDS §14.3). Lets a conversation test assert which tool the dispatcher reached without standing
+    up the whole memory stack; the AC-7 e2e uses a real ``MemoryService`` instead."""
+
+    def __init__(self, *, recall_result: tuple[Fact, ...] = ()) -> None:
+        self.remembered: list[tuple[str, str, int]] = []
+        self.recalled: list[str] = []
+        self.forgotten: list[str] = []
+        self._recall_result = recall_result
+
+    async def remember_fact(
+        self,
+        text: str,
+        kind: str,
+        importance: int,
+        *,
+        correlation_id: UUID | None = None,
+    ) -> int:
+        self.remembered.append((text, kind, importance))
+        return 1
+
+    async def recall(
+        self, query: str, *, k: int = 5, correlation_id: UUID | None = None
+    ) -> tuple[Fact, ...]:
+        self.recalled.append(query)
+        return self._recall_result
+
+    async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int:
+        self.forgotten.append(query)
+        return 0
+
+
 class Rig(NamedTuple):
     """Everything a test needs, wired the way ``main._wire_services`` wires the loop (#102)."""
 
@@ -106,6 +149,7 @@ class Rig(NamedTuple):
     sink: FakeTurnSink
     speaker: FakeSpeaker
     collector: _Collector
+    memory: _StubMemory | MemoryService
 
 
 _ExtraSub = tuple[type[Event], Callable[[Event], Awaitable[None]], str]
@@ -119,6 +163,7 @@ async def _rig(
     session_idle_close_s: int = 30,
     mic_script: tuple[AudioChunk, ...] = (),
     extra_subs: tuple[_ExtraSub, ...] = (),
+    memory: _StubMemory | MemoryService | None = None,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -134,6 +179,7 @@ async def _rig(
     speaker = FakeSpeaker()
     cues = CueBank(speaker=speaker, asset_dir=_CUES)
     collector = _Collector()
+    mem = memory if memory is not None else _StubMemory()
     service = ConversationService(
         bus=bus,
         clock=clock,
@@ -141,6 +187,7 @@ async def _rig(
         client=client,
         sink=sink,
         cues=cues,
+        memory=mem,
         session_idle_close_s=session_idle_close_s,
     )
     for sub in service.subscriptions():
@@ -159,7 +206,7 @@ async def _rig(
     await bus.start()
     await service.start()
     try:
-        yield Rig(service, bus, clock, state, client, sink, speaker, collector)
+        yield Rig(service, bus, clock, state, client, sink, speaker, collector, mem)
     finally:
         await service.stop()
         await bus.stop()
@@ -312,32 +359,201 @@ async def test_two_turn_publishes_the_facts_on_one_correlation_id() -> None:
         assert rig.sink.responses_ended == 2
 
 
-async def test_tool_call_pumps_cleanly_but_dispatch_is_inert_until_125() -> None:
-    """#124: a ``ToolCallRequested`` in the stream is a declared seam, not yet wired.
+async def test_tool_call_dispatches_recall_and_returns_the_output() -> None:
+    """#125: a ``recall`` ``ToolCallRequested`` in the stream is dispatched against the memory port.
 
-    The ``tool_call`` fixture interleaves a ``recall`` invocation between the user transcript and
-    the assistant reply. The widened pump must handle the new union member — the turn's four
-    facts still mint on the one correlation id and the assistant PCM still reaches the sink — but
-    the tool call itself publishes **no** ``conversation.*`` fact and raises nothing (no
-    ``system.handler_failed``): dispatch to MemoryService lands in #125."""
+    The ``tool_call`` fixture interleaves a ``recall`` invocation (query "travel plans next month")
+    between the user transcript and the assistant reply. The pump now dispatches it: the memory
+    port's ``recall`` is called with that query, and the result is returned to the client via
+    ``send_tool_output`` (echoed ``call_id``). The turn's facts still mint on the one correlation id
+    and the assistant PCM still reaches the sink; nothing raises (no ``system.handler_failed``) —
+    a memory write publishes ``memory.fact_stored`` from MemoryService, never a ``conversation.*``."""
     cid = uuid4()
     clock = FakeClock()
-    async with _rig(client=_replay("tool_call", clock=clock)) as rig:
+    memory = _StubMemory(
+        recall_result=(
+            Fact(
+                id=1,
+                text="a trip to Lisbon",
+                kind="event",
+                importance=6,
+                created_at=0,
+                last_accessed_at=0,
+            ),
+        )
+    )
+    async with _rig(client=_replay("tool_call", clock=clock), memory=memory) as rig:
         await _speak(rig, correlation_id=cid)
         await _advance_until(
             rig, lambda: len(rig.collector.of_type(ConversationTurnEnded)) >= 1
         )
         await rig.collector.settle()
 
-        # The single turn's facts mint normally, all on the origin id — the tool call is transparent.
+        # The tool was dispatched to the memory port with the model's query.
+        assert memory.recalled == ["travel plans next month"]
+        # …and its result was returned to the client, echoing the fixture's call_id.
+        assert rig.client.tool_outputs == [("call_0", rig.client.tool_outputs[0][1])]
+        assert "Lisbon" in rig.client.tool_outputs[0][1]
+
+        # The single turn's facts still mint normally, all on the origin id.
         assert len(rig.collector.of_type(ConversationTurnStarted)) == 1
         assert len(rig.collector.of_type(ConversationUserTranscribed)) == 1
         assert len(rig.collector.of_type(ConversationAssistantResponded)) == 1
         assert len(rig.collector.of_type(ConversationTurnEnded)) == 1
         assert [item_id for item_id, _ in rig.sink.played] == ["item_0"]
-
-        # The seam is inert: the pump neither crashed nor emitted an extra fact for the call.
         assert rig.collector.of_type(SystemHandlerFailed) == []
+
+
+async def test_remember_fact_on_an_approximate_turn_is_declined() -> None:
+    """#125 barge-in guard (§6.2.4/§7.6): a ``remember_fact`` on a turn whose user transcript is
+    approximate is **not** written — a half-heard tail stored as fact is the confabulation §7.6
+    guards against. The model is told, honestly, that nothing was stored (a tool output goes back),
+    and the memory port is never touched."""
+    cid = uuid4()
+    clock = FakeClock()
+    timeline: tuple[tuple[int, object], ...] = (
+        (0, UserTranscript(text="i think my name is... ", is_approximate=True)),
+        (
+            10,
+            ToolCallRequested(
+                call_id="call_x",
+                name="remember_fact",
+                arguments='{"text": "the user is called sam", "kind": "identity", "importance": 8}',
+            ),
+        ),
+        (
+            10,
+            TurnDone(
+                usage=TokenUsage(input_tokens=1, cached_input_tokens=0, output_tokens=1)
+            ),
+        ),
+    )
+    client = ReplayRealtimeClient(clock=clock, timeline=timeline)  # type: ignore[arg-type]
+    memory = _StubMemory()
+    async with _rig(client=client, memory=memory) as rig:
+        await _speak(rig, correlation_id=cid)
+        await _advance_until(
+            rig, lambda: len(rig.collector.of_type(ConversationTurnEnded)) >= 1
+        )
+        await rig.collector.settle()
+
+        assert memory.remembered == []  # nothing written on an approximate turn
+        assert len(rig.client.tool_outputs) == 1  # but the model still gets a reply
+        assert "approximate" in rig.client.tool_outputs[0][1]
+        assert rig.collector.of_type(SystemHandlerFailed) == []
+
+
+async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -> None:
+    """AC-7: a full turn where the model calls ``remember_fact`` against a **real** ``MemoryService``
+    (over the P6 fakes) — the row lands durably, ``memory.fact_stored`` publishes, the tool output is
+    returned, and every fact of the turn is on the one ``correlation_id``, zero network.
+
+    Wired standalone rather than through ``_rig`` because ``MemoryService`` and
+    ``ConversationService`` must share **one** bus (the memory write publishes ``memory.fact_stored``
+    on it), which the rig builds privately."""
+    cid = uuid4()
+    clock = FakeClock()
+    timeline: tuple[tuple[int, object], ...] = (
+        (0, UserTranscript(text="my name is Ali", is_approximate=False)),
+        (
+            10,
+            ToolCallRequested(
+                call_id="call_r",
+                name="remember_fact",
+                arguments='{"text": "the user is called Ali", "kind": "identity", "importance": 9}',
+            ),
+        ),
+        (
+            10,
+            TurnDone(
+                usage=TokenUsage(input_tokens=1, cached_input_tokens=0, output_tokens=1)
+            ),
+        ),
+    )
+    client = ReplayRealtimeClient(clock=clock, timeline=timeline)  # type: ignore[arg-type]
+    bus = AsyncioEventBus(clock=clock)
+    state = StateManager(bus=bus, clock=clock, initial=RobotState.LISTENING)
+    repo = FakeFactRepository(clock=clock)
+    embedder = FakeEmbedder()
+    retriever = HybridRetriever(
+        repo=repo,
+        embedder=embedder,
+        bus=bus,
+        clock=clock,
+        top_k=5,
+        half_life_days=14.0,
+        weights=ScoreWeights(),
+    )
+    memory = MemoryService(
+        bus=bus,
+        clock=clock,
+        repo=repo,
+        retriever=retriever,
+        embedder=embedder,
+        text_model=FakeTextModel(),
+        supersession_threshold=0.85,
+        supersession_k=5,
+        top_facts_max=15,
+        top_facts_token_budget=600,
+    )
+    sink = FakeTurnSink(script=())
+    service = ConversationService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        client=client,
+        sink=sink,
+        cues=CueBank(speaker=FakeSpeaker(), asset_dir=_CUES),
+        memory=memory,
+        session_idle_close_s=30,
+    )
+    ended: list[Event] = []
+    stored: list[MemoryFactStored] = []
+
+    async def _record_ended(event: Event) -> None:
+        ended.append(event)
+
+    async def _record_stored(event: Event) -> None:
+        assert isinstance(event, MemoryFactStored)
+        stored.append(event)
+
+    for sub in service.subscriptions():
+        bus.subscribe(
+            sub.event_type,
+            sub.handler,
+            name=sub.name,
+            policy=sub.policy,
+            maxsize=sub.maxsize,
+        )
+    bus.subscribe(ConversationTurnEnded, _record_ended, name="test.turn_ended")
+    bus.subscribe(MemoryFactStored, _record_stored, name="test.fact_stored")
+
+    await bus.start()
+    await memory.start()  # boot rebuild (empty store)
+    await service.start()
+    try:
+        await bus.publish(
+            AudioSpeechStarted(
+                **envelope(clock=clock, correlation_id=cid, source="test"),
+                ring_buffer_ms=0,
+            )
+        )
+        await _advance_clock_until(clock, lambda: bool(ended) and bool(stored))
+
+        # The row is durable (a direct call inside the tool handler, §3.7.3).
+        live = await repo.fetch_live()
+        assert [f.text for f in live] == ["the user is called Ali"]
+        # memory.fact_stored published, on the turn's correlation id (§3.12.2).
+        assert len(stored) == 1
+        assert stored[0].correlation_id == cid
+        assert stored[0].kind == "identity"
+        # The tool output was returned to the model, echoing the call_id.
+        assert client.tool_outputs[0][0] == "call_r"
+        assert '"ok": true' in client.tool_outputs[0][1]
+    finally:
+        await service.stop()
+        await memory.stop()
+        await bus.stop()
 
 
 async def test_user_transcribed_drives_listening_to_thinking() -> None:
@@ -557,6 +773,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         client=client,
         sink=audio,
         cues=cues,
+        memory=_StubMemory(),
         session_idle_close_s=30,
     )
     for sub in service.subscriptions():

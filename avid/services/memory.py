@@ -35,6 +35,7 @@ from avid.core.ports import (
     TextModel,
 )
 from avid.domain import (
+    FACT_KINDS,
     Fact,
     MemoryFactDeleted,
     MemoryFactStored,
@@ -166,6 +167,58 @@ class MemoryService:
             len(superseded_ids),
         )
         return new_id
+
+    # Importance is LLM-rated 1–10 at write time (§7.6) and the §8.3 CHECK enforces the range;
+    # we reject out-of-range here so a bad tool argument becomes an honest tool error, not a
+    # write that the database rejects only at COMMIT.
+    _IMPORTANCE_MIN = 1
+    _IMPORTANCE_MAX = 10
+
+    async def remember_fact(
+        self,
+        text: str,
+        kind: str,
+        importance: int,
+        *,
+        correlation_id: UUID | None = None,
+    ) -> int:
+        """The `remember_fact` tool (§7.6, UC-02, AC-3): build a :class:`~avid.domain.Fact` from the
+        model's extraction and store it durably, returning its id.
+
+        The model owns *what* to remember (ADR-004); this owns the trivial turn→``Fact`` construction
+        the tool arguments imply and then defers to :meth:`store_fact` for the full §7.8 write
+        (embed → supersession judge → insert → publish), so it is durable before it returns. ``kind``
+        and ``importance`` are validated against the §8.3 constraints **before** any write — an
+        invalid one raises :class:`ValueError` (the dispatcher turns that into a tool error, AC-6)
+        rather than reaching the store and failing at COMMIT. Timestamps and confidence take the
+        :class:`~avid.domain.Fact` defaults inside ``store_fact``."""
+        if kind not in FACT_KINDS:
+            raise ValueError(
+                f"unknown fact kind {kind!r} — must be one of {list(FACT_KINDS)} (§8.3)"
+            )
+        if not self._IMPORTANCE_MIN <= importance <= self._IMPORTANCE_MAX:
+            raise ValueError(
+                f"importance {importance} out of range "
+                f"{self._IMPORTANCE_MIN}–{self._IMPORTANCE_MAX} (§7.6)"
+            )
+        fact = Fact(
+            id=0,  # assigned by the store on insert (§8.2); ignored here
+            text=text,
+            kind=kind,  # mypy narrows to FactKind via the FACT_KINDS guard above
+            importance=importance,
+            created_at=0,  # store_fact defaults unset timestamps to now
+            last_accessed_at=0,
+        )
+        return await self.store_fact(fact, correlation_id=correlation_id)
+
+    async def recall(
+        self, query: str, *, k: int = 5, correlation_id: UUID | None = None
+    ) -> Sequence[Fact]:
+        """The `recall` tool (§6.7 path 2, UC-05): the top facts for ``query``, best first, capped at
+        ``k``. Delegates ranking to :meth:`retrieve` (whose retriever already caps at the configured
+        ``top_k`` and publishes ``memory.recall_completed``); ``k`` is the model-requested cutoff, so
+        the result is truncated to it in case the model asks for fewer than ``top_k``."""
+        return (await self.retrieve(query, correlation_id=correlation_id))[:k]
 
     async def retrieve(
         self, query: str, *, correlation_id: UUID | None = None

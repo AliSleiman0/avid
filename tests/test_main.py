@@ -67,6 +67,7 @@ from avid.main import (
     main,
 )
 from avid.services import (
+    TOOL_SCHEMAS,
     AudioService,
     ConversationService,
     CueBank,
@@ -240,6 +241,23 @@ def test_build_realtime_openai_without_a_key_raises(
         _build_realtime(config, clock=FakeClock())
 
 
+def test_build_realtime_openai_seeds_the_tools_and_capability_instructions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #125: the openai client is fed the three §6.6 tool declarations (the recall/forget/remember_fact
+    # schemas, static cached prefix) and the §7.6 capability text appended to the base instructions.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+    toml = tmp_path / "openai.toml"
+    toml.write_text('[adapters]\nrealtime = "openai"\n', encoding="utf-8")
+    config = load_config(toml)
+    client = _build_realtime(config, clock=FakeClock())
+    assert isinstance(client, OpenAIRealtimeClient)
+    assert client._tools == TOOL_SCHEMAS  # the §6.6 declarations reached the client
+    # the §7.6 capability layer is appended to the base identity prompt (AC-4)
+    assert client._instructions.startswith(config.ai.instructions)
+    assert "anything you inferred rather than were told" in client._instructions
+
+
 def test_build_cue_bank_uses_the_injected_cues_dir() -> None:
     # CueBank is handed the shared speaker and the [cues] dir (P7); ConversationService is its
     # only consumer (SDS §6.9).
@@ -363,6 +381,48 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     assert {sub.name for sub in subs} == _EXPECTED_SUBSCRIPTIONS
     # DROP_OLDEST throughout: only the latest edge is worth acting on (SDS §9.1.3).
     assert all(sub.policy is OverflowPolicy.DROP_OLDEST for sub in subs)
+
+
+def test_wire_services_injects_the_memory_port_into_conversation() -> None:
+    """#125: ``_wire_services`` builds ``MemoryService`` before ``ConversationService`` and injects it
+    as the latter's ``MemoryTools`` port, so the §6.6 tool dispatch reaches memory by direct call. The
+    returned lifecycle tuple is ``(memory, audio, conversation)``, so ``conversation._memory`` is the
+    very ``MemoryService`` at index 0 — the wiring, not a fresh instance. This adds no bus edge (tool
+    dispatch rides the Realtime pump), so the subscription assertions elsewhere are unchanged."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    state = StateManager(bus=bus, clock=clock)
+    config = load_config(_SIM_TOML)
+    fact_store = FakeFactRepository(clock=clock)
+    embedder = FakeEmbedder()
+    retriever = _build_retriever(
+        config, repo=fact_store, embedder=embedder, bus=bus, clock=clock
+    )
+    services = _wire_services(
+        bus=bus,
+        clock=clock,
+        state=state,
+        display=FakeDisplay(
+            out_dir=Path(config.display.frames_dir), resolution=(64, 48)
+        ),
+        microphone=FakeMicrophone(
+            sample_rate=16000, channels=1, chunk_ms=20, pcm=b"\x00\x00"
+        ),
+        speaker=FakeSpeaker(),
+        vad=FakeVoiceActivityDetector(),
+        realtime=ReplayRealtimeClient(clock=clock, timeline=()),
+        embedder=embedder,
+        text_model=FakeTextModel(),
+        fact_store=fact_store,
+        retriever=retriever,
+        cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
+        config=config,
+    )
+    memory, _audio, conversation = services
+    assert isinstance(memory, MemoryService)
+    assert isinstance(conversation, ConversationService)
+    # the ConversationService names the port; the concrete injected is the wired MemoryService
+    assert conversation._memory is memory
 
 
 class _SignallingDisplay(FakeDisplay):
