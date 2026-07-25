@@ -405,6 +405,64 @@ def test_tools_are_declared_in_the_session_update_prefix() -> None:
     assert _openai(tools=[tool])._session_config()["tools"] == [tool]
 
 
+def test_memory_block_is_appended_after_the_static_instructions() -> None:
+    """#126 AC-2/AC-3: the layer-4 memory block is appended **after** the static instructions
+    (layers 1–3), so those stay byte-identical and the cached prefix survives (§6.2.2)."""
+    base = _openai()._session_config()["instructions"]
+    composed = _openai()._session_config("MEM FACTS")["instructions"]
+    assert composed == f"{base}\n\nMEM FACTS"
+    assert composed.startswith(base)  # layers 1–3 unchanged as the prefix
+
+
+def test_empty_memory_block_leaves_the_instructions_unchanged() -> None:
+    """#126 AC-4: an empty block yields exactly the stateless prefix — a fresh device or a failed
+    retrieval degrades to a robot that talks but does not remember, never one that does not talk."""
+    assert (
+        _openai()._session_config("")["instructions"]
+        == _openai()._session_config()["instructions"]
+        == "You are a test."
+    )
+
+
+async def test_open_overlaps_memory_retrieval_with_the_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#126 AC-1: ``top_facts`` runs **concurrently** with the WSS connect (``asyncio.gather``), so
+    a slow retrieval does not extend time-to-session-ready by its own duration. With a faked socket
+    that takes ~100 ms and a memory fetch that also takes ~100 ms, ``open`` completes in ~100 ms
+    (the max), not ~200 ms (the sum); the block still lands in the one ``session.update``."""
+    import sys
+    import time
+    import types
+
+    ws = _CapturingWs()
+    delay = 0.1
+
+    async def fake_connect(
+        url: str, *, additional_headers: object = None
+    ) -> _CapturingWs:
+        await asyncio.sleep(delay)
+        return ws
+
+    monkeypatch.setitem(
+        sys.modules, "websockets", types.SimpleNamespace(connect=fake_connect)
+    )
+
+    async def slow_memory() -> str:
+        await asyncio.sleep(delay)
+        return "MEMORY BLOCK"
+
+    client = _openai()
+    start = time.monotonic()
+    await client.open(memory=slow_memory())
+    elapsed = time.monotonic() - start
+
+    assert elapsed < delay + 0.05  # ~max(0.1, 0.1), not the ~0.2 s sum
+    update = ws.sent[0]
+    assert update["type"] == "session.update"
+    assert "MEMORY BLOCK" in update["session"]["instructions"]  # type: ignore[index]
+
+
 async def test_send_tool_output_returns_the_result_then_requests_a_response() -> None:
     """#124 AC-3: the return leg is two client events in order — ``conversation.item.create``
     (function_call_output, call_id echoed) **then** ``response.create``. The second is the

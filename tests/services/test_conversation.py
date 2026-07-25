@@ -110,11 +110,22 @@ class _StubMemory:
     (SDS §14.3). Lets a conversation test assert which tool the dispatcher reached without standing
     up the whole memory stack; the AC-7 e2e uses a real ``MemoryService`` instead."""
 
-    def __init__(self, *, recall_result: tuple[Fact, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        recall_result: tuple[Fact, ...] = (),
+        top_facts_result: tuple[Fact, ...] = (),
+        top_facts_delay_s: float = 0.0,
+        top_facts_error: Exception | None = None,
+    ) -> None:
         self.remembered: list[tuple[str, str, int]] = []
         self.recalled: list[str] = []
         self.forgotten: list[str] = []
+        self.top_facts_calls = 0
         self._recall_result = recall_result
+        self._top_facts_result = top_facts_result
+        self._top_facts_delay_s = top_facts_delay_s
+        self._top_facts_error = top_facts_error
 
     async def remember_fact(
         self,
@@ -136,6 +147,14 @@ class _StubMemory:
     async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int:
         self.forgotten.append(query)
         return 0
+
+    async def top_facts(self) -> tuple[Fact, ...]:
+        self.top_facts_calls += 1
+        if self._top_facts_delay_s:
+            await asyncio.sleep(self._top_facts_delay_s)
+        if self._top_facts_error is not None:
+            raise self._top_facts_error
+        return self._top_facts_result
 
 
 class Rig(NamedTuple):
@@ -164,6 +183,7 @@ async def _rig(
     mic_script: tuple[AudioChunk, ...] = (),
     extra_subs: tuple[_ExtraSub, ...] = (),
     memory: _StubMemory | MemoryService | None = None,
+    memory_inject_timeout_s: float = 1.0,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -189,6 +209,7 @@ async def _rig(
         cues=cues,
         memory=mem,
         session_idle_close_s=session_idle_close_s,
+        memory_inject_timeout_s=memory_inject_timeout_s,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -506,6 +527,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=_CUES),
         memory=memory,
         session_idle_close_s=30,
+        memory_inject_timeout_s=1.0,
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -538,7 +560,15 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
                 ring_buffer_ms=0,
             )
         )
-        await _advance_clock_until(clock, lambda: bool(ended) and bool(stored))
+        # Advance virtual time (paces the replay so the tool call is emitted) AND yield real time —
+        # the injection's top_facts() and the remember_fact write ride the store's real writer thread,
+        # which a sleep(0)-only wait starves under coverage tracing.
+        for _ in range(600):
+            if ended and stored:
+                break
+            await clock.advance(0.05)
+            await asyncio.sleep(0.005)
+        assert ended and stored
 
         # The row is durable (a direct call inside the tool handler, §3.7.3).
         live = await repo.fetch_live()
@@ -556,7 +586,128 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         await bus.stop()
 
 
-async def test_user_transcribed_drives_listening_to_thinking() -> None:
+# --- #126: pre-session memory injection (§6.7 path 1) --------------------------------------
+
+
+def test_format_memory_block_renders_a_bounded_bulleted_block() -> None:
+    """The pure layer-4 formatter (§6.4): a short header plus one bullet per fact, in order; an
+    empty set renders nothing so an empty memory injects the stateless prefix unchanged (AC-4)."""
+    from avid.services.conversation import _format_memory_block
+
+    assert _format_memory_block(()) == ""
+    facts = (
+        Fact(
+            id=1,
+            text="the user's name is Ali",
+            kind="identity",
+            importance=9,
+            created_at=0,
+            last_accessed_at=0,
+        ),
+        Fact(
+            id=2,
+            text="the user runs every morning",
+            kind="routine",
+            importance=6,
+            created_at=0,
+            last_accessed_at=0,
+        ),
+    )
+    block = _format_memory_block(facts)
+    assert block.splitlines() == [
+        "What you already know about the user (from earlier conversations):",
+        "- the user's name is Ali",
+        "- the user runs every morning",
+    ]
+
+
+async def test_top_facts_are_injected_as_the_layer_4_block_at_open() -> None:
+    """AC-2/AC-3: at session open the top facts are composed into the layer-4 block and handed to
+    the client (here the replay records it on ``injected``). The fetch runs once per open."""
+    clock = FakeClock()
+    memory = _StubMemory(
+        top_facts_result=(
+            Fact(
+                id=1,
+                text="the user's name is Ali",
+                kind="identity",
+                importance=9,
+                created_at=0,
+                last_accessed_at=0,
+            ),
+        )
+    )
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, memory=memory) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await _advance_until(rig, lambda: bool(rig.client.injected))
+        assert memory.top_facts_calls == 1
+        assert rig.client.injected == [
+            "What you already know about the user (from earlier conversations):\n"
+            "- the user's name is Ali"
+        ]
+
+
+async def test_empty_memory_injects_the_stateless_instruction(  # AC-4
+) -> None:
+    clock = FakeClock()
+    memory = _StubMemory()  # no facts
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, memory=memory) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await _advance_until(rig, lambda: bool(rig.client.injected))
+        assert memory.top_facts_calls == 1
+        assert rig.client.injected == [""]  # empty block → the M5 prefix, unchanged
+
+
+async def test_a_reconnect_re_seeds_the_memory(  # AC-5
+) -> None:
+    """Every open re-runs the fetch — a mid-conversation drop comes back as a cold session with
+    the same facts re-injected (§6.2.3). Here: first speech opens, the session drops, the next
+    speech re-opens, and ``top_facts`` has run twice."""
+    clock = FakeClock()
+    memory = _StubMemory()
+    async with _rig(client=_replay("session_loss", clock=clock), memory=memory) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await _advance_until(rig, lambda: rig.state.state is RobotState.DEGRADED)
+        await _speak(rig, correlation_id=uuid4())  # reopen-on-next-speech
+        await _advance_until(
+            rig, lambda: len(rig.collector.of_type(SystemDegradedExited)) == 1
+        )
+        assert memory.top_facts_calls == 2  # once per cold open
+
+
+async def test_a_memory_failure_opens_the_session_anyway(  # AC-6
+) -> None:
+    """A retrieval failure at open is caught, logged with the correlation id, and degrades to an
+    empty block — the robot still talks, it just does not remember this session."""
+    clock = FakeClock()
+    memory = _StubMemory(top_facts_error=RuntimeError("store is down"))
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, memory=memory) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await _advance_until(rig, lambda: rig.client.opened)
+        assert rig.client.injected == [
+            ""
+        ]  # degraded to no memory, session still opened
+        assert rig.collector.of_type(SystemHandlerFailed) == []  # not a bus failure
+
+
+async def test_a_slow_memory_fetch_times_out_and_opens_anyway(  # AC-6
+) -> None:
+    """A hung store must not delay time-to-session-ready past budget: the fetch is bounded by
+    ``memory_inject_timeout_s`` and a timeout degrades to an empty block. Real time here (not the
+    FakeClock) because ``asyncio.wait_for``'s deadline is real-loop time."""
+    clock = FakeClock()
+    memory = _StubMemory(top_facts_delay_s=0.2)  # slower than the timeout below
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, memory=memory, memory_inject_timeout_s=0.01) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        for _ in range(50):  # let the real wait_for deadline fire
+            if rig.client.injected:
+                break
+            await asyncio.sleep(0.01)
+        assert rig.client.injected == [""]
     """AC-5: ConvSvc drives the LISTENING→THINKING edge by direct call on the first
     ``user_transcribed`` — the one state edge that is genuinely this service's."""
     clock = FakeClock()
@@ -775,6 +926,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         cues=cues,
         memory=_StubMemory(),
         session_idle_close_s=30,
+        memory_inject_timeout_s=1.0,
     )
     for sub in service.subscriptions():
         bus.subscribe(

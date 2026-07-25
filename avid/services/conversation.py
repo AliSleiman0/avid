@@ -46,9 +46,12 @@ for the ``conversation.*`` it could not yet name. The ``correlation_id`` is **pr
 re-minted** (SDS §3.12.2): every fact and every transition carries the id AudioService minted at
 ``audio.speech_started``, so one grep reconstructs the turn.
 
-**Stateless instruction in M5.** ``open()`` is where the personality + (later) memory context
-is seeded; M5 seeds instructions only. Pre-session memory *injection* (§6.7 path 1, the
-``top_facts`` block) is still an empty seam — that is #126.
+**Instruction seeding.** ``open()`` is where the session's static instructions are seeded (the
+cached prefix, §6.2.2). Pre-session memory *injection* (§6.7 path 1, #126) composes the top-facts
+block and injects it as **layer 4** (§6.4): :meth:`_compose_memory_block` renders it and hands the
+awaitable to :meth:`~avid.core.ports.RealtimeClient.open`, which resolves it **concurrently with the
+connect** so it costs no wall-clock time. Empty or failed retrieval degrades to the stateless M5
+instruction (AC-4/AC-6); every reconnect re-seeds it (cold session, AC-5).
 
 **Memory tools (#125, §6.6, ADR-004).** The model does not own memory; it *gets tools*. When it
 invokes one, a :class:`~avid.core.realtime.ToolCallRequested` reaches :meth:`_on_tool_call`, which
@@ -96,6 +99,7 @@ from avid.domain import (
     ConversationUserTranscribed,
     Cue,
     Event,
+    Fact,
     SystemDegradedEntered,
     SystemDegradedExited,
     Trigger,
@@ -110,6 +114,22 @@ _SOURCE = "ConversationService"
 
 _NS_PER_MS = 1_000_000
 _NS_PER_S = 1_000_000_000
+
+# The §6.7-path-1 memory block header (§6.4 layer 4). Kept short — the block is billed as input on
+# every turn (§6.10), and it is the *only* memory content OpenAI ever sees (§7.10), so it stays lean.
+_MEMORY_HEADER = "What you already know about the user (from earlier conversations):"
+
+
+def _format_memory_block(facts: Sequence[Fact]) -> str:
+    """Compose the layer-4 injection text from the pre-selected top facts (§6.7 path 1, #126).
+
+    Pure: a short header plus one bullet per fact, in the caller's (recency) order. Returns ``""`` for
+    an empty set, so an empty memory injects nothing and the instruction stays the stateless prefix
+    (AC-4). Bounding is the retriever's job (``top_facts`` already caps count + tokens, §6.7), so this
+    only renders — it never trims."""
+    if not facts:
+        return ""
+    return "\n".join([_MEMORY_HEADER, *(f"- {fact.text}" for fact in facts)])
 
 
 class ConversationService:
@@ -137,6 +157,7 @@ class ConversationService:
         cues: CueBank,
         memory: MemoryTools,
         session_idle_close_s: int,
+        memory_inject_timeout_s: float,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -146,6 +167,7 @@ class ConversationService:
         self._cues = cues
         self._memory = memory
         self._idle_close_s = session_idle_close_s
+        self._memory_inject_timeout_s = memory_inject_timeout_s
 
         # Session lifecycle. The lock guards every open/teardown/degraded mutation so the
         # reactive handlers and the owned tasks cannot race the session in or out.
@@ -244,7 +266,10 @@ class ConversationService:
         async with self._lock:
             self._turn_id = event.correlation_id
             if not self._session_open:
-                await self._client.open()  # cold session; instructions seeded here (M5)
+                # Cold session (§6.2.3). The §6.7-path-1 memory block is composed and injected here,
+                # overlapping the connect (#126); the client gathers the two. Empty memory / a failed
+                # fetch degrades to the stateless M5 instruction (AC-4/AC-6).
+                await self._client.open(memory=self._compose_memory_block())
                 self._session_open = True
                 self._pump_task = asyncio.create_task(
                     self._pump(), name="ConversationService.pump"
@@ -458,6 +483,32 @@ class ConversationService:
         await self._publish(SystemDegradedExited(**self._env(), downtime_s=downtime_s))
         self._degraded = False
         self._lost_at_ns = None
+
+    # --- memory injection (§6.7 path 1, #126) --------------------------------------------
+
+    async def _compose_memory_block(self) -> str:
+        """Fetch the top facts and render the layer-4 injection block, or ``""`` (§6.7 path 1, AC-4/AC-6).
+
+        Awaited by the client **concurrently with the connect** (the awaitable handed to
+        :meth:`~avid.core.ports.RealtimeClient.open`), so the ~30 ms local retrieval overlaps the
+        ~150 ms WSS setup and costs no wall-clock time (AC-1). Retrieval is off the turn path, but a
+        hung store must not delay time-to-session-ready past budget, so it is bounded by
+        ``memory_inject_timeout_s``; a timeout **or** any retrieval failure is logged with the turn's
+        correlation id and degrades to an empty block — the robot still talks, it just does not
+        remember this session (AC-6). Runs on every open, so a reconnect re-seeds the same memory
+        (AC-5)."""
+        try:
+            facts = await asyncio.wait_for(
+                self._memory.top_facts(), self._memory_inject_timeout_s
+            )
+        except Exception:  # noqa: BLE001 - AC-6: a retrieval failure/timeout must not block the session
+            _log.warning(
+                "memory injection failed [%s] — opening the session without it",
+                self._corr(),
+                exc_info=True,
+            )
+            return ""
+        return _format_memory_block(facts)
 
     # --- mic forwarding ------------------------------------------------------------------
 

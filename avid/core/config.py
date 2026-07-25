@@ -224,6 +224,10 @@ class GateConfig(_Section):
     ring_buffer_ms: int = 300
     silence_hold_ms: int = 500
     session_idle_close_s: int = 30
+    # §6.7-path-1 memory injection (#126): the cap on the top-facts fetch at session open. Retrieval
+    # is local (~30 ms) and overlaps the connect, but a hung store must not delay time-to-session-ready
+    # — on timeout the session opens without memory (AC-6). Generous vs the ~30 ms norm, a safety net.
+    memory_inject_timeout_s: float = 1.0
 
 
 class RealtimeConfig(_Section):
