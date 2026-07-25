@@ -25,11 +25,18 @@ avid = "avid.main:main"
 # imported only inside its one adapter, lazily, so the modules load off-Pi where the extra is
 # absent. (Silero is pure-CPU and would run off-Pi too, but its contract's real leg is Pi-gated
 # like the other HALs — SDS §14.4 — so the ~1 MB model and these libs never ship to CI.)
+#
+# `numpy` is capped below 2.0 deliberately (AVID-57). The venv is built with
+# `--system-site-packages` so `picamera2` resolves from apt, and the apt `simplejpeg` it
+# imports is compiled against the numpy 1.x C ABI. A numpy 2.x wheel in the venv shadows
+# the system 1.x and breaks that import with "numpy.dtype size changed, expected 96, got
+# 88" — i.e. installing this extra silently kills the camera real leg. Lift the cap only
+# once Raspberry Pi OS ships a numpy-2-built `simplejpeg`.
 pi = [
     "adafruit-circuitpython-servokit>=1.3",
     "pyalsaaudio>=0.10",
     "onnxruntime>=1.16",
-    "numpy>=1.24",
+    "numpy>=1.24,<2",
 ]
 # The live OpenAI Realtime client (#105). `websockets` is the WSS transport
 # (SDS §6.2.1, ADR-010); `openai` rounds out the vendor SDK per the issue's AC-2. Both are

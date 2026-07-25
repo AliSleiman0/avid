@@ -115,17 +115,34 @@ a slow, watchable per-device demo for the evidence.
 
 | Device | Bring-up | Verify |
 |---|---|---|
-| **Camera** (OV5647 CSI) | ribbon seated in the **CAMERA/CSI** port, correct orientation | `dmesg \| grep ov5647` shows a clean probe (no `i2c ... -5`); `libcamera-hello --list-cameras` lists it. **If `-EIO`: swap the ribbon; still `-EIO` ⇒ RMA the sensor.** Then restore `camera_auto_detect=1` and drop any forced `dtoverlay=ov5647`. |
-| **Servo** (PCA9685) | ⚠️ **R-04: separate 5 V supply, common ground only — never the Pi 5 V pin.** A stall can brown out the Pi and corrupt the SD card. | `dtparam=i2c_arm=on` in `config.txt`; `i2cdetect -y 1` shows `0x40`. |
-| **Mic** (ReSpeaker) | HAT + `seeed-voicecard` driver | `arecord -l` lists it as a capture card. |
+| **Camera** (OV5647 CSI) | ribbon seated in the **CAMERA/CSI** port, correct orientation | `dmesg \| grep ov5647` shows a clean probe (no `i2c ... -5`); `rpicam-hello --list-cameras` lists it (Bookworm renamed the `libcamera-*` tools to `rpicam-*`). **If `-EIO`: swap the ribbon; still `-EIO` ⇒ RMA the sensor.** Then restore `camera_auto_detect=1` and drop any forced `dtoverlay=ov5647`. |
+| **Servo** (PCA9685) | ⚠️ **R-04: separate 5 V supply, common ground only — never the Pi 5 V pin.** A stall can brown out the Pi and corrupt the SD card. | `dtparam=i2c_arm=on` in `config.txt`; `i2cdetect -y 1` shows `0x40` (plus `0x70`, the all-call address). `i2cdetect` lives in `/usr/sbin`, which is off a non-login SSH `PATH`. |
+| **Mic** (USB PnP) | plug into any USB port — no HAT, no driver | `arecord -l` lists it as a capture card (card name `Device`). |
 | **Speaker** (MAX98357 I²S DAC) | its `dtoverlay` (e.g. `hifiberry-dac` / `max98357a`) | `aplay -l` lists it as a playback card. |
 | **Display** (ILI9486 SPI) | `dtoverlay=piscreen,drm` (already bring-up-verified) | `/dev/fb0` exists, 480×320 32bpp; running user is in `video`. |
 
 **ALSA `default` must route to both cards.** The contract fixtures pass `device="default"`
 for the mic *and* the speaker (not the `[microphone]/[speaker] device` config — that only
-feeds the composition root). So set `/etc/asound.conf` (or `~/.asoundrc`) so that `default`
-capture = the ReSpeaker and `default` playback = the MAX98357, or the audio `real` params
-will open the wrong card.
+feeds the composition root). The speaker bring-up left `pcm.!default` as a **playback-only**
+chain (`plug` → `softvol` → `dmix` → MAX98357A), which has no capture side at all, so
+`test_microphone.py`'s real leg cannot open it. Make the default **asymmetric** in
+`/etc/asound.conf` — playback keeps the amp chain, capture goes to the USB mic:
+
+```
+pcm.usbmic { type plug; slave.pcm "hw:CARD=Device,DEV=0" }
+pcm.!default {
+    type asym
+    playback.pcm "plug:softvol"
+    capture.pcm  "usbmic"
+}
+```
+
+Verify both directions before running the suite:
+
+```sh
+arecord -D default -f S16_LE -r 16000 -c 1 -d 2 /tmp/t.wav   # ~64 kB = the mic
+speaker-test -D default -t sine -f 440 -l 1 -c 2             # tone from the amp
+```
 
 ### 2. Prepare the venv (do **not** rebuild it)
 
@@ -139,18 +156,41 @@ uv pip install -p /opt/avid/.venv/bin/python -e '.[pi]' pytest pytest-asyncio
 # .[pi] = adafruit-servokit + pyalsaaudio; picamera2 comes from --system-site-packages
 ```
 
+Then **prove `picamera2` still imports** — this is the step that catches a broken venv before
+the suite does:
+
+```sh
+/opt/avid/.venv/bin/python -c "import picamera2, numpy; print(numpy.__version__)"
+```
+
+A `ValueError: numpy.dtype size changed, expected 96, got 88` means a numpy 2.x wheel landed
+in the venv and is shadowing the system 1.x that apt's `simplejpeg` was compiled against. The
+`pi` extra pins `numpy<2` to prevent exactly this; if you hit it anyway, reinstall with
+`uv pip install -p /opt/avid/.venv/bin/python "numpy<2"`.
+
 ### 3. The contract run (the acceptance criterion)
 
-On the Pi, `on_pi()` is true, so every `real` param activates automatically (`AVID_HARDWARE=1`
-is belt-and-suspenders):
+On the Pi, `on_pi()` is true, so every hardware `real` param activates automatically
+(`AVID_HARDWARE=1` is belt-and-suspenders). Run **two** commands — `tests/contract/` has grown
+past the five HAL ports, and the M5/M7 suites (`test_realtime_client.py`, `test_text_model.py`)
+gate their real legs on `OPENAI_API_KEY` **+** `AVID_LIVE`, so a blanket "nothing skipped" over
+the whole directory is unachievable without live spend:
 
 ```sh
 cd /opt/avid
-AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 /opt/avid/.venv/bin/python -m pytest tests/contract/ -q
+# 1. The M2 claim — every real HARDWARE leg, zero skips tolerated.
+AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/contract/ -m hardware -q
+# 2. Overall green; the network-gated legs skip legitimately.
+AVID_HARDWARE=1 PYTHONASYNCIODEBUG=1 .venv/bin/python -m pytest tests/contract/ -q
 ```
 
-**Expected:** every `real` param passes alongside its fake, **none skipped**, no slow-callback
-> 50 ms. That is the M2 gate met.
+**Expected (1):** every hardware `real` param passes alongside its fake, **none skipped**, no
+slow-callback > 50 ms. That is the M2 gate met. Note `-m hardware` also selects
+`test_vad.py`'s real leg — Silero is **M4's** port (AVID-77/91), not one of M2's five, and it
+needs `/var/lib/robot/models/silero_vad.onnx` present. If that model is not yet on the box,
+`--deselect tests/contract/test_vad.py` rather than debugging it under an M2 banner.
+
+**Expected (2):** green with skips confined to the network-gated suites.
 
 ### 4. Physical demo (evidence)
 
