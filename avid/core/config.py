@@ -283,6 +283,13 @@ class MemoryConfig(_Section):
     # by BOTH a fact count (~10–15) and a token estimate (~600) — unbounded growth inflates every turn.
     top_facts_max: int = 15
     top_facts_token_budget: int = 600
+    # §7.5 episode recorder (#123): raw transcripts kept 90 days (§2.7.1 — the SD card is the binding
+    # constraint), pruned on a schedule off the injected clock, a bounded batch per pass so a large
+    # table never stalls the loop. The episode store reuses the [adapters] store switch (facts and
+    # episodes are one DB file), so there is no separate real/fake axis here — only these knobs.
+    episode_retention_days: int = 90
+    episode_prune_interval_s: float = 3600.0
+    episode_prune_batch: int = 500
 
 
 class QuietHours(_Section):

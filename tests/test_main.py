@@ -22,6 +22,7 @@ from avid.adapters import (
     FakeClock,
     FakeDisplay,
     FakeEmbedder,
+    FakeEpisodeStore,
     FakeFactRepository,
     FakeMicrophone,
     FakeServiceNotifier,
@@ -33,6 +34,7 @@ from avid.adapters import (
     OpenAIRealtimeClient,
     OpenAiTextModel,
     ReplayRealtimeClient,
+    SqliteEpisodeStore,
     SqliteFactRepo,
     SystemdNotifier,
 )
@@ -46,7 +48,10 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    ConversationAssistantResponded,
     ConversationTurnEnded,
+    ConversationTurnStarted,
+    ConversationUserTranscribed,
     StateTransitioned,
 )
 from avid.main import (
@@ -54,6 +59,7 @@ from avid.main import (
     _build_cue_bank,
     _build_display,
     _build_embedder,
+    _build_episode_store,
     _build_fact_repository,
     _build_microphone,
     _build_notifier,
@@ -71,6 +77,7 @@ from avid.services import (
     AudioService,
     ConversationService,
     CueBank,
+    EpisodeRecorder,
     MemoryService,
 )
 
@@ -85,6 +92,11 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ConversationService.speech_ended",
     "ConversationService.playback_finished",
     "CostMeterService.turn_ended",
+    # EpisodeRecorder (#123): the write-only §7.5 transcript observer of the four conversation.* facts
+    "EpisodeRecorder.turn_started",
+    "EpisodeRecorder.user_transcribed",
+    "EpisodeRecorder.assistant_responded",
+    "EpisodeRecorder.turn_ended",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -160,6 +172,23 @@ async def test_build_fact_repository_selects_sqlite_when_configured() -> None:
     repo = _build_fact_repository(sqlite_config, clock=FakeClock())
     assert isinstance(repo, SqliteFactRepo)
     await repo.aclose()
+
+
+def test_build_episode_store_selects_fake_for_sim() -> None:
+    # #123: the episode store reuses the [adapters] store switch; sim.toml defaults it to "fake".
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_episode_store(config, clock=FakeClock()), FakeEpisodeStore)
+
+
+async def test_build_episode_store_selects_sqlite_when_configured() -> None:
+    # The same switch as the fact store picks the file-backed episode store (one DB file, #123).
+    config = load_config(_SIM_TOML)
+    sqlite_config = config.model_copy(
+        update={"adapters": config.adapters.model_copy(update={"store": "sqlite"})}
+    )
+    store = _build_episode_store(sqlite_config, clock=FakeClock())
+    assert isinstance(store, SqliteEpisodeStore)
+    await store.aclose()
 
 
 async def test_build_retriever_wires_the_store_and_embedder_from_config() -> None:
@@ -302,6 +331,7 @@ def test_main_wires_and_delegates_to_lifecycle(
         "speaker": True,
         "embedder": True,
         "fact_store": True,
+        "episode_store": True,
         "retriever": True,
         "text_model": True,
         "notifier": True,
@@ -313,13 +343,15 @@ def test_main_wires_and_delegates_to_lifecycle(
     assert captured["health"] is not None
     assert captured["watchdog_interval_s"] == 15.0
     # The lifecycle-managed services — the ones that own a task: MemoryService (boot rebuild +
-    # store close, started first so the index is ready), AudioService's mic loop, and
-    # ConversationService's per-session pump/mic/idle — are handed to the lifecycle to start/stop;
-    # the reactive services (the two faces, the cost meter) are not. See ``_wire_services``.
+    # store close, started first so the index is ready), AudioService's mic loop,
+    # ConversationService's per-session pump/mic/idle, and EpisodeRecorder's prune loop + store
+    # close (#123) — are handed to the lifecycle to start/stop; the reactive services (the two
+    # faces, the cost meter) are not. See ``_wire_services``.
     assert [type(s) for s in captured["services"]] == [
         MemoryService,
         AudioService,
         ConversationService,
+        EpisodeRecorder,
     ]
 
 
@@ -366,14 +398,18 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     bus = captured["bus"]
     # Every event type the wired services care about, and nothing else: the two reactive faces,
     # ConversationService's ``audio.speech_started`` origin + ``audio.speech_ended`` (#102) + its
-    # ``audio.playback_finished`` barge-in feed (#104), and the cost meter's
-    # ``conversation.turn_ended`` (#105).
+    # ``audio.playback_finished`` barge-in feed (#104), the cost meter's ``conversation.turn_ended``
+    # (#105), and EpisodeRecorder's four ``conversation.*`` facts (#123 — ``turn_started`` /
+    # ``user_transcribed`` / ``assistant_responded`` new here; ``turn_ended`` shared with the meter).
     assert set(bus._subs) == {
         AffectChanged,
         StateTransitioned,
         AudioSpeechStarted,
         AudioSpeechEnded,
         AudioPlaybackFinished,
+        ConversationTurnStarted,
+        ConversationUserTranscribed,
+        ConversationAssistantResponded,
         ConversationTurnEnded,
     }
 
@@ -415,10 +451,11 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         text_model=FakeTextModel(),
         fact_store=fact_store,
         retriever=retriever,
+        episode_store=FakeEpisodeStore(clock=clock),
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
         config=config,
     )
-    memory, _audio, conversation = services
+    memory, _audio, conversation, _episode = services
     assert isinstance(memory, MemoryService)
     assert isinstance(conversation, ConversationService)
     # the ConversationService names the port; the concrete injected is the wired MemoryService
@@ -486,6 +523,7 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         text_model=FakeTextModel(),
         fact_store=fact_store,
         retriever=retriever,
+        episode_store=FakeEpisodeStore(clock=clock),
         cues=CueBank(speaker=FakeSpeaker(out_dir=tmp_path), asset_dir=None),
         config=config,
     )

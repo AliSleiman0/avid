@@ -13,6 +13,7 @@ from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay, FramebufferDisplay
 from avid.adapters.embedder import FakeEmbedder
+from avid.adapters.episode_store import FakeEpisodeStore, SqliteEpisodeStore
 from avid.adapters.fact_repository import FakeFactRepository, SqliteFactRepo
 from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
@@ -72,6 +73,9 @@ __all__ = [
     # FactRepository (#117) — SQLite store + in-memory fake
     "SqliteFactRepo",
     "FakeFactRepository",
+    # EpisodeStore (#123) — raw-transcript §7.5 tier, SQLite store + in-memory fake
+    "SqliteEpisodeStore",
+    "FakeEpisodeStore",
     # Hybrid retriever + §8.2 vector packing (#120) — the memory read path
     "HybridRetriever",
     "pack_embedding",
