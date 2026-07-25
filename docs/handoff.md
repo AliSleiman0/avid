@@ -5,49 +5,57 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = d0de6bc` · tree: only this file dirty · gh `AliSleiman0`.
+**As of:** 2026-07-25 · `main = f4a2bdb` · tree: only this file dirty · gh `AliSleiman0`.
 **M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
-Latest merge: **#121** (PR #138) — the **real OpenAI `TextModel` adapter** (`OpenAiTextModel`), the last
-piece of §7.8 the port-and-fake work in #122 left as a `NotImplementedError` pragma. Vendor-sealed exactly
-like `OpenAIRealtimeClient` (CLAUDE.md §3, R-10): `openai` imported **lazily inside** `judge_supersession`,
-the pure module-level `_build_messages` / `_parse_superseded` unit-tested offline with canned strings, a
-**key-free `__repr__`** (AC-6). `_parse_superseded` **intersects the reply with the candidate ids**, so a
-hallucinated id is structurally dropped (§7.8 "confabulation is a bug"). **AC-9 graceful degradation lives
-in `MemoryService._resolve_supersession`**: the judge call is wrapped in `try/except`, logs with the turn's
-`correlation_id`, and stores the fact **without** supersession — the adapter *raises*, the service catches
-(the port is turn-agnostic; only the service holds the corr id). Default `[ai] text_model =
-"gpt-4o-mini-2024-07-18"` (pinned dated snapshot, §6.10); network-gated contract leg (`OPENAI_API_KEY` +
-`AVID_LIVE`), skipped in CI. **No port / pyproject / §7.8-write-path change.** Prior this milestone: **#122**
-(`MemoryService` + `TextModel`/`Retriever` ports + `FakeTextModel`), **#120** (`HybridRetriever` read path,
-recall@5 = 0.54), **#118** (`Embedder` + `FakeEmbedder`), **#117** (schema v1 + `FactRepository`), **#116**
-(`Fact` + `memory.*` + §7.7 scoring), **#115** (eval set), **#130** (P8 hw-init carve-out). The **camera real
+Latest merge: **#124** (PR #139) — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004: the model
+gets tools). **Purely the transport seam** — the tool *schemas* + dispatch to `MemoryService` are **#125**.
+Added: the neutral **`ToolCallRequested {call_id, name, arguments}`** to the `RealtimeEvent` union (all three
+exhaustive matches — `_pump`, `_record`, `_build_event` — handle it, mypy `assert_never` proves it);
+**`RealtimeClient.send_tool_output(call_id, output)`** on the port + both adapters; `OpenAIRealtimeClient`
+gained a **`tools=()` ctor param** placed into `session.update` — the cached prefix (§6.2.2), static for the
+session, **empty until #125 supplies the recall/forget/remember_fact schemas** (main untouched, default
+empty). **AC-3 step-5 trap:** `send_tool_output` sends `conversation.item.create` (function_call_output)
+**then** `response.create` or the model silently sits. **AC-5:** `_translate` maps
+`response.output_item.done` (item type `function_call`) off the finalize frame — stateless, the arg-`delta`
+acks ignored. Committed **`assets/sessions/tool_call/`** fixture; `CapturingRealtimeClient` round-trips it
+(AC-6, `--capture` can't drift). **`ConversationService._pump` gains a log-and-ignore `ToolCallRequested`
+case — the #125 seam** (dispatch replaces it). **No new subscription, no `MemoryService`, no `main` change**
+→ it did **not** touch `test_main.py`'s exact-set assertions (that collision is #125's, correcting the prior
+baton). Prior this milestone: **#121** (`OpenAiTextModel` + AC-9), **#122** (`MemoryService` + `TextModel`/
+`Retriever` ports), **#120** (`HybridRetriever`, recall@5 = 0.54), **#118** (`Embedder`), **#117** (schema
+v1), **#116** (`Fact` + `memory.*`), **#115** (eval set), **#130** (P8 hw-init carve-out). The **camera real
 leg is contract-proven** (ov5647, 11/11) — all five HALs are hardware-present, so the four Pi gates
 (#57/#75/#91/#106) are pure demonstration ceremonies batched for one bench day. M7 is the active
-zero-hardware queue: **7 of 15 done**, next is **#124** (recall/forget tool-call widening — the sole
-remaining laptop pickup).
+zero-hardware queue: **8 of 15 done**, next is **#125** (ConversationService tool dispatch → the recall/
+forget/remember_fact schemas + wiring to `MemoryService`).
 
 ---
 
 ## ⭐ Next session — two tracks: M7 build (laptop, active) · Pi seal day (below)
 
 The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117 +
-#118 + #120 + #122 + #121 are merged (7/15); the store, the embedder, the retriever, `MemoryService`
-(store/retrieve/forget + supersession + boot rebuild) **and** the real OpenAI `TextModel` adapter are all
-in and wired in `main`. The sole remaining laptop pickup is **#124**:
-- **#124 — RealtimeClient tool-call widening** (the `recall`/`forget` tool exposure to the model): the
-  model calls `recall(query)` / `forget(query)`, the handler calls `MemoryService.retrieve`/`forget`
-  directly (§9.1.4). ⚠️ **#124 adds subscriptions** and so edits `tests/test_main.py`'s exact-set
-  `_EXPECTED_SUBSCRIPTIONS` + `set(bus._subs)` — the #104/#105 collision. (#122 did **not** touch the
-  subscription set — MemoryService subscribes to nothing — it edited the *services list* + health map.)
+#118 + #120 + #122 + #121 + #124 are merged (8/15); the store, embedder, retriever, `MemoryService`, the
+real OpenAI `TextModel` adapter, **and the `RealtimeClient` tool-call transport** are all in. The remaining
+laptop pickups: **#125** (dispatch, next), then #126 (injection), #123 (episodes), #119 (ONNX embedder).
+- **#125 — ConversationService tool dispatch → `remember_fact`/`recall`/`forget`** (← #122 + #124, now both
+  merged): fills the two seams #124 left. The model emits a `ToolCallRequested` (already flowing through
+  `_pump`, currently log-and-ignored); #125 parses `arguments`, calls `MemoryService.retrieve`/`forget`/
+  `store_fact` **directly** (§9.1.4), and returns the result via `client.send_tool_output(call_id, output)`
+  (which already sends the mandatory `response.create`). Also supplies the three JSON-schema tool
+  **declarations** and threads them through `main._build_realtime` into `OpenAIRealtimeClient(tools=…)` (the
+  `tools=()` param is already there, empty). ⚠️ **#125 is the one that edits `tests/test_main.py`'s exact-set
+  assertions** — it injects a dispatcher into `ConversationService` and/or adds a handler (the #104/#105
+  collision lesson). **#124 did NOT touch them** — correcting the prior baton's mis-attribution.
 
 Full dependency order is in epic #114.
 
-> Notes for #124 / later: (1) `MemoryService.retrieve` returns hydrated `Fact`s (best-first); `forget`
+> Notes for #125 / later: (1) `MemoryService.retrieve` returns hydrated `Fact`s (best-first); `forget`
 > returns a delete count; thread the turn's `correlation_id` into both. (2) The **relevance floor** that
 > would make negative queries return empty is still **deferred** (out of #120/#122's ACs; it's what drags
-> eval `negative`/`paraphrase` down) — decide in #124 whether it lives in the retriever or the tool engine.
+> eval `negative`/`paraphrase` down) — decide in #125 whether it lives in the retriever or the tool engine.
 > (3) `store_fact` takes an already-built `Fact` — **fact extraction** (turn → `Fact` via `remember_fact`,
-> §7.6) is a separate upstream tool handler, not yet built.
+> §7.6) is #125's work: parse the model's tool arguments into a `Fact`. (4) `ConversationService._pump`
+> already has the `ToolCallRequested` case + a `send_tool_output` on the port; a `tool_call` fixture ships.
 
 **Pi track (queued for a full-bench day): seal M2 → M3 → M4 → M5 in one sitting.** All four open
 gate issues are now **pure on-Pi ceremonies** — every child issue and code dependency is closed, and
@@ -122,11 +130,12 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
   one full-bench day.
 - **M5 "It talks" (milestone #6): 7 of 9 sealed, laptop-COMPLETE.** #99–#105 merged & closed. Only
   #106 (gate) + #98 (epic) open.
-- **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 7 closed.** The
+- **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 8 closed.** The
   active **laptop queue**. Pure Python + SQLite + local embeddings; depends on no hardware except its
-  own two Pi gates (#127 SPK-3, #129 gate). **#115 + #116 + #117 + #118 + #120 + #122 + #121 merged.**
-  Next: **#124** (recall/forget tool-call widening; ⚠️ edits the exact-set subscription assertion in
-  `tests/test_main.py`, and is where the deferred relevance floor is decided).
+  own two Pi gates (#127 SPK-3, #129 gate). **#115 + #116 + #117 + #118 + #120 + #122 + #121 + #124 merged.**
+  Next: **#125** (ConversationService tool dispatch → recall/forget/remember_fact — ⚠️ **this** is the one
+  that edits the exact-set subscription assertion in `tests/test_main.py`, and where the deferred relevance
+  floor is decided).
   ⚠️ Decomposition labels ~16.75 IED vs PMP's 13-IED line — recorded honestly in the epic; the §7.3 cut
   (drop semantic retrieval, ~5 IED, loses UC-05) is the documented lever. numpy is the lazy `memory` extra
   (CI `--extra memory` on test+async-debug; ADR-012 pydantic-only default runtime preserved). See
@@ -135,6 +144,28 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ## What just shipped (this session)
 
+- **#124 (PR #139, squash `f4a2bdb`)** — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004), the
+  transport half of "the model gets tools". Neutral **`ToolCallRequested {call_id, name, arguments}`** added
+  to the `RealtimeEvent` union (all three exhaustive `match`/if-chain sites handle it — `_pump`, capturing
+  `_record`, replay `_build_event` — mypy `assert_never` proves exhaustiveness). **`send_tool_output(call_id,
+  output)`** on the port + all three adapters: `OpenAIRealtimeClient` sends `conversation.item.create`
+  (function_call_output) **then** `response.create` (**AC-3, the §6.6 step-5 trap** — without the second the
+  model silently sits); `ReplayRealtimeClient` records it on an off-port `.tool_outputs` trace; `Capturing`
+  delegates. `_translate` maps `response.output_item.done` (item type `function_call`) off the **finalize
+  frame** — stateless, the streaming arg-`delta` acks ignored like transcript deltas (AC-5). A **`tools=()`
+  ctor param** on `OpenAIRealtimeClient` rides `session.update` (the cached prefix, §6.2.2) — empty until
+  #125 supplies schemas, so **main is untouched**. Committed **`assets/sessions/tool_call/`** fixture (+
+  `tool_call_requested` record); the capture round-trip test parametrizes over it (AC-6).
+  - **`ConversationService._pump` gained a log-and-ignore `ToolCallRequested` case** — a *declared seam*
+    (like the M6 `behavior.trigger_fired` origin), publishing no fact, that **#125 fills with dispatch**.
+    **No new subscription, no `MemoryService`, no `main` change** → the exact-set `test_main.py` assertions
+    were untouched (that collision belongs to #125 — this corrects the prior baton).
+  - **SDS synced in-PR** (port change = SDS change, DoD): §3.9.1 port block (+`send_tool_output`) + the
+    `RealtimeEvent` union prose (+`ToolCallRequested`); §14.3 fixture doc ("Four fixtures ship").
+  - **Gates:** ruff + format clean, mypy --strict numpy-free clean (48 files), lint-imports 4/4, **667
+    passed / 37 skipped on 3.11 + 3.13** under `PYTHONASYNCIODEBUG=1`, coverage **99.83%**. All CI green
+    first run. (Local Windows-3.11 full-suite P8 flake on `test_barge_in_full_chain` — 0.06–0.08 s — is
+    **pre-existing**: worse on clean `main`, unrelated to the tool-call path, passes in isolation and on CI.)
 - **#121 (PR #138, squash `d0de6bc`)** — the **real OpenAI `TextModel` adapter** (`OpenAiTextModel`,
   `avid/adapters/text_model.py`), filling the last §7.8 branch #122 left as a pragma. **Vendor-sealed**
   (CLAUDE.md §3, R-10): `openai` imported **lazily inside** `judge_supersession` so the module loads
@@ -185,8 +216,9 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
   exact **subscription set** (`_EXPECTED_SUBSCRIPTIONS` + `set(bus._subs)`), the **services list**
   (`[type(s) …]`), and the **health map**. Any two M7 PRs touching the same one collide — merge one, then
   `git merge origin/main` into the next and **union-resolve**. Bit #104/#105. (#122 edited the services
-  list + health map, *not* the subscription set — MemoryService subscribes to nothing; **#124 will edit
-  the subscription set** when it adds the recall/forget handlers.)
+  list + health map, *not* the subscription set — MemoryService subscribes to nothing. **#124 touched
+  none of them** — the tool-call transport adds no subscription. **#125 is the one that will edit the
+  subscription set** when it injects a dispatcher / adds the recall-forget handler wiring.)
 - ⚠️ **A service may not import an adapter (P1 `layers`: `adapters` sits *above* `services`).** So a
   service that needs an adapter's behaviour depends on a **Protocol** in `core/ports.py`, and `main`
   (the composition root, which *may* import adapters) injects the concrete. This is why #122 had to
