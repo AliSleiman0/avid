@@ -51,6 +51,7 @@ from avid.domain.memory import (
     ScoreWeights,
     rank_candidates,
     recency_decay,
+    select_top_facts,
 )
 from avid.domain.state import (
     EVENT_TYPES,
@@ -106,6 +107,7 @@ __all__ = [
     "ScoreWeights",
     "rank_candidates",
     "recency_decay",
+    "select_top_facts",
     # RobotState (AVID-7); state.transitioned (AVID-69)
     "EVENT_TYPES",
     "TRANSITION_TABLE",

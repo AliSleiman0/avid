@@ -1,0 +1,365 @@
+"""MemoryService — the sole writer/reader of persistent memory (#122, SDS §9.2, §9.1.4).
+
+Driven end-to-end against the P6 fakes (:class:`FakeFactRepository`, :class:`FakeEmbedder`,
+:class:`FakeTextModel`) and the **real** :class:`HybridRetriever` + :class:`AsyncioEventBus`, no mocks
+(SDS §14.3). The service is application code (not a coverage-omitted adapter), so these tests are both
+its behaviour proof *and* its line coverage. A couple of cases script the embedding vectors / the text
+model directly (a legitimate fake, not a mock) where a precise cosine geometry or a forced supersession
+decision is what is under test.
+
+``numpy`` is present here via the ``memory`` extra; the whole suite runs clean under
+``PYTHONASYNCIODEBUG=1`` — the store I/O rides the repo's writer thread, the matmul is inline sub-ms,
+and the fake text model decides in-process.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Callable, Sequence
+from typing import NamedTuple
+from uuid import uuid4
+
+from avid.adapters import (
+    FakeEmbedder,
+    FakeFactRepository,
+    FakeTextModel,
+    HybridRetriever,
+)
+from avid.adapters.clock import FakeClock
+from avid.core.event_bus import AsyncioEventBus
+from avid.domain import (
+    Event,
+    Fact,
+    MemoryFactDeleted,
+    MemoryFactStored,
+    MemoryFactSuperseded,
+    MemoryRecallCompleted,
+    ScoreWeights,
+    SystemHandlerFailed,
+)
+from avid.services import MemoryService
+
+_RECORDED = (
+    MemoryFactStored,
+    MemoryFactSuperseded,
+    MemoryFactDeleted,
+    MemoryRecallCompleted,
+    SystemHandlerFailed,
+)
+
+
+def _fact(text: str, *, kind: str = "other", importance: int = 5) -> Fact:
+    # created_at / last_accessed_at left 0 so store_fact stamps them (exercising that branch).
+    return Fact(
+        id=0,
+        text=text,
+        kind=kind,  # type: ignore[arg-type]
+        importance=importance,
+        created_at=0,
+        last_accessed_at=0,
+    )
+
+
+class _ScriptedEmbedder:
+    """An embedder whose vectors the test dictates — a fake, not a mock — so a case can fix the exact
+    cosine a supersession pre-check turns on."""
+
+    def __init__(self, table: dict[str, Sequence[float]], *, dimensions: int) -> None:
+        self._table = table
+        self._dimensions = dimensions
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    async def embed(self, text: str) -> Sequence[float]:
+        return self._table[text]
+
+
+class _CheapEmbedder:
+    """A deterministic embedder with negligible per-call cost, for cases that store *many* facts. The
+    FakeEmbedder's per-token Gaussians are real but heavy in a tight loop and would load the test loop,
+    not the code under test (P8) — a one-hot in a modest dimension gives distinct texts distinct vectors,
+    all a count/budget test needs (mirrors ``test_retrieval``'s scan embedder)."""
+
+    def __init__(self, *, dimensions: int = 64) -> None:
+        self._dimensions = dimensions
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    async def embed(self, text: str) -> Sequence[float]:
+        vector = [0.0] * self._dimensions
+        vector[hash(text) % self._dimensions] = 1.0
+        return vector
+
+
+class _AlwaysSupersede:
+    """A text model that judges every candidate superseded — forces the §7.8 write path deterministically,
+    independent of the fake's lexical rule."""
+
+    async def judge_supersession(
+        self, *, new_fact: str, candidates: Sequence[tuple[int, str]]
+    ) -> Sequence[int]:
+        return [cid for cid, _ in candidates]
+
+
+class Rig(NamedTuple):
+    memory: MemoryService
+    repo: FakeFactRepository
+    retriever: HybridRetriever
+    embedder: object
+    clock: FakeClock
+    bus: AsyncioEventBus
+    events: list[Event]
+
+
+async def _make_rig(
+    *,
+    embedder: object | None = None,
+    text_model: object | None = None,
+    boom_on: type[Event] | None = None,
+) -> AsyncIterator[Rig]:
+    clock = FakeClock()
+    bus = AsyncioEventBus()
+    repo = FakeFactRepository(clock=clock)
+    emb = embedder if embedder is not None else FakeEmbedder()
+    tm = text_model if text_model is not None else FakeTextModel()
+    events: list[Event] = []
+
+    async def _record(event: Event) -> None:
+        events.append(event)
+
+    for event_type in _RECORDED:
+        bus.subscribe(event_type, _record, name=f"test.record.{event_type.__name__}")
+    if boom_on is not None:
+
+        async def _boom(event: Event) -> None:
+            raise RuntimeError("subscriber blew up")
+
+        bus.subscribe(boom_on, _boom, name="test.boom")
+
+    await bus.start()
+    retriever = HybridRetriever(
+        repo=repo,
+        embedder=emb,  # type: ignore[arg-type]
+        bus=bus,
+        clock=clock,
+        top_k=5,
+        half_life_days=14.0,
+        weights=ScoreWeights(),
+    )
+    memory = MemoryService(
+        bus=bus,
+        clock=clock,
+        repo=repo,
+        retriever=retriever,
+        embedder=emb,  # type: ignore[arg-type]
+        text_model=tm,  # type: ignore[arg-type]
+        supersession_threshold=0.85,
+        supersession_k=5,
+        top_facts_max=15,
+        top_facts_token_budget=600,
+    )
+    try:
+        yield Rig(memory, repo, retriever, emb, clock, bus, events)
+    finally:
+        await memory.stop()  # closes the store
+        await bus.stop()
+
+
+async def _drain(rig: Rig, *, ticks: int = 30) -> None:
+    """Let the bus workers deliver everything queued so far (publish is fire-and-forget)."""
+    for _ in range(ticks):
+        await asyncio.sleep(0)
+
+
+async def _wait(rig: Rig, pred: Callable[[], bool], *, tries: int = 300) -> None:
+    for _ in range(tries):
+        if pred():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never became true")
+
+
+def _of(rig: Rig, event_type: type[Event]) -> list[Event]:
+    return [e for e in rig.events if isinstance(e, event_type)]
+
+
+# --- AC-6 boot + AC-2 store/retrieve round-trip, durable-before-return ------------------------
+
+
+async def test_start_rebuilds_and_store_then_retrieve_roundtrips() -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()  # boot rebuild on an empty store
+        fid = await rig.memory.store_fact(
+            _fact("the user's name is Ali", kind="identity")
+        )
+        got = await rig.memory.retrieve("the user's name is Ali")
+        assert any(isinstance(f, Fact) and f.id == fid for f in got)
+
+
+async def test_store_fact_is_durable_before_it_returns() -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()
+        fid = await rig.memory.store_fact(
+            _fact("the user likes tea", kind="preference")
+        )
+        # the row is in the store the instant store_fact returns — before any event is drained
+        assert await rig.repo.get(fid) is not None
+
+
+async def test_store_fact_publishes_fact_stored_after_the_write() -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()
+        fid = await rig.memory.store_fact(
+            _fact("the user's name is Ali", kind="identity", importance=7)
+        )
+        await _drain(rig)
+        stored = _of(rig, MemoryFactStored)
+        assert len(stored) == 1
+        event = stored[0]
+        assert isinstance(event, MemoryFactStored)
+        assert event.fact_id == fid
+        assert event.kind == "identity"
+        assert event.importance == 7
+
+
+async def test_store_fact_stamps_the_turn_correlation_id() -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()
+        corr = uuid4()
+        fid = await rig.memory.store_fact(
+            _fact("the user likes tea", kind="preference"), correlation_id=corr
+        )
+        stored = await rig.repo.get(fid)
+        assert stored is not None and stored.source_correlation_id == corr
+        await _drain(rig)
+        assert _of(rig, MemoryFactStored)[0].correlation_id == corr
+
+
+# --- §7.8 supersession-on-write ----------------------------------------------------------------
+
+
+async def test_store_fact_supersedes_a_contradicting_fact() -> None:
+    """Scripted so the new fact's vector matches the old one's (cosine 1.0 ≥ 0.85 → a candidate), and a
+    forced text-model decision supersedes it: the old fact is pointed at the new one, dropped from live
+    retrieval, and ``memory.fact_superseded`` is published."""
+    old_text = "the user drinks coffee"
+    new_text = "the user switched to tea"
+    table = {old_text: [1.0, 0.0], new_text: [1.0, 0.0]}
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder, text_model=_AlwaysSupersede()):
+        await rig.memory.start()
+        old_id = await rig.memory.store_fact(_fact(old_text, kind="routine"))
+        new_id = await rig.memory.store_fact(_fact(new_text, kind="routine"))
+
+        old = await rig.repo.get(old_id)
+        assert (
+            old is not None and old.superseded_by == new_id
+        )  # soft supersession in SQLite
+        live_ids = [f.id for f in await rig.memory.retrieve(old_text)]
+        assert (
+            old_id not in live_ids and new_id in live_ids
+        )  # old gone from recall, new present
+
+        await _drain(rig)
+        superseded = _of(rig, MemoryFactSuperseded)
+        assert len(superseded) == 1
+        event = superseded[0]
+        assert isinstance(event, MemoryFactSuperseded)
+        assert event.old_id == old_id and event.new_id == new_id
+
+
+async def test_store_fact_without_contradiction_publishes_only_fact_stored() -> None:
+    async for (
+        rig
+    ) in _make_rig():  # real FakeEmbedder + FakeTextModel (declines low-overlap facts)
+        await rig.memory.start()
+        await rig.memory.store_fact(_fact("the user drinks coffee", kind="routine"))
+        await rig.memory.store_fact(
+            _fact("the user has a sister named Maya", kind="relationship")
+        )
+        await _drain(rig)
+        assert _of(rig, MemoryFactSuperseded) == []
+        assert len(_of(rig, MemoryFactStored)) == 2
+
+
+# --- AC-5 forget: hard cascading delete, SQLite then matrix ------------------------------------
+
+
+async def test_forget_hard_deletes_matching_facts() -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()
+        fid = await rig.memory.store_fact(
+            _fact("the user's sister is Maya", kind="relationship")
+        )
+        deleted = await rig.memory.forget("Maya")
+
+        assert deleted >= 1
+        assert await rig.repo.get(fid) is None  # row + FTS shadow + cascade gone
+        assert [
+            f.id for f in await rig.memory.retrieve("Maya")
+        ] == []  # cannot resurface
+        await _drain(rig)
+        assert any(
+            isinstance(e, MemoryFactDeleted) and e.fact_id == fid for e in rig.events
+        )
+
+
+async def test_forget_with_no_match_returns_zero() -> None:
+    async for rig in _make_rig():
+        await rig.memory.start()
+        assert await rig.memory.forget("nothing has been stored") == 0
+
+
+# --- AC-3 / AC-4 / no-double-publish -----------------------------------------------------------
+
+
+async def test_subscriptions_is_empty() -> None:
+    """§3.6.1: MemoryService is reached by direct call, never over the bus."""
+    async for rig in _make_rig():
+        assert rig.memory.subscriptions() == ()
+
+
+async def test_retrieve_publishes_exactly_one_recall_completed() -> None:
+    """The retriever owns the recall event; MemoryService must not double-publish it."""
+    async for rig in _make_rig():
+        await rig.memory.start()
+        await rig.memory.store_fact(_fact("the user's name is Ali", kind="identity"))
+        await rig.memory.retrieve("name")
+        await _drain(rig)
+        assert len(_of(rig, MemoryRecallCompleted)) == 1
+
+
+async def test_top_facts_respects_count_and_token_budget() -> None:
+    # A cheap embedder: this case stores many facts, and the FakeEmbedder's per-token compute in a
+    # tight loop would load the test loop rather than the code under test (P8), like #120's scan test.
+    async for rig in _make_rig(embedder=_CheapEmbedder()):
+        await rig.memory.start()
+        await rig.memory.store_fact(_fact("the user's name is Ali", kind="identity"))
+        for i in range(20):
+            await rig.memory.store_fact(_fact(f"note number {i}", importance=5))
+            await asyncio.sleep(
+                0
+            )  # keep the bulk-store loop's task steps short under the gate
+        top = await rig.memory.top_facts()
+        assert len(top) <= 15  # bounded by count (~10–15)
+        assert any(f.kind == "identity" for f in top)  # identity is always injected
+
+
+# --- AC-8 a raising subscriber never undoes a committed write ----------------------------------
+
+
+async def test_a_raising_fact_stored_subscriber_does_not_undo_the_write() -> None:
+    async for rig in _make_rig(boom_on=MemoryFactStored):
+        await rig.memory.start()
+        fid = await rig.memory.store_fact(
+            _fact("the user likes jazz", kind="preference")
+        )
+        assert (
+            await rig.repo.get(fid) is not None
+        )  # committed regardless of the subscriber
+        # the bus swallowed the raise and republished system.handler_failed (§3.5.2)
+        await _wait(rig, lambda: bool(_of(rig, SystemHandlerFailed)))

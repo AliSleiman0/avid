@@ -11,6 +11,7 @@ from avid.services.conversation import ConversationService
 from avid.services.cost_meter import CostMeterService
 from avid.services.cue_bank import CUE_FILES, CueBank
 from avid.services.expression import ExpressionService
+from avid.services.memory import MemoryService
 
 __all__ = [
     # cue→file manifest for the degraded WAV bank (AVID-80)
@@ -27,4 +28,6 @@ __all__ = [
     "CueBank",
     # The drawer (AVID-72) — the other half of the SDS §3.6.1 split
     "ExpressionService",
+    # The sole writer/reader of persistent memory — §9.1.4 direct-call surface (#122)
+    "MemoryService",
 ]
