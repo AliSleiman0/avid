@@ -5,8 +5,24 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-25 · `main = f4a2bdb` · tree CLEAN · gh `AliSleiman0`.
-**M7 "It remembers" is underway on the laptop while the Pi seals wait for a full-bench day.**
+**As of:** 2026-07-26 · `main = baa7d78` · tree CLEAN · gh `AliSleiman0`.
+**⭐ M2 AND M3 ARE SEALED — `v0.M2.0` (`a83cc36`) and `v0.M3.0` (`0f704e3`), milestones #3 and #4
+closed.** Both gates were driven **entirely from the laptop over SSH**; the only physical task was
+wiring the bench. M3: all eight affects on the real ILI9486 panel, **max 11.2 ms against a 150 ms
+budget** (13× headroom — composing `RGB888` in the stdlib, ADR-012, costs almost nothing); evidence
+in `docs/demos/m3_evidence/` as pixel-exact framebuffer readbacks. M2: 20 hardware contract legs,
+zero skips. **M4 (#91) is now prepped and gate-ready** — Silero installed, config and unit drift
+fixed, software chain measured at **0.43 ms** turnaround — but it needs the user's voice (AC-1) and
+a 60-second recording (AC-3, explicitly *not* waived). **Only two Pi gates remain: #91 (M4) and
+#106 (M5).**
+
+📕 **New: [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md)** — how to drive the Pi from the
+laptop and every trap the three runs cost us. **Read it before touching the Pi.** The expensive
+lesson: the machine is not the repo (`/etc/robot/config.toml` was 83 lines stale and the systemd
+unit had lost `SupplementaryGroups`), and the failures are *silent* — missing config keys fall back
+to schema defaults, so a gate can measure the **fake** VAD and still print a pass.
+
+**M7 "It remembers" remains the active laptop queue.**
 Latest merge: **#124** (PR #139) — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004: the model
 gets tools). **Purely the transport seam** — the tool *schemas* + dispatch to `MemoryService` are **#125**.
 Added: the neutral **`ToolCallRequested {call_id, name, arguments}`** to the `RealtimeEvent` union (all three
@@ -57,47 +73,47 @@ Full dependency order is in epic #114.
 > §7.6) is #125's work: parse the model's tool arguments into a `Fact`. (4) `ConversationService._pump`
 > already has the `ToolCallRequested` case + a `send_tool_output` on the port; a `tool_call` fixture ships.
 
-**Pi track (queued for a full-bench day): seal M2 → M3 → M4 → M5 in one sitting.** All four open
-gate issues are now **pure on-Pi ceremonies** — every child issue and code dependency is closed, and
-all five real HALs are hardware-present (camera real leg now contract-proven, 11/11). Do them **in
-milestone order**, tagging as you go, because each tag closes an epic + a milestone and the later
-gates exercise the earlier hardware anyway. Expect the **P8 "exempt" banner** on every real-HAL run
-(one-time device init, by design since #130 — the run still exits 0; see [[avid-p8-hardware-init-carveout]]).
+**Pi track: M2 ✅ and M3 ✅ are SEALED. Two gates remain — #91 (M4) then #106 (M5).** Read
+[`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md) first. Expect the **P8 "exempt" banner** on
+every real-HAL run (one-time device init, by design since #130 — the run still exits 0; see
+[[avid-p8-hardware-init-carveout]]). ⚠️ **`sudo systemctl stop robot` before any gate or test run** —
+it holds `127.0.0.1:8787` and, with real adapters, the ALSA capture device.
 
-### 1 · M2 gate — #57 (epic #56) → tag `v0.M2.0`
-The one the camera unblocked. AC: full `tests/contract/` green **on the Pi with every `real`
-param active (none skipped)** under `PYTHONASYNCIODEBUG=1`; each of the **five** devices
-demonstrated physically (servo moves+relaxes, **camera captures a real frame**, mic captures,
-speaker plays a WAV + `stop()` interrupts, LCD shows a frame); a "prove the HAL" runbook in
-`deploy/`/`docs/`; tag `v0.M2.0`; close milestone #3 + epic #56 + confirm all six children Done.
-- **Camera specifics (new hardware):** sensor is **ov5647** — Camera v1, not the expected board.
-  `picamera2` is apt-only (ADR-008, imported lazily inside `Picamera2Camera`); the Pi's venv gets
-  it via `--system-site-packages`. libcamera ships an ov5647 tuning file and picamera2 auto-selects
-  it, so `Picamera2Camera` should open it without code change. `pi.toml [adapters] camera = "fake"`
-  by design — the on-Pi contract run flips the `real` param on, exactly as servo/mic/speaker/display
-  already did. First real capture proves the RGB888 main-stream config; if resolution negotiation
-  balks, ov5647's native modes are 640×480 / 1296×972 / 1920×1080 / 2592×1944 (`[vision] fps = 5`).
-- The other four real halves were already bench-proven ([[avid-servo-hw-bringup]],
-  [[avid-speaker-hw-bringup]], [[avid-mic-hw-bringup]], [[avid-display-hw-bringup]]); this run is
-  the **contract-suite proof + physical demo of all five together**, camera included for the first
-  time. ⚠️ Gate mic config (folded into pi.toml at #89): `[microphone] device =
-  "plughw:CARD=Device,DEV=0"` (`default` is the amp); mic mixer **AGC OFF + gain 10/16, persisted
-  via `alsactl store`** is a manual pre-flight, not in config.
+### 1 · M2 gate — ✅ SEALED `v0.M2.0` (`a83cc36`)
+`pytest tests/contract/ -m hardware` → **20 passed, zero skips** on a Pi 4B. Evidence in
+`docs/demos/m2_evidence/`. Milestone #3 + epic #56 closed. Found and fixed a real bug: the `pi`
+extra's unpinned numpy resolved to 2.x and silently killed `picamera2`.
 
-### 2 · M3 gate — #75 (epic #67) → tag `v0.M3.0`
-**Display only** — never camera-blocked, just queued. AC: `docs/demos/face_pi.py --config
-config/pi.toml` on the panel, all **8** faces visible, printed **max latency ≤150 ms** pasted into
-`docs/demos/README.md` (new M3 section, recording waived per solo-maintainer policy); reconcile
-"7 vs 8" (4 Tier-1 + 3 Tier-2 + SLEEPING); tag `v0.M3.0`; close milestone #4 + epic #67; journal
-line. Runbook is in the issue (flip `display = "framebuffer"`, `/dev/fb0`, `robot` user already in
-`video`).
+### 2 · M3 gate — ✅ SEALED `v0.M3.0` (`0f704e3`)
+All eight affects on the panel: **min 7.8 / median 9.6 / max 11.2 ms** vs the 150 ms budget.
+Evidence in `docs/demos/m3_evidence/` (eight pixel-exact framebuffer readbacks + tour log).
+Milestone #4 + epic #67 closed. The 7-vs-8 reconciliation is now a **PMP §5.2 footnote**.
 
-### 3 · M4 gate — #91 (epic #84) → tag `v0.M4.0`
-Mic + speaker, **measurement not bring-up** (both bench-verified). AC: `docs/demos/audio_pi.py
---config pi.toml` proves **≤200 ms** mic→speaker loopback on real ALSA (lever if missed is ALSA
-period/buffer sizing, not our code — SDS §2.8.1); a **10-min VAD recording** gating speech vs
-silence (report false-open / missed-speech); a **60-s recorded demo**; README entry; tag
-`v0.M4.0`; close epic #84.
+### 3 · M4 gate — #91 (epic #84) → tag `v0.M4.0` ⭐ NEXT, prep DONE
+Mic + speaker, **measurement not bring-up**. The Pi is ready; what remains needs a human voice.
+
+**Already done (this session):**
+- **Silero v5.1.2** at `/var/lib/robot/models/silero_vad.onnx`, ONNX signature verified against
+  `SileroVad._run_window`'s exact call. **`test_vad.py` is 9/9** — that leg was red through *both*
+  prior seals.
+- `/etc/robot/config.toml` **replaced from `config/pi.toml`** (it was an M1-era file, 83 lines
+  stale) and flipped to `microphone = "alsa"`, `speaker = "alsa"`, `vad = "silero"`.
+- `robot.service` unit drift fixed; service left **stopped**.
+- **Software chain proven end to end: 0.43 ms turnaround vs the 200 ms budget.**
+- AC-2's scorer validated on real recorded ambience + mixed cue speech: **false-open 0.2%** — the
+  door-slam transients and `boot_chime` correctly do *not* open the gate (§6.3 satisfied).
+
+**Still needs the user:** AC-1 (speak N phrases), AC-3 (the 60-second recording — explicitly **not**
+waived, unlike M0/M2/M3; for an audio milestone a recording is the only artifact that demonstrates
+the thing). ⚠️ **Settle AC-1's wording first:** "≤200 ms mouth-to-ear" is unachievable by
+construction — `[gate] silence_hold_ms = 500` means a turn-based echo cannot beat half a second.
+The harness measures `playback_started − speech_ended` (processing turnaround), already documented
+in `docs/demos/README.md` §2.8.1.
+
+**AC-2 can run unattended, file-based** — `--mode vad` reads a WAV, so it needs no speaker. Build
+the sample by mixing known cue speech into recorded room ambience at known offsets. Label the
+**speech-energy region, not the clip extent** (TTS head/tail padding produced a bogus 56% "missed"
+on the first attempt).
 
 ### 4 · M5 gate — #106 (epic #98) → tag `v0.M5.0`
 Mic + speaker **+ network + live key** — the biggest one, and where the **still-owed live
@@ -112,9 +128,9 @@ $/conv-min); **Wi-Fi unplug → `session_lost` → DEGRADED + CueBank phrase →
   model`), not code (§6.10 volatility). `avid --capture NAME` can re-record the `assets/sessions/`
   fixtures from a live session so replay can't drift.
 
-**After the four tags:** the project's entire critical path through M5 is sealed on hardware. Only
-**M7** (build, laptop — see below) and the never-started M6/M8–M11 remain. M7's own Pi gates (#127
-SPK-3, #129 gate) come later, once the M7 build issues land.
+**After the remaining two tags:** the project's entire critical path through M5 is sealed on
+hardware. Only **M7** (build, laptop — see below) and the never-started M6/M8–M11 remain. M7's own
+Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ---
 
@@ -125,9 +141,15 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
   **camera (ov5647 CSI — `AVID_HARDWARE=1 pytest tests/contract/test_camera.py` = 11/11, RGB888
   640×480 auto-negotiated, no code change)**. M2's contract-suite proof (#57) can run with every
   `real` param active.
-- **Open Pi-gated gates, all code-complete, in seal order:** **#57** (M2), **#75** (M3), **#91**
-  (M4), **#106** (M5). Deps verified closed; these are ceremonies + measurement + tags, batched for
-  one full-bench day.
+- **Sealed on hardware: M0, M1, M2, M3** (`v0.M0.0`/`v0.M1.0`/`v0.M2.0`/`v0.M3.0`). **Remaining Pi
+  gates: #91** (M4 — prepped, needs the user's voice) and **#106** (M5 — needs the API key on the
+  Pi, a decision not yet taken).
+- ⚠️ **The Pi is not the repo.** `/etc/robot/config.toml` and `/etc/systemd/system/robot.service`
+  are copies and both had rotted (83 stale lines; a lost `SupplementaryGroups=video gpio` causing
+  `PermissionError: /dev/fb0` and 942 restarts). Diff both against the repo before any gate. Missing
+  config keys fall back to schema *defaults*, so drift produces **silently wrong results** — the M4
+  gate would have measured the `fake` VAD while capturing from the amp. See
+  [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md).
 - **M5 "It talks" (milestone #6): 7 of 9 sealed, laptop-COMPLETE.** #99–#105 merged & closed. Only
   #106 (gate) + #98 (epic) open.
 - **M7 "It remembers" (milestone #8): UNDERWAY — epic #114 + 15 issues (#115–#129), 8 closed.** The
@@ -144,6 +166,26 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ## What just shipped (this session)
 
+- **M2 sealed — `v0.M2.0` (`a83cc36`)**, plus `c7eeb1a` (the numpy cap + four stale runbook steps).
+  20 hardware contract legs, zero skips, under `PYTHONASYNCIODEBUG=1`.
+- **M3 sealed — `v0.M3.0` (`0f704e3`)**, one docs-only commit. All eight affects on the real
+  ILI9486 via `FramebufferDisplay`; **min 7.8 / median 9.6 / max 11.2 ms** vs a 150 ms budget.
+  Evidence committed as **pixel-exact framebuffer readbacks** — captured by streaming `/dev/fb0` to
+  a laptop browser over an SSH tunnel (~45 fps, server bound to `127.0.0.1` on the Pi), so the tour
+  was watched live *and* captured at once, saving a frame per content-hash change. Pi DoD: 742
+  passed / 10 skipped / 1 failed, ruff + `lint-imports` 4/4 + `mypy --strict` clean, coverage
+  **99.83%**. Also corrected `docs/demos/README.md`, which claimed **`v0.M4.0` was tagged** — it
+  never existed and #91 is still open.
+- **M4 prep** — Silero v5.1.2 installed and signature-verified (`test_vad.py` now 9/9, red through
+  both prior seals); `/etc/robot/config.toml` and the systemd unit un-drifted; software chain
+  measured at **0.43 ms**; AC-2's file-based scorer validated (false-open **0.2%**).
+- **New `deploy/PI_OPERATIONS.md`** — the accumulated Pi failure modes, written so the next session
+  doesn't re-pay for them.
+- ⚠️ **Debt created, not yet fixed:** `uv.lock` is stale against `pyproject.toml`'s numpy cap (the
+  lock still resolves numpy 2.x). CI is green *only* because it uses the lock; `uv lock` collapses
+  numpy to 1.26.4 project-wide and **breaks the 3.13 leg** (no cp313 wheels for 1.26.4). Fix is a
+  marker-conditional cap (`<2` only for `python_version < '3.12'`), relock, verify both legs. Its
+  own change, its own CI run.
 - **#124 (PR #139, squash `f4a2bdb`)** — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004), the
   transport half of "the model gets tools". Neutral **`ToolCallRequested {call_id, name, arguments}`** added
   to the `RealtimeEvent` union (all three exhaustive `match`/if-chain sites handle it — `_pump`, capturing
@@ -207,6 +249,16 @@ SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ## Standing gotchas (carry forward)
 
+- 📕 **All Pi/hardware traps now live in [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md)** —
+  service-must-be-stopped, venv rules (no `pip`, never `uv run`, numpy `<2`, the dev group),
+  config/unit drift, live framebuffer streaming, ALSA, the `pkill`-kills-its-own-SSH-session trap,
+  and reading gate results honestly. Read it before touching the Pi.
+- ⚠️ **A gate AC written before the design settled may be unsatisfiable — settle the wording on the
+  issue *before* the run.** Three instances so far: M2's "full contract suite, none skipped"
+  (impossible once the network-gated M5/M7 legs landed; `-m hardware` carries the claim now), M4's
+  "≤200 ms mouth-to-ear" (impossible with `silence_hold_ms = 500` on a turn-based echo), and
+  `docs/demos/README.md` asserting a `v0.M4.0` tag that never existed. Check the remaining gate
+  issues for the same optimism.
 - ⚠️ **Board project number ≠ node-ID intuition.** "Pico — Avid" is `gh project` **2**
   (`PVT_kwHOBcHqys4Bdmkk`); project **1** is an unrelated untitled scratch board. `gh project
   item-add` takes the **number** — use `2`. Added 16 M7 items to `1` by mistake this session and had

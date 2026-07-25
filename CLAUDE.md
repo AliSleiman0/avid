@@ -11,6 +11,11 @@ Companion documents:
 - **`PMP.md`** — plan, milestones, risk register, Definition of Ready/Done.
 - **`CONTRIBUTING.md`** — workflow: DoR/DoD, WIP limits, commits, branches.
 - **`SECURITY.md`** — secrets, network exposure, privacy, supply chain.
+- **`deploy/PI_OPERATIONS.md`** — driving the Pi from the laptop, and every hardware trap the
+  sealed gates paid for. **Read before touching the Pi.** The rule it exists to teach: *the machine
+  is not the repo* — `/etc/robot/config.toml` and the systemd unit are copies that rot, and because
+  missing config keys fall back to schema defaults, drift yields **silently wrong results**, not
+  errors.
 
 ---
 
