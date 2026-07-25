@@ -39,6 +39,7 @@ from avid.core.realtime import (
     AssistantTranscript,
     RealtimeEvent,
     SessionClosed,
+    ToolCallRequested,
     TurnDone,
     UserTranscript,
 )
@@ -225,6 +226,15 @@ async def test_send_audio_truncate_and_cancel_are_recorded() -> None:
             {"format": 1, "events": [{"delay_ms": 0, "type": "session_closed"}]},
             id="missing-field",
         ),
+        pytest.param(
+            {
+                "format": 1,
+                "events": [
+                    {"delay_ms": 0, "type": "tool_call_requested", "call_id": "c0"}
+                ],
+            },
+            id="tool-call-missing-field",
+        ),
     ],
 )
 def test_malformed_fixture_raises_at_load_not_mid_replay(
@@ -306,6 +316,39 @@ def test_translate_error_becomes_session_closed() -> None:
     assert event == SessionClosed(cause="server_error")
 
 
+def test_translate_function_call_done_becomes_tool_call_requested() -> None:
+    """#124 AC-5: the model's finalized tool call maps off ``response.output_item.done`` (item
+    type ``function_call``) — the complete arguments ride the ``.done`` frame, so the mapping
+    stays stateless, and the streaming ``.delta`` acks are not surfaced (like transcript deltas)."""
+    event = _translate(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_0",
+                "name": "recall",
+                "arguments": '{"query": "travel plans"}',
+            },
+        }
+    )
+    assert event == ToolCallRequested(
+        call_id="call_0", name="recall", arguments='{"query": "travel plans"}'
+    )
+
+
+def test_translate_non_function_output_item_done_is_ignored() -> None:
+    """A non-function output item (e.g. a completed message) is not surfaced — returns None so
+    the events loop skips it, exactly like the argument-delta acks."""
+    assert (
+        _translate({"type": "response.output_item.done", "item": {"type": "message"}})
+        is None
+    )
+    assert (
+        _translate({"type": "response.function_call_arguments.delta", "delta": "{"})
+        is None
+    )
+
+
 def test_translate_ignores_unmodelled_messages() -> None:
     """A delta/ack we do not surface returns None so the events loop skips it."""
     assert _translate({"type": "response.output_audio.delta.done"}) is None
@@ -324,3 +367,86 @@ def test_openai_client_repr_never_leaks_the_key() -> None:
     )
     assert "sk-super-secret-value" not in repr(client)
     assert isinstance(client, RealtimeClient)  # port-shaped without a connection (P6)
+
+
+def _openai(**overrides: object) -> OpenAIRealtimeClient:
+    kwargs: dict[str, object] = {
+        "api_key": "sk-test",
+        "model": "gpt-realtime-mini-2025-12-15",
+        "voice": "cedar",
+        "instructions": "You are a test.",
+        "max_output_tokens": 512,
+        "turn_detection": {"type": "server_vad"},
+    }
+    kwargs.update(overrides)
+    return OpenAIRealtimeClient(**kwargs)  # type: ignore[arg-type]
+
+
+class _CapturingWs:
+    """A stand-in for the ``websockets`` connection: records every JSON payload sent, no socket.
+
+    ``OpenAIRealtimeClient._send`` writes ``json.dumps(payload)`` to ``self._ws.send`` when the
+    socket is live, so setting the private ``_ws`` to one of these lets the client-event
+    serialisation be asserted entirely offline (like ``_translate``, the other network-free half)."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(json.loads(raw))
+
+
+def test_tools_are_declared_in_the_session_update_prefix() -> None:
+    """#124 AC-2: tool declarations ride the session.update payload — the cached prefix (§6.2.2),
+    static for the session — not a per-turn message. Empty by default (until #125 supplies the
+    recall/forget/remember_fact schemas); when present they land under ``tools``."""
+    tool = {"type": "function", "name": "recall", "parameters": {}}
+    assert "tools" not in _openai()._session_config()  # empty default — no key at all
+    assert _openai(tools=[tool])._session_config()["tools"] == [tool]
+
+
+async def test_send_tool_output_returns_the_result_then_requests_a_response() -> None:
+    """#124 AC-3: the return leg is two client events in order — ``conversation.item.create``
+    (function_call_output, call_id echoed) **then** ``response.create``. The second is the
+    step-5 trap (§6.6): without it the model silently sits."""
+    client = _openai()
+    ws = _CapturingWs()
+    client._ws = ws  # inject the fake socket; no connect
+    await client.send_tool_output("call_0", '{"facts": ["Lisbon"]}')
+
+    assert [m["type"] for m in ws.sent] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+    item = ws.sent[0]["item"]
+    assert item == {
+        "type": "function_call_output",
+        "call_id": "call_0",
+        "output": '{"facts": ["Lisbon"]}',
+    }
+
+
+async def test_tool_call_fixture_replays_the_recorded_exchange() -> None:
+    """#124 AC-4: the committed ``tool_call`` fixture replays a ``recall`` invocation interleaved
+    in a normal turn — the widened replay adapter emits ``ToolCallRequested`` in sequence."""
+    replay, clock = _load("tool_call")
+    await replay.open()
+    events = await _drain(replay, clock)
+    assert [type(e) for e in events] == [
+        UserTranscript,
+        ToolCallRequested,
+        AssistantTranscript,
+        AssistantAudioChunk,
+        TurnDone,
+    ]
+    call = next(e for e in events if isinstance(e, ToolCallRequested))
+    assert call.name == "recall"
+    assert call.call_id == "call_0"
+
+
+async def test_replay_records_tool_output_without_acting_on_it() -> None:
+    """A replay does not act on a returned tool output (the follow-up is pre-recorded) but keeps
+    the ``(call_id, output)`` pair on its off-port trace, assertable for the dispatch tests (#125)."""
+    replay, _clock = _load("two_turn")
+    await replay.send_tool_output("call_0", '{"deleted": 1}')
+    assert replay.tool_outputs == [("call_0", '{"deleted": 1}')]

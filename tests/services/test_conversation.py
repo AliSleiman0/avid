@@ -312,6 +312,34 @@ async def test_two_turn_publishes_the_facts_on_one_correlation_id() -> None:
         assert rig.sink.responses_ended == 2
 
 
+async def test_tool_call_pumps_cleanly_but_dispatch_is_inert_until_125() -> None:
+    """#124: a ``ToolCallRequested`` in the stream is a declared seam, not yet wired.
+
+    The ``tool_call`` fixture interleaves a ``recall`` invocation between the user transcript and
+    the assistant reply. The widened pump must handle the new union member — the turn's four
+    facts still mint on the one correlation id and the assistant PCM still reaches the sink — but
+    the tool call itself publishes **no** ``conversation.*`` fact and raises nothing (no
+    ``system.handler_failed``): dispatch to MemoryService lands in #125."""
+    cid = uuid4()
+    clock = FakeClock()
+    async with _rig(client=_replay("tool_call", clock=clock)) as rig:
+        await _speak(rig, correlation_id=cid)
+        await _advance_until(
+            rig, lambda: len(rig.collector.of_type(ConversationTurnEnded)) >= 1
+        )
+        await rig.collector.settle()
+
+        # The single turn's facts mint normally, all on the origin id — the tool call is transparent.
+        assert len(rig.collector.of_type(ConversationTurnStarted)) == 1
+        assert len(rig.collector.of_type(ConversationUserTranscribed)) == 1
+        assert len(rig.collector.of_type(ConversationAssistantResponded)) == 1
+        assert len(rig.collector.of_type(ConversationTurnEnded)) == 1
+        assert [item_id for item_id, _ in rig.sink.played] == ["item_0"]
+
+        # The seam is inert: the pump neither crashed nor emitted an extra fact for the call.
+        assert rig.collector.of_type(SystemHandlerFailed) == []
+
+
 async def test_user_transcribed_drives_listening_to_thinking() -> None:
     """AC-5: ConvSvc drives the LISTENING→THINKING edge by direct call on the first
     ``user_transcribed`` — the one state edge that is genuinely this service's."""

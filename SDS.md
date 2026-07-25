@@ -804,6 +804,7 @@ class RealtimeClient(Protocol):          # the vendor boundary (§6.2, R-10)
     def events(self) -> AsyncIterator[RealtimeEvent]: ...      # neutral, typed, vendor-free
     async def truncate(self, item_id: str, audio_end_ms: int) -> None: ...  # barge-in (§6.2.4)
     async def cancel(self) -> None: ...                        # response.cancel
+    async def send_tool_output(self, call_id: str, output: str) -> None: ...  # §6.6 return leg; then response.create
 
 
 class TurnSink(Protocol):                # the ConvSvc↔AudioSvc audio seam (§9.1.4)
@@ -813,7 +814,7 @@ class TurnSink(Protocol):                # the ConvSvc↔AudioSvc audio seam (§
     async def interrupt(self) -> int: ...  # barge-in; returns played_ms ACTUALLY emitted (§6.2.4)
 ```
 
-`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
+`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap); the tool *dispatch* to `MemoryService` is `ConversationService`'s (#125). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
 
 Three details worth defending:
 
@@ -2375,6 +2376,7 @@ The one permitted mock boundary is the OpenAI WSS, and even there we prefer `Rep
   "format": 1,
   "events": [
     {"delay_ms": 0,   "type": "user_transcript",       "text": "...", "is_approximate": false},
+    {"delay_ms": 250, "type": "tool_call_requested",   "call_id": "call_0", "name": "recall", "arguments": "{\"query\": \"...\"}"},
     {"delay_ms": 300, "type": "assistant_transcript",  "text": "...", "item_id": "item_0"},
     {"delay_ms": 20,  "type": "assistant_audio_chunk", "item_id": "item_0", "wav": "turn0_a.wav"},
     {"delay_ms": 200, "type": "turn_done",             "usage": {"input_tokens": 320, "cached_input_tokens": 256, "output_tokens": 48}},
@@ -2383,7 +2385,7 @@ The one permitted mock boundary is the OpenAI WSS, and even there we prefer `Rep
 }
 ```
 
-`type` selects a neutral `RealtimeEvent` member (`core/realtime.py`); its remaining keys are that member's fields. `delay_ms` is the gap *before* the event, replayed on the injected `Clock` (never wall time), so a `FakeClock` steps the whole timeline instantly and deterministically. `assistant_audio_chunk.wav` is a filename resolved beside the manifest and loaded as one `AudioChunk` (24 kHz mono S16_LE, the §6.2.4 playback format). Three fixtures ship — a normal two-turn conversation, a barge-in (approximate user transcript mid-reply plus a post-truncation delta), and a mid-turn session loss. The openai adapter's `--capture` mode (AVID-105) writes this exact format from a live session, so the fixtures cannot drift from real API behaviour.
+`type` selects a neutral `RealtimeEvent` member (`core/realtime.py`); its remaining keys are that member's fields. `delay_ms` is the gap *before* the event, replayed on the injected `Clock` (never wall time), so a `FakeClock` steps the whole timeline instantly and deterministically. `assistant_audio_chunk.wav` is a filename resolved beside the manifest and loaded as one `AudioChunk` (24 kHz mono S16_LE, the §6.2.4 playback format). Four fixtures ship — a normal two-turn conversation, a barge-in (approximate user transcript mid-reply plus a post-truncation delta), a mid-turn session loss, and a tool call (a `recall` invocation interleaved in a turn, #124). The openai adapter's `--capture` mode (AVID-105) writes this exact format from a live session, so the fixtures cannot drift from real API behaviour.
 
 ## 14.4 Contract tests (P6)
 

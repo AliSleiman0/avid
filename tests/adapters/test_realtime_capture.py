@@ -27,6 +27,7 @@ from avid.core.realtime import (
     AssistantAudioChunk,
     AssistantTranscript,
     RealtimeEvent,
+    ToolCallRequested,
     TurnDone,
 )
 
@@ -66,9 +67,17 @@ def _pcms(events: list[RealtimeEvent]) -> list[bytes]:
     return [e.chunk.pcm for e in events if isinstance(e, AssistantAudioChunk)]
 
 
-@pytest.mark.parametrize("name", ["two_turn", "barge_in", "session_loss"])
+def _tool_calls(events: list[RealtimeEvent]) -> list[ToolCallRequested]:
+    return [e for e in events if isinstance(e, ToolCallRequested)]
+
+
+@pytest.mark.parametrize("name", ["two_turn", "barge_in", "session_loss", "tool_call"])
 async def test_capture_round_trips_through_replay(name: str, tmp_path: Path) -> None:
-    """Every committed fixture, captured then reloaded, yields an identical neutral stream."""
+    """Every committed fixture, captured then reloaded, yields an identical neutral stream.
+
+    The ``tool_call`` fixture proves a ``ToolCallRequested`` survives the capture→replay round
+    trip (#124, AC-6) — so ``--capture`` can record a live tool exchange into the fixture format
+    and replay can never drift from real API behaviour."""
     src_clock = FakeClock()
     inner = ReplayRealtimeClient.from_dir(_SESSIONS / name, clock=src_clock)
     out_dir = tmp_path / name
@@ -88,6 +97,8 @@ async def test_capture_round_trips_through_replay(name: str, tmp_path: Path) -> 
     assert _item_ids(reloaded) == _item_ids(original)
     assert _usages(reloaded) == _usages(original)
     assert _pcms(reloaded) == _pcms(original)  # assistant PCM survives byte-for-byte
+    # A captured tool call round-trips with call_id/name/arguments intact (#124, AC-6).
+    assert _tool_calls(reloaded) == _tool_calls(original)
 
 
 async def test_captured_manifest_is_format_1(tmp_path: Path) -> None:
@@ -136,6 +147,8 @@ async def test_capture_delegates_control_calls_to_the_inner_client(
     )
     await capturing.truncate("item_0", 480)
     await capturing.cancel()
+    await capturing.send_tool_output("call_0", '{"facts": []}')
     assert len(inner.sent) == 1
     assert inner.truncations == [("item_0", 480)]
     assert inner.cancels == 1
+    assert inner.tool_outputs == [("call_0", '{"facts": []}')]
