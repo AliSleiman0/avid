@@ -5,52 +5,55 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-26 · `main = 10bfb6e` · tree CLEAN · gh `AliSleiman0`.
-**⭐⭐⭐ M4 IS SEALED — `v0.M4.0` (`10bfb6e`), milestone #5 + epic #84 + gate #91 closed.** The robot
-hears and speaks on real hardware: **0.12–0.14 ms** processing turnaround against a 200 ms budget,
-and a VAD that ignores real-world noise — **0/3000 frames on deliberate transients** (SDS §6.3's
-door-slam requirement met on *real* audio, not a synthesised burst) and 0/15000 on five minutes of
-loud broadband noise. Evidence in `docs/demos/m4_evidence/`.
+**As of:** 2026-07-26 (late) · `main = e9cc416` · tree CLEAN · gh `AliSleiman0`.
 
-**The gate had to be re-run, because the first attempt printed `PASS` while the robot was mute.**
-Three defects made that possible — all found, filed, fixed and verified on hardware this session
-(#145 / #146 / #147 → PR #148). That is the headline of the session, above the tag itself: a gate
-that can pass on silence is not a gate.
+**⭐ M5 IS NOT SEALED, and now we know exactly why.** Two bench sessions on the Pi took the
+conversation loop from *"cannot open a socket"* to *"six real spoken exchanges"* — and produced the
+first honest O1 measurement in the project's life:
 
-**AC-3 (the 60-second demo) was WAIVED by the project owner**, with the reasons *and the cost*
-recorded on #91 — what is lost is *independent witness*, since every other number is self-reported
-by the software under test and the only external confirmation on record is the operator's ear.
+```
+O1  min 1004 / P50 1350 / P95 11278 ms   (budget P50 800 / P95 1500)
+O7  projected $3.01/month vs $25         cached-input 54.3%
+```
 
-**Only ONE Pi gate remains in the whole project: #106 (M5).** M0–M4 are all sealed on hardware.
+**AC-5 (O7) passes comfortably. AC-4 (O1) fails by ~70%,** and the *floor* over six turns is
+1004 ms — even the best turn misses. The owner's verdict matches the number: *"still a bit slow and
+doesn't feel like a conversation."*
 
-📕 **New: [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md)** — how to drive the Pi from the
-laptop and every trap the three runs cost us. **Read it before touching the Pi.** The expensive
-lesson: the machine is not the repo (`/etc/robot/config.toml` was 83 lines stale and the systemd
-unit had lost `SupplementaryGroups`), and the failures are *silent* — missing config keys fall back
-to schema defaults, so a gate can measure the **fake** VAD and still print a pass.
+**The cause is a divergence from SDS §6.3, filed as #153.** ADR-007 specifies *"replay the 300ms
+pre-speech ring buffer → **stream live**"*. `AudioService._run()` instead accumulates
+`self._utterance += chunk.pcm` and only `_end_speech()` hands the **whole utterance** over, 500 ms
+after the user stops. The model gets its first byte after the turn is already over, then runs its
+*own* 500 ms server VAD across that blob before generating — two turn-detections plus an upload, in
+series, where the design has one. It cannot prefill while you speak. §6.3 predicts what compliance
+should yield (*"~810 ms first-turn P50, in range on subsequent turns"*); we measured 1350 ms.
+**#153 is the next piece of work and it is what stands between M5 and a seal.**
 
-**M7 "It remembers" remains the active laptop queue.**
-Latest merge: **#124** (PR #139) — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004: the model
-gets tools). **Purely the transport seam** — the tool *schemas* + dispatch to `MemoryService` are **#125**.
-Added: the neutral **`ToolCallRequested {call_id, name, arguments}`** to the `RealtimeEvent` union (all three
-exhaustive matches — `_pump`, `_record`, `_build_event` — handle it, mypy `assert_never` proves it);
-**`RealtimeClient.send_tool_output(call_id, output)`** on the port + both adapters; `OpenAIRealtimeClient`
-gained a **`tools=()` ctor param** placed into `session.update` — the cached prefix (§6.2.2), static for the
-session, **empty until #125 supplies the recall/forget/remember_fact schemas** (main untouched, default
-empty). **AC-3 step-5 trap:** `send_tool_output` sends `conversation.item.create` (function_call_output)
-**then** `response.create` or the model silently sits. **AC-5:** `_translate` maps
-`response.output_item.done` (item type `function_call`) off the finalize frame — stateless, the arg-`delta`
-acks ignored. Committed **`assets/sessions/tool_call/`** fixture; `CapturingRealtimeClient` round-trips it
-(AC-6, `--capture` can't drift). **`ConversationService._pump` gains a log-and-ignore `ToolCallRequested`
-case — the #125 seam** (dispatch replaces it). **No new subscription, no `MemoryService`, no `main` change**
-→ it did **not** touch `test_main.py`'s exact-set assertions (that collision is #125's, correcting the prior
-baton). Prior this milestone: **#121** (`OpenAiTextModel` + AC-9), **#122** (`MemoryService` + `TextModel`/
-`Retriever` ports), **#120** (`HybridRetriever`, recall@5 = 0.54), **#118** (`Embedder`), **#117** (schema
-v1), **#116** (`Fact` + `memory.*`), **#115** (eval set), **#130** (P8 hw-init carve-out). The **camera real
-leg is contract-proven** (ov5647, 11/11) — all five HALs are hardware-present, so the four Pi gates
-(#57/#75/#91/#106) are pure demonstration ceremonies batched for one bench day. M7 is the active
-zero-hardware queue: **8 of 15 done**, next is **#125** (ConversationService tool dispatch → the recall/
-forget/remember_fact schemas + wiring to `MemoryService`).
+**Six defects found and fixed on hardware this session** (PR #152, merged as `e9cc416`; #154 open):
+
+1. **Beta API shape** — the socket closed with `4000 beta_api_shape_disabled`. GA needs session
+   `"type": "realtime"` and format-as-object with explicit `rate` on both sides.
+2. **User transcription was never enabled** — Realtime does not transcribe input unless asked, so
+   `UserTranscript` never crossed the port and `LISTENING → THINKING` never fired.
+3. **16 kHz capture rejected** — the API floors input at 24 kHz; Silero v5 ceilings at 16 kHz. The
+   adapter now resamples (pure stdlib, ADR-012).
+4. **`interrupt_response` cancelled every reply** — the server read each whole-utterance burst as a
+   barge-in and killed its own response: `response.created` → `response.done`, zero output, zero
+   usage, six turns, $0.00. The robot answered every utterance with its thinking cue: *"one second"*,
+   forever. Barge-in is ours (§6.2.4); the server cannot see our speaker and must not try.
+5. **Silero's ONNX pool spun three cores** — `InferenceSession` had no `SessionOptions`, so ONNX ran
+   one *spin-waiting* intra-op thread per core. **306% CPU, 11m28s of CPU in 3m44s wall**; the audio
+   loop starved and the robot went deaf mid-conversation. Now 16.8%.
+6. **The harness's own playback check was M4-shaped** (#154) — `abs(elapsed - played)` is right for
+   M4's single-`play` echo and wrong for M5's streamed deltas, where wall time legitimately exceeds
+   audio duration. Now one-sided.
+
+Defects 1–4 were **invisible to CI by construction**: every `assets/sessions/` fixture *records* the
+frames they suppress, so replay-based tests could not have caught them. #105 shipped this adapter
+network-gated and it had **never run** — that was unverified debt, not tested code.
+
+**The Pi is powered on and idle**, `robot.service` **disabled**, `/opt/avid` on `main`, key at
+`/etc/robot/robot.env` (600, root), `[adapters] realtime = "openai"`.
 
 ---
 
@@ -306,6 +309,30 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
   SQLite schema v1 + `FactRepository`. **#116/#115/#130** — domain scoring / eval set / P8 carve-out.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A network-gated adapter is UNVERIFIED DEBT, not tested code.** `OpenAIRealtimeClient` sat
+  behind `OPENAI_API_KEY` + `AVID_LIVE` from #105 until the #106 bench, and its first live run
+  found **four** defects in a row, each hiding the next. Budget a live smoke before any gate that
+  depends on such an adapter — the fixtures *record* the frames these bugs suppress, so replay CI is
+  structurally incapable of catching them.
+- ⚠️ **Per-call latency says nothing about what a library does between calls.** M4 measured Silero
+  at 0.43 ms/frame — true, and it still hid an ONNX thread pool spinning three of four cores. Build
+  `InferenceSession` with `intra_op_num_threads=1`, `ORT_SEQUENTIAL`, and
+  `add_session_config_entry("session.intra_op.allow_spinning", "0")`. The M7 MiniLM embedder builds
+  its own session and needs the same treatment.
+- ⚠️ **`uv sync --extra <name>` RE-LOCKS, exactly like bare `uv run`.** It collapsed numpy to 1.26.4
+  mid-session (the known 3.13-breaking trap). Always `uv sync --frozen --extra memory`.
+- ⚠️ **The user cannot see tool output while a command runs.** "Speak now" instructions inside a
+  long-running SSH command arrive only after it finishes. Announce the protocol in a *message*
+  first, then launch — and launch bench runs **detached** (`setsid nohup … &`), because SSH drops
+  mid-run otherwise orphan or kill them.
+- ⚠️ **`pkill -f <pattern>` matches your own SSH command string** and kills the session before it
+  does anything. Bit twice this session. Kill by PID, or use a pattern that cannot appear in the
+  command you are typing.
+- ⚠️ **A latency histogram is only meaningful if the human waits for each reply.** Talking over the
+  robot makes `AudioService` stamp playback with the *newest* utterance's `correlation_id`, so
+  first-audio pairs against the wrong `speech_ended` — one run produced −740 ms and +6710 ms rows.
+  Measure O1 with a strict wait-for-reply protocol and exercise barge-in in a **separate** run.
 
 - 📕 **All Pi/hardware traps now live in [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md)** —
   service-must-be-stopped, venv rules (no `pip`, never `uv run`, numpy `<2`, the dev group),
