@@ -23,13 +23,24 @@ was corrected accordingly. On the playback side it drives the ``THINKING → SPE
 still owns the ``audio.speech_started`` turn origin and the barge-in ``SPEAKING → LISTENING``
 move (:meth:`_begin_speech`).
 
-**The M4 loopback survives behind a flag.** Before ``ConversationService`` existed, a completed
-utterance was echoed straight back to the speaker (:meth:`_loopback`) to prove the round-trip;
-that path is retained under ``loopback=True`` for the #91 on-Pi *transport* gate
-(``docs/demos/audio_pi.py``), where there is no AI client and the echo is the whole downstream
-path. With ``loopback=False`` (the running robot) :meth:`_end_speech` instead hands the captured
-utterance up the ``TurnSink`` seam. The loopback publishes the playback facts but deliberately
-does **not** drive the state arc (nothing reaches THINKING without a real turn).
+**The M4 loopback survives behind a flag, and it is the one path that still buffers.** Before
+``ConversationService`` existed, a completed utterance was echoed straight back to the speaker
+(:meth:`_loopback`) to prove the round-trip; that path is retained under ``loopback=True`` for the
+#91 on-Pi *transport* gate (``docs/demos/audio_pi.py``), where there is no AI client and the echo
+is the whole downstream path — an echo needs the whole clip, so that mode accumulates
+``_utterance`` and plays it at the falling edge. The loopback publishes the playback facts but
+deliberately does **not** drive the state arc (nothing reaches THINKING without a real turn).
+
+**With ``loopback=False`` (the running robot) capture is streamed, not buffered** (#153, §6.3).
+The gate's own words are *"replay the 300 ms pre-speech ring buffer → stream live"*: the drained
+pre-roll is handed up the ``TurnSink`` the instant the rising edge fires, and every frame after it
+goes up as it is captured, **including the trailing silence** — the server's own
+``[ai.turn_detection] silence_duration_ms`` cannot fire on audio it never receives, so cutting the
+stream at the falling edge would leave the turn uncommitted forever. Buffering the whole utterance
+and flushing it at ``_end_speech`` (what this service did until #153) put three delays in series
+where the design has one — our ``silence_hold_ms`` hold, the blob upload, then the server hunting
+the same silence *inside* the blob — and cost M5 its O1 objective: P50 1350 ms measured against a
+800 ms budget, with a floor of 1004 ms. :meth:`_capture` is the one place the two modes diverge.
 
 Purity of the hot path (P8, AC-6): :meth:`~avid.core.ports.VoiceActivityDetector.is_speech`
 is synchronous and sub-ms by contract (SDS §9.3), so it is called **inline** — no
@@ -70,6 +81,13 @@ _log = logging.getLogger(__name__)
 
 # The component name stamped on the events this module publishes (SDS §9.1.3).
 _SOURCE = "AudioService"
+
+# Depth of the mic-up queue, in frames (#153). Streaming per frame means the queue only stays
+# short while somebody drains it — and nobody does between sessions, or while the robot is
+# DEGRADED and every ``open()`` is failing. Unbounded, that leaks captured audio forever; bounded,
+# the worst case is a loud, finite drop. ≈10 s at the 20 ms ``[microphone] chunk_ms`` the configs
+# ship — long enough that the ~200 ms session-open backlog never comes near it.
+_MIC_QUEUE_FRAMES = 500
 
 
 class AudioService:
@@ -139,8 +157,12 @@ class AudioService:
         # Captured mic PCM handed up the TurnSink seam (drained by :meth:`mic`), and the
         # in-flight assistant playback (its item, the ms actually emitted, and the turn it
         # belongs to — kept separate from _turn_id so a barge-in keeps the *interrupted*
-        # playback's own correlation).
-        self._mic_out: asyncio.Queue[AudioChunk] = asyncio.Queue()
+        # playback's own correlation). ``_dropping`` makes the overflow warning one per episode
+        # rather than one per frame — at 50 frames/s the honest signal would otherwise be noise.
+        self._mic_out: asyncio.Queue[AudioChunk] = asyncio.Queue(
+            maxsize=_MIC_QUEUE_FRAMES
+        )
+        self._dropping = False
         self._playing_item: str | None = None
         self._playing_ms = 0
         self._playing_corr: UUID | None = None
@@ -188,9 +210,13 @@ class AudioService:
         return self._mic_up()
 
     async def _mic_up(self) -> AsyncIterator[AudioChunk]:
-        """Yield each captured utterance as :meth:`_end_speech` hands it over — a **live,
-        unbounded** stream (a real mic never ends), unlike ``FakeTurnSink``'s finite script.
-        ``ConversationService`` drains this for the session's life and cancels it on close."""
+        """Yield each captured **frame** as :meth:`_emit` hands it over — a live, endless stream
+        (a real mic never ends), unlike ``FakeTurnSink``'s finite script. ``ConversationService``
+        drains this for the session's life and cancels it on close.
+
+        Frames, not utterances (#153): the port always specified ``mic()`` as mirroring
+        :meth:`~avid.core.ports.Microphone.stream`, and the fake always honoured it — this side
+        was the odd one out until §6.3's "stream live" was actually implemented."""
         while True:
             yield await self._mic_out.get()
 
@@ -313,28 +339,76 @@ class AudioService:
             )
             if speech:
                 if not self._speaking:
-                    await (
-                        self._begin_speech()
-                    )  # rising edge — seeds utterance from pre-roll
+                    await self._begin_speech()  # rising edge — replays the pre-roll
                 else:
-                    self._utterance += chunk.pcm  # subsequent speech frame
+                    self._capture(chunk.pcm)  # subsequent speech frame
                 self._speech_ms += frame_ms
                 self._silence_run_ms = 0
             elif self._speaking:
                 # Trailing silence is still part of the captured clip; count it toward the
-                # debounce and end the turn once it has lasted long enough (AC-2).
-                self._utterance += chunk.pcm
+                # debounce and end the turn once it has lasted long enough (AC-2). It is
+                # *captured* too, and in seam mode that means streamed: the server's own VAD
+                # closes the turn on silence it hears, so withholding these frames would leave
+                # the turn open forever (#153).
+                self._capture(chunk.pcm)
                 self._silence_run_ms += frame_ms
                 if self._silence_run_ms >= self._silence_hold_ms:
                     await self._end_speech()
             # else: idle silence — the pre-roll rolls, nothing is published.
 
+    def _capture(self, pcm: bytes) -> None:
+        """Route one captured frame — the **only** place the two modes diverge (#153).
+
+        Loopback buffers it for the echo :meth:`_end_speech` plays; the seam streams it up the
+        ``TurnSink`` now, per §6.3's "stream live". Synchronous by design: this sits in the mic
+        loop's hot path, so it allocates and returns rather than awaiting (P8)."""
+        if self._loopback_mode:
+            self._utterance += pcm
+        else:
+            self._emit(pcm)
+
+    def _emit(self, pcm: bytes) -> None:
+        """Hand one captured frame up the ``TurnSink`` queue immediately (§6.3, §9.1.4).
+
+        Non-blocking, always: the mic loop must never park on a consumer (P8), and the queue's
+        consumer only exists while a Realtime session is open — between sessions, and for the
+        ~200 ms an ``open()`` takes, nothing drains it. A full queue therefore means audio is
+        going nowhere (a failed open, a degraded robot), and the policy is **drop-oldest**: the
+        freshest audio is the audio worth keeping, and the bus's own rule applies — silent drops
+        are a debugging catastrophe, loud drops are a tuning signal (§3.5.2). Warned once per
+        overflow episode, not once per frame."""
+        if not pcm:
+            return
+        chunk = AudioChunk(
+            pcm=pcm, sample_rate=self._sample_rate, channels=self._channels
+        )
+        try:
+            self._mic_out.put_nowait(chunk)
+        except asyncio.QueueFull:
+            # Sole producer, so the get_nowait below always frees exactly the room we need.
+            self._mic_out.get_nowait()
+            self._mic_out.put_nowait(chunk)
+            if not self._dropping:
+                self._dropping = True
+                _log.warning(
+                    "mic-up queue full at %d frames — dropping oldest captured audio; "
+                    "nothing is draining the TurnSink [correlation_id=%s]",
+                    _MIC_QUEUE_FRAMES,
+                    self._turn_id,
+                )
+        else:
+            self._dropping = False
+
     async def _begin_speech(self) -> None:
         """Rising edge: a turn begins. Mint its id, replay the pre-roll, publish, transition.
 
         **A turn origin** (SDS §9.1.1): this is where a fresh ``correlation_id`` is minted;
-        every downstream event of the turn propagates it. The drained pre-roll seeds the
-        utterance so the loopback echoes the leading phonemes the gate would otherwise miss.
+        every downstream event of the turn propagates it. The drained pre-roll is the turn's
+        first captured audio — it holds the leading phonemes the gate would otherwise miss, and
+        §6.3 is explicit that it is *replayed* ahead of the live stream. It goes through
+        :meth:`_capture` like any other frame, which seeds the loopback's buffer or opens the
+        seam's stream depending on the mode. It already contains the frame that fired this edge
+        (``_run`` appends before judging), so that frame is never emitted twice.
 
         Barge-in (AC-5): if the robot is mid-utterance (``SPEAKING``), cut playback
         **before** the transition, so ``SPEAKING → LISTENING`` lands on a silent speaker —
@@ -345,10 +419,11 @@ class AudioService:
         self._speaking = True
         self._turn_id = uuid4()
         pre = self._preroll.drain()  # includes this first speech frame (appended above)
-        self._utterance = bytearray(pre)
+        self._utterance = bytearray()
         self._speech_ms = 0
         self._silence_run_ms = 0
         ring_buffer_ms = len(pre) // self._bytes_per_ms
+        self._capture(pre)  # §6.3: replay the ring buffer, then stream live
 
         if self._state.state is RobotState.SPEAKING:
             await (
@@ -376,13 +451,14 @@ class AudioService:
 
     async def _end_speech(self) -> None:
         """Falling edge (debounced): the user's turn is over. Publish ``audio.speech_ended``,
-        then either echo (loopback) or hand the utterance up the ``TurnSink`` seam.
+        then echo the clip (loopback) or simply stop capturing (seam).
 
         ``duration_ms`` is the speech length — the sum of the *speech* frames, excluding the
-        trailing silence hangover that triggered the end. In seam mode the captured utterance is
-        put on the mic-up queue and the **capture** state is reset while ``_turn_id`` is kept
-        alive — the assistant playback that follows is the same turn (SDS §3.12.2). In loopback
-        mode the whole turn (id included) is reset once the echo has played.
+        trailing silence hangover that triggered the end. In seam mode there is **nothing to hand
+        over here** (#153): every frame, silence included, already went up the ``TurnSink`` as it
+        was captured, so this only resets the **capture** state while ``_turn_id`` is kept alive —
+        the assistant playback that follows is the same turn (SDS §3.12.2). In loopback mode the
+        buffered clip is echoed and the whole turn (id included) is reset.
         """
         turn_id = self._turn_id
         assert turn_id is not None  # set on the rising edge that reached here
@@ -396,13 +472,6 @@ class AudioService:
             await self._loopback(turn_id)
             self._reset_turn()
         else:
-            await self._mic_out.put(
-                AudioChunk(
-                    pcm=bytes(self._utterance),
-                    sample_rate=self._sample_rate,
-                    channels=self._channels,
-                )
-            )
             self._reset_capture()
 
     async def _loopback(self, turn_id: UUID) -> None:

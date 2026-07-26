@@ -18,7 +18,14 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 # Loopback addresses accepted for the local control API. SDS §9.5: localhost binding
 # *is* the authentication; ``0.0.0.0`` would expose the socket and is a security bug.
@@ -401,6 +408,25 @@ class Config(_Section):
     # systemd's ``$NOTIFY_SOCKET`` handoff (AVID-38), injected from the env like the
     # key. ``None`` off systemd — the real notifier then no-ops (SDS §3.11.3).
     notify_socket: str | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _local_hold_covers_the_server_vad(self) -> Config:
+        # The two VADs became coupled when AudioService started streaming live (#153, §6.3).
+        # AudioService streams captured frames — trailing silence included — and stops at its own
+        # falling edge, ``[gate] silence_hold_ms`` after the last speech frame. The server closes
+        # the turn only once *it* has heard ``[ai.turn_detection] silence_duration_ms`` of silence.
+        # So a local hold shorter than the server's cuts the stream before the server has heard
+        # enough, and the turn is never committed: a robot that listens and then simply never
+        # answers. Loud at load, like api.bind — this failure is invisible until the bench.
+        if self.gate.silence_hold_ms < self.ai.turn_detection.silence_duration_ms:
+            raise ValueError(
+                f"gate.silence_hold_ms ({self.gate.silence_hold_ms}) must be >= "
+                f"ai.turn_detection.silence_duration_ms "
+                f"({self.ai.turn_detection.silence_duration_ms}): the mic stream stops at the "
+                f"local hold, so a shorter one starves the server VAD and the turn never "
+                f"commits (SDS §6.3)."
+            )
+        return self
 
 
 def load_config(path: str | Path) -> Config:

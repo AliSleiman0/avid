@@ -1185,6 +1185,16 @@ IDLE after 30s of no speech: close session. Cost: $0 again.
 
 **The ring buffer is why this works.** We keep the last 300 ms of audio at all times. When VAD fires, we've already missed the first phoneme or two — so we replay the buffer into the session before the live stream. Without it, every utterance loses its first word and the gate is unusable.
 
+**Implemented (#153).** "Stream live" is literal, and getting it wrong cost M5 its O1 objective once already. `AudioService` hands the drained pre-roll up the `TurnSink` at the rising edge and then **every frame as it is captured** — one `AudioChunk` per mic frame, matching what the `TurnSink` port always specified (`mic()` mirrors `Microphone.stream`) and what `FakeTurnSink` always did. Three points that are load-bearing:
+
+- **The trailing silence is streamed too.** The server closes the turn on silence *it* hears, so withholding the hangover frames leaves the turn uncommitted forever. `AudioService` streams through its whole `[gate] silence_hold_ms` window and stops at the falling edge.
+- **Therefore `[gate] silence_hold_ms` >= `[ai.turn_detection] silence_duration_ms`**, asserted in `Config` at load. A shorter local hold cuts the stream before the server has heard enough silence: the robot listens and then never answers, silently. The shipped configs set both to 500 ms, so the two VADs close together.
+- **The mic-up queue is bounded and drops oldest**, ~10 s deep, warning once per overflow episode. Nothing drains it between sessions or while a degraded robot's `open()` keeps failing, and per-frame emission into an unbounded queue leaks captured audio indefinitely (§3.5.2's rule, applied off the bus).
+
+The M4 loopback (`loopback=True`, the #91 transport gate) is the one path that still buffers the whole clip — an echo needs it. `AudioService._capture` is the only place the two modes diverge.
+
+**What it replaced, and why it was invisible.** Until #153 the service accumulated the utterance and flushed it at the falling edge, so the model's first byte arrived `silence_hold_ms` *after* the user stopped, as one blob. Three delays ran in series where this design has one — the local hold, the upload, then the server hunting the same silence inside the blob — and the model could not prefill while the user spoke. Measured on the Pi at the #106 bench run: **P50 1350 ms / P95 11278 ms against P50 800 / P95 1500**, with a floor of 1004 ms. It also made barge-in awkward to trigger by hand (the model cannot hear an interruption when it hears nothing until the turn is over) and forced `interrupt_response: False` for a second reason (§6.2.2): whole utterances arriving as one burst are indistinguishable from a barge-in, so the server cancelled every reply it started. No replay fixture could catch any of this — fixtures *record* the frames these bugs suppress.
+
 **Cost of the gate:** ~200 ms of session-open latency on the first utterance of a conversation, paid once per conversation rather than per turn (the session stays open between turns). Against the §2.8.1 budget this pushes first-turn P50 to ~810 ms — marginally over the 800 ms target, in range on subsequent turns. §6.9 covers this with the thinking-cue mitigation.
 
 **Value of the gate:** see §6.10. It is the difference between $4/month and $108/month.

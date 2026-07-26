@@ -47,7 +47,7 @@ from avid.domain import (
     SystemHandlerFailed,
 )
 from avid.domain.events import REASON_HANDLER_RAISED
-from avid.services.audio import AudioService
+from avid.services.audio import _MIC_QUEUE_FRAMES, AudioService
 
 # Generous ceiling: frames arrive every 10 ms of real time, so even a two-turn script
 # (~8 frames) plus its loopback lands well inside this, while a wedged bus still fails fast.
@@ -274,6 +274,10 @@ async def test_a_full_turn_publishes_the_four_audio_facts_on_one_correlation_id(
         assert len(rig.speaker.played[0].pcm) == 7 * _FRAME_BYTES
         assert rig.speaker.played[0].sample_rate == _SAMPLE_RATE
 
+        # #153 did not touch this path: loopback still *buffers* the whole clip for the echo,
+        # and puts nothing up the seam (there is no AI client at M4 to receive it).
+        assert rig.service._mic_out.empty()
+
 
 # --- AVID-91: played_ms is the device's answer, never our own arithmetic -------------------
 
@@ -472,20 +476,110 @@ async def test_a_raising_subscriber_is_isolated_and_the_loop_keeps_running() -> 
 # --- #103: the TurnSink seam (loopback=False) ----------------------------------------------
 
 
-async def test_seam_hands_the_captured_utterance_up_the_mic_stream() -> None:
-    """AC-1: in seam mode a completed utterance is pushed up ``mic()`` (for ConversationService
-    to forward to the model), not echoed to the speaker. The whole captured clip crosses at the
-    16 kHz capture format, and nothing is played."""
+async def _drain_mic(rig: Rig, count: int) -> list[AudioChunk]:
+    """Pull *count* chunks off one ``mic()`` iterator, failing the test rather than hanging.
+
+    One iterator, deliberately: every ``mic()`` call returns a fresh generator over the *same*
+    queue, so two of them would race for frames and the ordering assertions would be a coin
+    flip. That is the real seam's shape — a single consumer (``ConversationService``) drains it
+    for the session's life."""
+    stream = rig.service.mic()
+    return [await asyncio.wait_for(anext(stream), _TIMEOUT_S) for _ in range(count)]
+
+
+async def test_seam_streams_the_preroll_then_one_chunk_per_captured_frame() -> None:
+    """#153/§6.3: in seam mode capture is **streamed**, not buffered — the drained pre-roll
+    first, then every frame as it is captured, trailing silence included.
+
+    The shape is the assertion, and it is timing-free. Buffering (what this service did until
+    #153) produced exactly *one* chunk of 2240 B at the falling edge; streaming produces five:
+    the 3-frame pre-roll (frames 0,1 + the speech frame that fired the edge), then frames 3..6
+    one at a time. Same bytes, four fewer round trips of latency. Nothing is played — the echo
+    is loopback's, not the seam's."""
     script = [False, False, True, True, True, False, False]
     async with _rig(vad_script=script, loopback=False) as rig:
         await rig.collector.wait_for_type(AudioSpeechEnded, 1)
-        chunk = await asyncio.wait_for(anext(rig.service.mic()), _TIMEOUT_S)
-        assert isinstance(chunk, AudioChunk)
-        assert chunk.sample_rate == _SAMPLE_RATE  # 16 kHz capture, not 24 kHz playback
+        chunks = await _drain_mic(rig, 5)
+
+        assert [len(c.pcm) for c in chunks] == [
+            3 * _FRAME_BYTES,  # §6.3's ring-buffer replay, ahead of the live stream
+            _FRAME_BYTES,  # frame 3, speech
+            _FRAME_BYTES,  # frame 4, speech
+            _FRAME_BYTES,  # frame 5, trailing silence — the server VAD needs to hear it
+            _FRAME_BYTES,  # frame 6, trailing silence; the falling edge follows
+        ]
         assert (
-            len(chunk.pcm) == 7 * _FRAME_BYTES
-        )  # frames 0..6, the whole captured clip
+            sum(len(c.pcm) for c in chunks) == 7 * _FRAME_BYTES
+        )  # frames 0..6, all of it
+        assert all(
+            c.sample_rate == _SAMPLE_RATE for c in chunks
+        )  # 16 kHz capture, not 24
+        assert all(c.channels == _CHANNELS for c in chunks)
         assert rig.speaker.played == []  # no loopback echo in seam mode
+        assert (
+            rig.service._mic_out.empty()
+        )  # nothing withheld for a flush that never comes
+
+
+async def test_seam_audio_reaches_the_model_before_the_turn_is_over() -> None:
+    """#153, the regression this issue exists for: the model must hear the user *while* they
+    are still speaking, or it cannot prefill and O1 is unreachable (measured P50 1350 ms vs a
+    800 ms budget when this was buffered).
+
+    Thirty speech frames give a ~300 ms window between the rising edge and the debounced
+    falling one; three chunks are pulled inside it and ``audio.speech_ended`` has provably not
+    been published yet. Under the old buffering the first chunk did not exist until 500 ms
+    *after* the last word."""
+    script = [False, False, *([True] * 30), False, False]
+    async with _rig(vad_script=script, loopback=False) as rig:
+        await rig.collector.wait_for_type(AudioSpeechStarted, 1)
+        chunks = await _drain_mic(rig, 3)
+
+        assert rig.collector.of_type(AudioSpeechEnded) == []  # the turn is still open
+        assert len(chunks) == 3
+        assert chunks[0].pcm  # the pre-roll, already on its way to the model
+
+
+async def test_the_mic_queue_drops_the_oldest_frames_and_warns_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#153: streaming per frame needs a bounded queue, because nothing drains it between
+    sessions or while every ``open()`` is failing. Overflow keeps the **freshest** audio and
+    says so — once per episode, not once per frame at 50 frames/s (§3.5.2: loud drops are a
+    tuning signal, silent ones are a debugging catastrophe)."""
+    async with _rig(vad_script=[False], loopback=False) as rig:
+        overflow = 3
+        with caplog.at_level(logging.WARNING, logger="avid.services.audio"):
+            for n in range(_MIC_QUEUE_FRAMES + overflow):
+                rig.service._emit(bytes([n % 256]) * _FRAME_BYTES)
+                if n % 64 == 0:
+                    # Setup pacing, not the path under test: filling a 500-frame queue in one
+                    # synchronous burst is ~500 traced calls, which trips the 50 ms P8 gate under
+                    # coverage. In the real loop these arrive one per mic frame, 20 ms apart.
+                    await asyncio.sleep(0)
+
+        assert rig.service._mic_out.qsize() == _MIC_QUEUE_FRAMES  # bounded, not leaking
+        # Drained off the queue rather than through _drain_mic: 500 `wait_for` timeouts in one
+        # uninterrupted step is itself a >50 ms callback under coverage, and what is under test
+        # here is the queue's contents, not the iterator.
+        survivors = []
+        while not rig.service._mic_out.empty():
+            survivors.append(rig.service._mic_out.get_nowait())
+            if len(survivors) % 64 == 0:
+                await asyncio.sleep(0)
+        # Oldest-first eviction: frames 0..2 are gone, the newest tail survived intact.
+        assert survivors[0].pcm[0] == overflow
+        assert survivors[-1].pcm[0] == (_MIC_QUEUE_FRAMES + overflow - 1) % 256
+        assert caplog.text.count("mic-up queue full") == 1
+
+
+async def test_an_empty_frame_is_never_put_on_the_seam() -> None:
+    """A drained pre-roll can be empty (a rising edge on the very first frame is still one
+    frame, but ``_emit`` is called with whatever ``drain()`` returned). An empty chunk carries
+    no audio and would only cost the model a round trip, so it is dropped here."""
+    async with _rig(vad_script=[False], loopback=False) as rig:
+        rig.service._emit(b"")
+        assert rig.service._mic_out.empty()
 
 
 async def test_seam_play_starts_playback_and_enters_speaking() -> None:
