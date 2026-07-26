@@ -324,13 +324,23 @@ def _percentile(samples: list[float], pct: float) -> float:
 
 
 def _diverged(turn: _Turn) -> bool:
-    """Did this turn's wall-clock playback disagree with the ms the device says it played?
+    """Did this turn's playback finish **faster** than the audio it claims to have played?
 
-    The tolerance is the looser of an absolute floor and a relative band (see the constants).
-    Catches a mute speaker (6000 ms "played" in ~0 ms) and a wrong-rate one (6000 ms in 4010 ms)
-    alike, because both are the same lie told at different scales."""
+    Deliberately one-sided, and the asymmetry is the whole correction. ``audio_pi.py`` compares
+    ``abs(elapsed - played)`` because M4 played a whole utterance in a single ``Speaker.play``,
+    so wall time and audio duration should match in both directions. M5 does not work that way:
+    assistant audio arrives as **streamed deltas**, so ``elapsed`` legitimately includes every
+    inter-delta network gap and will routinely exceed ``played`` — most of all on the first turn
+    after a cold reconnect. Flagging that direction reports the network as a speaker fault (it
+    failed turn 4 of the #106 run for exactly this reason).
+
+    The direction that still means something is ``elapsed < played``: the device cannot emit six
+    seconds of audio in four seconds of wall clock, so a shortfall is audio being dropped or
+    clocked out at the wrong rate — the #146 defect, and the one this check exists for. A turn
+    that played *nothing* is caught separately, on every adapter, by ``played_ms == 0``.
+    """
     allowed = max(_PLAYBACK_ABS_TOL_MS, _PLAYBACK_REL_TOL * turn.played_ms)
-    return abs(turn.elapsed_ms - turn.played_ms) > allowed
+    return turn.played_ms - turn.elapsed_ms > allowed
 
 
 def _report_conversation(
