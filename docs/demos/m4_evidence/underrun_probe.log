@@ -1,0 +1,30 @@
+$ /opt/avid/.venv/bin/python -u /tmp/probe.py
+--- A: one PERSISTENT handle, whole-utterance writes (the old adapter) ---
+info: {'period_size': 512, 'buffer_size': 2560, 'rate': 24000}
+  write 1: returned 48000  after 1.898s  state=3
+  write 2: returned 48000  after 2.006s  state=3
+  write 3: returned 48000  after 2.007s  state=3
+  write 4: returned 48000  after 2.006s  state=3
+--- B: persistent handle, ~20 ms PERIOD writes (the new adapter's slicing) ---
+  utterance 1: 1.897s  bad periods: none
+  utterance 2: 2.006s  bad periods: none
+  utterance 3: 2.006s  bad periods: none
+
+# Back-to-back writes never drain the ring buffer, so the defect does NOT appear.
+# It needs a PAUSE between utterances -- a persistent handle used intermittently,
+# which is exactly how a turn-based robot uses one.
+
+$ /opt/avid/.venv/bin/python -u /tmp/probe2.py
+--- A: PERSISTENT handle, whole-utterance writes, 1.5s gap between them ---
+  write 1: returned 48000  after 1.898s  state=3
+  write 2: returned -32  after 0.000s  state=2
+  write 3: returned 48000  after 1.907s  state=3
+  write 4: returned -32  after 0.000s  state=2
+--- B: PERSISTENT handle, ~20 ms period slices, 1.5s gap (slicing alone) ---
+  utterance 1: 1.897s  bad periods: none
+  utterance 2: 1.891s  bad periods: [(0, -32)]
+  utterance 3: 1.892s  bad periods: [(0, -32)]
+--- C: close+reopen recovery after the failure (what the fix does) ---
+  write 1: 48000 after 1.897s
+  write 2: -32 after 0.000s
+  retry after close+reopen: 48000 after 1.897s

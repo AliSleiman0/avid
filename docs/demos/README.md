@@ -170,10 +170,23 @@ Reproduce it — on a laptop (fakes, deterministic) or on the Pi (real `AlsaMicr
    of `[start_ms, end_ms]` speech spans):
    ```
    /opt/avid/.venv/bin/python docs/demos/audio_pi.py --mode vad \
-     --config config/pi.toml --wav ~/vad_10min.wav --labels ~/vad_10min.labels.json
+     --config /etc/robot/config.toml --wav ~/vad_10min.wav --labels ~/vad_10min.labels.json
    ```
+   ⚠️ **Read this tool's output with care.** It counts every frame outside a label span as
+   silence, so pointing it at a set that contains a *speech* take scores the natural pauses
+   between words as silence the VAD should have ignored — and firing across one is counted as
+   a false open. On the AC-2 set that inflates the report to 2.4% false-open / 35.9% missed,
+   while the sound figures are **0.16% false-open** (measured only on material with no speech,
+   where ground truth has no boundaries to misplace) and **92.5% utterance detection**
+   (measured at the 500 ms boundary `[gate] silence_hold_ms` itself defines). ~70–90% of the
+   raw disagreement sits within ±100 ms of a hand-drawn label boundary. Label the
+   speech-**energy** region, never the clip extent, and prefer separate takes of known
+   provenance — energy alone cannot tell a voice from a door slam, which is the thing under
+   test. See `m4_evidence/vad_accuracy.log` for the full decomposition.
 
-**Not yet tagged.** The M4 harness and its permanent test are merged, but the on-Pi gate
-(AVID-91) is still open: the ≤200 ms round-trip has not been measured on real ALSA, the
-10-minute VAD recording has not been run, and `/var/lib/robot/models/silero_vad.onnx` is not
-yet on the Pi. `v0.M4.0` lands with that gate, not before.
+**Evidence so far:** `m4_evidence/` holds the on-Pi proof for **AC-1** (loopback round-trip,
+confirmed by ear) and **AC-2** (VAD accuracy), captured against `285512c`.
+
+**Not yet tagged.** `v0.M4.0` lands with the whole of AVID-91, not before. Still open: **AC-3**
+the 60-second recorded demo, **AC-4/AC-5** the remaining docs and PMP §5.2 / SDS rows, and
+**AC-6** the tag itself plus closing epic #84.
