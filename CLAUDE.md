@@ -75,7 +75,9 @@ free to change.
   device offers. That inversion is the whole value.
 - **`typing.Protocol`, structural typing** — `EventBus`, `Camera`, `Servo`,
   `Display`, `Microphone`, `Speaker`, `Clock`, `Embedder`,
-  `VoiceActivityDetector`. `@runtime_checkable` where negotiated.
+  `VoiceActivityDetector`, and the M5/M7 ports `RealtimeClient`, `TurnSink`,
+  `FactRepository`, `Retriever`, `TextModel`, `MemoryTools`, `EpisodeStore`
+  (SDS §3.9.1/§9.3). `@runtime_checkable` where negotiated.
 - **Single composition root / dependency injection** (P3). Services *declare*
   their subscriptions (`subscriptions()`); `main.py` *registers* them. Subscription
   is static — registered at composition time only; runtime subscription raises.

@@ -828,9 +828,37 @@ class EpisodeStore(Protocol):            # the §7.5 raw-transcript tier Episode
     async def end_turn(self, correlation_id: UUID, *, at: int) -> None: ...       # turn_count++, ended_at
     async def prune(self, *, older_than: int, limit: int) -> int: ...             # bounded 90-day retention delete
     async def aclose(self) -> None: ...
+
+
+class FactRepository(Protocol):          # durable fact storage, as MemoryService needs it (§8.3, #117)
+    async def add(self, fact: Fact, *, embedding: bytes | None = None) -> int: ...  # returns the assigned rowid
+    async def get(self, fact_id: int) -> Fact | None: ...
+    async def fetch_live(self) -> Sequence[Fact]: ...              # non-superseded, idx_facts_live hot path
+    async def mark_superseded(self, old_id: int, new_id: int, *, at: int) -> None: ...  # §7.8; paired CHECK
+    async def delete(self, fact_id: int) -> None: ...             # forget() primitive, hard DELETE + cascade (§7.10)
+    async def load_embeddings(self) -> Sequence[tuple[int, bytes]]: ...  # (id, BLOB) for the §8.5 boot rebuild
+    async def keyword_search(self, query: str, *, limit: int) -> Sequence[int]: ...  # FTS5 ∪-half of §7.7, live ids
+    async def aclose(self) -> None: ...
+    # BLOB crosses as opaque `bytes`, ids as `int` — the port is numpy-free (§8.2, P1); the matrix is §8.5's.
+
+
+class Retriever(Protocol):               # the §7.7 read path + its §8.5 write-through vector index (#120)
+    async def rebuild(self) -> None: ...                          # boot reconciliation; SQLite is truth, matrix an index
+    async def retrieve(self, query: str, *, correlation_id: UUID | None = None) -> tuple[int, ...]: ...  # hybrid, top-k
+    async def similar(self, vector: Sequence[float], *, threshold: float, k: int) -> tuple[int, ...]: ...  # §7.8 near-dups
+    def append(self, fact: Fact, embedding: bytes | None) -> None: ...  # write-through, after the row is durable
+    def remove(self, fact_id: int) -> None: ...                   # write-through, after supersede/forget
+    # retrieve() publishes memory.recall_completed ITSELF (§9.1.3); similar() publishes nothing (not a recall).
+
+
+class TextModel(Protocol):               # the cheap off-turn-path text model for §7.8 (§9.4 catalog)
+    async def judge_supersession(self, *, new_fact: str,
+                                 candidates: Sequence[tuple[int, str]]) -> Sequence[int]: ...  # subset of input ids
 ```
 
 `RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap). The tool *dispatch* is `ConversationService`'s (#125): it parses the call and runs it against the injected **`MemoryTools`** port — never the concrete `MemoryService` (P2/P5) — so the composition root injects the service and `ConvSvc` names only the port. The three tool *declarations* (`TOOL_SCHEMA`, §6.6) and the §7.6 capability instructions ship in `services/tools.py` and are seeded into the session's cached prefix by `main` (a `remember_fact` on a barge-in-approximate turn is declined — §6.2.4/§7.6). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
+
+The five **memory ports** are M7 (AVID-114). `FactRepository` (#117) is durable fact storage behind `SqliteFactRepo`; `Retriever` (#120) is the §7.7 read path + its §8.5 write-through numpy matrix behind `HybridRetriever`; `Embedder` (#118/#119, §9.3) is text→vector behind `LocalMiniLmEmbedder`; `TextModel` (#122) is the cheap off-turn-path supersession judge behind an OpenAI text adapter; `MemoryTools` (#125) is the tool surface `ConversationService` dispatches to. `MemoryService` is a *service*, so it names only these ports and the composition root injects the concretes (P2/P5) — the numpy matrix, the FTS5 shadow and the vendor HTTPS client all stay on the adapter side of the boundary. Every method is `async` (SQLite and model inference are blocking I/O offloaded off the loop, P8) and every signature is numpy-free (`bytes` BLOBs, `Sequence[float]` vectors, `int` ids), so `core`/`domain` never import numpy (ADR-012).
 
 Three details worth defending:
 
@@ -935,6 +963,16 @@ Consequences, accepted:
 - `picamera2` is an optional dependency group, imported *only* inside `RealPicamera2Camera`. The import is inside the adapter module, which is imported only by the composition root, which only imports it when config says to. Nothing else in the codebase can accidentally depend on it.
 
 That last point is the payoff of P1 and P3 in a concrete, unglamorous, load-bearing way: an ugly platform constraint is contained inside one file instead of infecting the project's Python version globally.
+
+**Optional-dependency groups (as built).** `pyproject.toml` declares three, each imported lazily inside its adapter(s) so every module still loads where the group is absent:
+
+| Extra | Contents | Installed | Behind |
+|---|---|---|---|
+| `pi` | `adafruit-circuitpython-servokit`, `pyalsaaudio`, `onnxruntime`, `numpy<2`, `tokenizers` (#119) | on the Pi (`--extra pi`), never in CI | the HAL adapters + Silero VAD + the MiniLM embedder; the model blobs are Pi-gated (§14.4) |
+| `openai` | `openai`, `websockets` (#105) | on a networked host (`--extra openai`); network-gated in CI | `OpenAIRealtimeClient` — the R-10 vendor boundary |
+| `memory` | `numpy` (#120) | **in CI** (`--extra memory`) — a pure, platform-independent wheel | `HybridRetriever`'s §8.5 brute-force cosine matmul |
+
+**Why numpy is an extra and not a core dependency** is ADR-012, restated as a build fact: **runtime dependencies stay `pydantic` alone** (§3.6.4). numpy is opt-in, lives only in the `memory`/`pi` adapters, and **never enters `domain`/`core`** — the ports cross vectors as `Sequence[float]` and BLOBs as `bytes` (§9.3), and the domain-purity import-linter contract fails the build if numpy ever appears there. CI installs `--extra memory` specifically so the ranking math *is* exercised, while the `mypy` job stays numpy-free (the `numpy.*` override resolves it to `Any`, so a laptop with numpy installed and CI without it type-check identically). numpy is capped `<2` **only in the `pi` extra** (AVID-57: a numpy-2 wheel shadows the apt `simplejpeg`'s 1.x C ABI and breaks `picamera2`); the `memory` extra is uncapped.
 
 *Alternative considered:* run camera capture in a separate system-Python process, IPC over a Unix socket, keeping the main app on 3.13. Rejected for v1 — real complexity to buy a language-version preference. Revisit if 3.13-only features become compelling. Recorded as ADR-008.
 
@@ -1421,6 +1459,8 @@ questions, or anything you inferred rather than were told.
 
 "Do not store anything you inferred rather than were told" is the important line. Without it, the model confabulates facts from context and your memory fills with plausible fiction — which is far worse than an empty memory, because it's confidently wrong.
 
+> **As built (#125).** The shipped `CAPABILITY_INSTRUCTIONS` (`avid/services/tools.py`) is this block **verbatim**, plus two trigger lines for the other two tools — *"when the user asks about something they told you before that is not already in your context, call recall"* and *"when the user asks you to forget something, call forget."* — seeded into the session's cached instruction prefix by `main` (§6.2.2). The `remember_fact.kind` enum in the tool schema is **derived from the domain `FACT_KINDS` tuple**, so it cannot drift from the §8.3 `CHECK` the database enforces — the model is structurally prevented from inventing a seventh kind. `ConversationService` declines a `remember_fact` on a barge-in-*approximate* turn (§6.2.4): a truncated transcript is not a reliable thing to persist.
+
 ## 7.7 Retrieval and ranking
 
 **Adopted: the Generative Agents scoring model** (Park et al., UIST 2023, arXiv:2304.03442), which remains the reference design.
@@ -1443,6 +1483,8 @@ Each component min-max normalised to [0,1]; the paper uses **equal weights (α=�
 
 Vector search alone fails on proper nouns — "Maya" embeds to something generic and won't reliably retrieve the sister fact. So: **SQLite FTS5 keyword search ∪ vector search**, merged, then scored. Mem0's stack fuses semantic + keyword + entity matching in parallel passes and reports **92.5 on LoCoMo / 94.4 on LongMemEval at <7,000 tokens per retrieval** — an order of magnitude under full-context stuffing. The lesson we take is not their numbers; it's that *hybrid beats pure-vector, and small retrieval beats large*.
 
+> **As built (#120).** `HybridRetriever` (`avid/adapters/retrieval.py`) is exactly this: it embeds the query, does one matmul over the pre-normalised §8.5 matrix, unions those ids with `FactRepository.keyword_search`'s FTS5/bm25 hits, ranks the union with §7.7's `rank_candidates`, and publishes `memory.recall_completed` (§9.1.3). The retrieval eval set (#115) scored the wired retriever at **recall@5 = 0.54** — strong on proper-noun (0.80) and direct (0.80) queries, weak on paraphrase (0.10) and negatives (0.00). That split is honest: the CI-side `FakeEmbedder` is bag-of-words (real semantic recall is `LocalMiniLmEmbedder`'s job, #119, proven on the Pi), and the **relevance floor is deliberately deferred** — `n_returned` currently returns the top-k without a hard cosine cutoff, so a negative query still returns its best-but-irrelevant matches. Setting that floor is a tuning decision left for a measured pass, not guessed now.
+
 ### Vector storage — ADR-005, confirmed
 
 **v1: embeddings as SQLite BLOBs + pre-normalised numpy brute-force cosine (single matmul).**
@@ -1455,7 +1497,7 @@ Not sqlite-vec. The research is clear on why:
 
 Numpy brute-force over pre-normalised 384-dim vectors is a two-line function with no dependency risk. **Adopt sqlite-vec when it hits 1.0 and we have >50k facts**, i.e. probably never for a single-user robot.
 
-**Scale thresholds (SPK-3 measures these on-device):**
+**Scale thresholds (the `Expected` column is design estimate — SPK-3 / #127 measures the real on-device latency and folds the numbers here; not yet run as of M7's build-out):**
 
 | Facts | Expected | Action |
 |---|---|---|
@@ -1497,6 +1539,8 @@ store_fact(F_new):
 Retrieval defaults to `WHERE superseded_by IS NULL`. History remains queryable but never contaminates the present.
 
 Step 3 is a **synchronous LLM call inside a tool handler**. Isn't that a latency violation? No — §6.6's async function calling means the model handles the wait gracefully, and this only fires on fact-writes with a near-duplicate, which is rare. But it is the highest-latency path in the system and it must be measured at M7, not assumed.
+
+> **As built (#122).** `MemoryService.store_fact` (`avid/services/memory.py`) implements this pseudocode, durable-before-return then publishing `memory.fact_stored`/`memory.fact_superseded`. The **cosine threshold is `0.85` and `k = 5`** exactly as above — injected from `[memory] supersession_threshold` / `supersession_k` (P7, defaults in `avid/core/config.py`), not hard-coded. Step 3's judgement is the `TextModel.judge_supersession` port (§3.9.1): the real adapter is an OpenAI text client, the fake decides in-process, and it returns only the ids genuinely superseded — a subset of the candidates, `()` for none, never a guess (the gap-year rule below).
 
 **The gap-year problem** — the same structure as LACPA's predecessor-acknowledgement rule, as it happens. If the user says "I drink coffee at 8" (T1), goes quiet for a year, then "I've switched to tea" (T2), what was true in between? We record the supersession timestamp, not a retroactive claim. The robot knows tea is current and coffee was previous; it does not invent a switch date. **Do not let the extraction model guess at this.** Unknown is a valid answer and a confabulated date is a bug.
 
@@ -1568,6 +1612,8 @@ Not ISO-8601 TEXT. §7.7 computes `0.5 ** ((now - last_accessed_at) / (14*86400)
 **IDs are `INTEGER PRIMARY KEY`** — i.e. rowid aliases. No UUIDs. There is one device, one writer, no distributed anything. A UUID here would be cargo-culted cost: 16 bytes and a lost rowid optimisation to solve a merge problem we will never have.
 
 ## 8.3 Physical schema (v1)
+
+> **As built (#117).** The DDL below is the **verbatim** shipped `avid/adapters/migrations/0001_initial.sql` — the spec block and the file are byte-identical, not a sketch that drifted. The file ships inside the wheel and is the single source the checksummed runner applies (§8.6); `FakeFactRepository`/`FakeEpisodeStore` run this same SQL at `":memory:"`, so the simulator's schema *is* the Pi's (P6). All of `facts`, `routines`, `triggers`, `proactive_log`, `episodes`, the `facts_fts` FTS5 shadow + its sync triggers, and `schema_migrations` exist as written.
 
 ```sql
 -- ─────────────────────────────────────────────────────────────
@@ -1746,6 +1792,8 @@ Write-through, rebuilt on boot. At 5,000 facts the matrix is **7.7 MB** — invi
 
 The invariant: **SQLite is truth, the matrix is an index.** Any divergence is a bug, and the boot-time rebuild is the reconciliation. `forget()` must remove from both, in that order.
 
+> **As built (#120/#122).** The write-through matrix lives in `HybridRetriever` behind the `Retriever` port (§3.9.1). `MemoryService.start` calls `retriever.rebuild()` at boot — the one reconciliation — which loads every live `(id, BLOB)` via `FactRepository.load_embeddings` and stacks them into the `N×384` float32 matrix; the numpy `import` and the `vstack` run **off the loop via `asyncio.to_thread`**, while the per-query matmul stays inline (sub-millisecond at the low thousands a single-user robot reaches, well under the 50 ms slow-callback gate, P8). `append`/`remove` are the synchronous in-memory upkeep on a durable write, and `forget` removes from SQLite then matrix, in that order.
+
 ## 8.6 Migrations
 
 **Plain numbered SQL files, applied in order, checksummed. No Alembic.**
@@ -1761,6 +1809,8 @@ The runner is ~50 lines: read `schema_migrations`, find unapplied versions, veri
 Alembic is excellent and it is for teams with a shared database and an ORM. We have neither. Adding it here buys autogeneration we don't want (§8.2's conventions are deliberate; a generator would fight them) at the price of a dependency and a mental model.
 
 **Rule:** migrations are append-only and never edited after merge. The checksum column enforces this — editing an applied migration fails the boot, loudly, rather than silently diverging your dev DB from the Pi's.
+
+> **As built (#117).** The runner is `migrate()` in `avid/adapters/sqlite.py` (~50 lines, no dependencies), invoked lazily on first store use. For each already-applied version it recomputes the file's **sha256 and compares it to the `checksum` recorded in `schema_migrations`** — a mismatch `raise`s at boot, naming the changed file, so the append-only rule is now **mechanically enforced, not merely a convention**. Unapplied versions run in ascending order, one transaction each; `now` (epoch seconds, §8.2) stamps `applied_at` and is injected (P7). A companion `check_fts5()` asserts the SQLite build has FTS5 up front, so §8.3's `facts_fts` virtual table can never fail cryptically mid-migration. Only `0001_initial.sql` exists so far.
 
 ## 8.7 pgvector migration path
 
@@ -2072,11 +2122,13 @@ Presence events are **hysteresis-filtered inside PresenceService**, not raw dete
 | `memory.fact_stored` | `fact_id: int`, `kind: FactKind`, `importance: int` | MemoryService | BehaviorService, Observability | DROP_NEWEST |
 | `memory.fact_superseded` | `old_id: int`, `new_id: int` | MemoryService | BehaviorService, Observability | DROP_NEWEST |
 | `memory.fact_deleted` | `fact_id: int` | MemoryService | BehaviorService, Observability | DROP_NEWEST |
-| `memory.recall_completed` | `query: str`, `n_returned: int`, `latency_ms: float` | MemoryService | Observability | DROP_NEWEST |
+| `memory.recall_completed` | `query: str`, `n_returned: int`, `latency_ms: float` | HybridRetriever | Observability | DROP_NEWEST |
 
 **These are published *after* the write is durable, never before.** §3.7.3's diagram: commit, then publish. They are notifications that something already happened — which is the only reason it's safe to put them on an at-most-once bus (§9.1.4).
 
 `memory.fact_stored` → `BehaviorService` is how UC-02 becomes UC-03 with zero coupling. `MemoryService` does not know the behaviour engine exists.
+
+> **As built (#116/#120/#122).** All four names + payloads ship as written (`avid/domain/memory.py`, `MemoryFactStored`/`MemoryFactSuperseded`/`MemoryFactDeleted`/`MemoryRecallCompleted`). One publisher correction: the three `fact_*` events come from `MemoryService` (the write path), but **`memory.recall_completed` is published by the `HybridRetriever`** (the read path, `avid/adapters/retrieval.py`) — `retrieve()` emits it itself with a monotonic-derived `latency_ms` (§9.1.1, never wall-clock), so `MemoryService.retrieve` must not re-publish. `n_returned` is the count actually returned (0 for a clean miss); the deferred relevance floor (§7.7) means a negative query can still return its best-but-irrelevant top-k.
 
 #### `behavior`
 
@@ -2171,8 +2223,8 @@ class Clock(Protocol):
     async def sleep(self, seconds: float) -> None: ...
 
 class Embedder(Protocol):            # ADR-011, §7.4
-    async def embed(self, text: str) -> NDArray[np.float32]:
-        """Returns a PRE-NORMALISED vector. §8.2."""
+    async def embed(self, text: str) -> Sequence[float]:   # NOT NDArray — see below
+        """Returns a PRE-NORMALISED, unit-length vector. §8.2."""
     @property
     def dimensions(self) -> int: ...
 
@@ -2180,6 +2232,10 @@ class VoiceActivityDetector(Protocol):   # §6.3
     def is_speech(self, frame: AudioChunk) -> bool:
         """MUST return in <5ms — called on every 30ms frame."""
 ```
+
+> **As built (#118/#119):** `Embedder.embed` returns a plain **`Sequence[float]`**, not `NDArray[np.float32]`. The vector crosses the port numpy-free on purpose — `core` and `domain` never import numpy (P1, ADR-012 keeps runtime deps pydantic-alone), so `FakeEmbedder` needs no third-party dependency and the domain-purity test stays green. Packing the floats into the §8.2 384×f32 LE BLOB is the repository's job (`FactRepository.add`), and stacking them into the search matrix is the index adapter's (§8.5); numpy is the adapters' private business, downstream of this port. `LocalMiniLmEmbedder` (real, ONNX) and `FakeEmbedder` (the P6 simulator) both satisfy it.
+
+The **memory-storage ports** M7 added — `FactRepository`, `Retriever`, `TextModel`, `MemoryTools`, `EpisodeStore` — are defined normatively in **§3.9.1** (like the HAL ports), not restated here.
 
 `Clock` is a port for one reason: M10's gate is "the coffee scenario, unprompted." With `FakeClock` that test runs in 40 ms. Without it, you wait until 07:55. Injecting the clock is the difference between a test suite you run on every commit and one you run once, nervously, in the morning.
 
