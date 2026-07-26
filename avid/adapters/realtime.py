@@ -425,7 +425,21 @@ class OpenAIRealtimeClient:
                     "turn_detection": {
                         **self._turn_detection,
                         "create_response": True,
-                        "interrupt_response": True,
+                        # FALSE, and this is load-bearing. Barge-in is OURS (§6.2.4, #104): local
+                        # VAD cuts the speaker, then this adapter sends truncate(item, played_ms)
+                        # + cancel with the ms the device really emitted. Letting the server also
+                        # interrupt is not redundancy, it is a second cancel racing ours on worse
+                        # information.
+                        #
+                        # It is actively fatal here because of ADR-007's gate: `AudioService.mic()`
+                        # yields *whole utterances*, handed over only once the local VAD has closed
+                        # the turn. So the server sees each utterance arrive as one burst — and a
+                        # burst arriving while a reply is in flight looks exactly like a barge-in,
+                        # even though the user finished speaking before we sent it. Observed on the
+                        # Pi: every response went `response.created` -> `response.done` with no
+                        # output items and zero usage, so the robot only ever played its thinking
+                        # cue. The user hears "one second", forever.
+                        "interrupt_response": False,
                     },
                 },
                 "output": {
