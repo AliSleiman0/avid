@@ -1077,11 +1077,13 @@ What WebSocket costs us, stated plainly so it isn't a surprise in M5: **with Web
 # adapters/realtime/session.py — the shape, not the code
 
 SESSION_CONFIG = {
+    "type": "realtime",                             # GA shape — see the note below
     "model": "gpt-realtime-mini-2025-12-15",   # PINNED. See §6.10.
     "instructions": composed_instruction_block,     # §6.4 — STATIC for session life
     "audio": {
         "input": {
-            "format": "pcm16",                      # 24 kHz mono 16-bit
+            "format": {"type": "audio/pcm", "rate": 24000},   # API MINIMUM — adapter resamples up
+            "transcription": {"model": "whisper-1"},          # or no user transcript ever arrives
             "turn_detection": {
                 "type": "server_vad",
                 "threshold": 0.5,
@@ -1091,7 +1093,10 @@ SESSION_CONFIG = {
                 "interrupt_response": True,
             },
         },
-        "output": {"format": "pcm16", "voice": "cedar"},
+        "output": {
+            "format": {"type": "audio/pcm", "rate": 24000},
+            "voice": "cedar",
+        },
     },
     "tools": TOOL_SCHEMA,                            # §6.6 — STATIC for session life
     "max_output_tokens": 512,                        # §6.10 — a cost guardrail, not a style choice
@@ -1101,6 +1106,28 @@ SESSION_CONFIG = {
 
 Notes on the non-obvious choices:
 
+- **This is the GA shape, and the beta one is gone.** The beta interface — selected by an
+  `OpenAI-Beta: realtime=v1` header, with a bare `"pcm16"` format string and no session `type` — is
+  disabled server-side and closes the socket with `4000
+  invalid_request_error.beta_api_shape_disabled`. Both `rate` fields are **required**; omitting one
+  earns `missing_required_parameter: session.audio.output.format.rate`. This is R-10 and the §6.10
+  volatility warning arriving exactly as predicted, and it cost one adapter and two config keys —
+  the blast radius the architecture promised. Found on the adapter's **first live run** (#106 prep),
+  because every `assets/sessions/` fixture and therefore all of CI ran against `replay`.
+- **`audio.input.transcription` is not optional for us.** Realtime does not transcribe the user's
+  speech unless the session asks it to. Without this key no
+  `conversation.item.input_audio_transcription.completed` frame arrives, so `UserTranscript` never
+  crosses the port, `conversation.user_transcribed` is never published, and LISTENING→THINKING never
+  fires — the robot answers aloud while the state machine believes nothing was said. The fixtures
+  all *record* that frame, which is why only a live session could reveal its absence.
+- **24 kHz is the API's floor, and our capture is 16 kHz — so the adapter resamples.** Anything
+  lower is rejected outright (`integer_below_min_value`: "Expected a value >= 24000"), while
+  capture cannot simply be raised: ADR-007's Silero gate accepts **only 8 or 16 kHz**. Both
+  constraints are real and neither side can move, so `send_audio` converts 16 kHz → 24 kHz inside
+  the adapter — a vendor format demand is exactly what an adapter exists to absorb (CLAUDE.md §3),
+  and nothing upstream (mic, VAD, `AudioService`, the port) learns that 24 kHz matters. The
+  resampler is pure stdlib, keeping the default runtime pydantic-only (ADR-012). It **refuses to
+  downsample** rather than alias quietly — the #146 lesson, one layer down.
 - **`model` and `voice` are fixed at connect time.** Everything else is updatable via `session.update`. This matters for §6.5: you cannot A/B two voices inside one session.
 - **`instructions` and `tools` are static for the session's life.** This is not laziness — it is the entire cost strategy (§6.10). They form the cacheable prefix. Mutating them mid-session throws away the ~98.75% caching discount on every subsequent turn.
 - **`voice: cedar`** — Cedar and Marin are GA voices exclusive to the Realtime API.

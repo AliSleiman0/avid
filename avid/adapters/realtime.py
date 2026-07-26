@@ -50,6 +50,7 @@ import asyncio
 import base64
 import json
 import wave
+from array import array
 from collections.abc import AsyncIterator, Awaitable, Sequence
 from pathlib import Path
 from typing import Any, assert_never
@@ -78,6 +79,49 @@ _S16_WIDTH_BYTES = 2  # S16_LE: 2 bytes/sample
 
 # The Realtime WebSocket endpoint (SDS §6.2.1 — WSS, server key, no ephemeral token dance).
 _REALTIME_URL = "wss://api.openai.com/v1/realtime"
+
+# The rate we must DECLARE and SEND on the input side. Not a preference: the GA API rejects
+# anything lower with `integer_below_min_value` ("Expected a value >= 24000"). Our capture is
+# 16 kHz because Silero v5 — the ADR-007 local gate — accepts only 8 or 16 kHz, so the two
+# constraints genuinely conflict and :meth:`OpenAIRealtimeClient.send_audio` resamples between
+# them. Keep it equal to _ASSISTANT_SAMPLE_RATE: one wire rate in both directions.
+_WIRE_INPUT_RATE = _ASSISTANT_SAMPLE_RATE
+
+
+def _resample_pcm16(pcm: bytes, *, source_rate: int, target_rate: int) -> bytes:
+    """Linearly resample mono S16_LE *pcm* from *source_rate* to *target_rate*.
+
+    Stdlib only (``array``), because this sits on the audio path and the default runtime is
+    pydantic-only (ADR-012) — pulling numpy in here would drag the lazy ``memory`` extra into
+    every conversation.
+
+    Linear interpolation is honest for the case we have (16 kHz → 24 kHz, *up*): the source is
+    already band-limited to 8 kHz, so interpolating invents no aliases — it only gently attenuates
+    the top octave. **Downsampling is refused rather than faked**: doing it without a low-pass
+    would fold high frequencies back as aliasing, and a quietly wrong microphone is precisely the
+    class of defect #146 cost us a gate to learn.
+    """
+    if source_rate == target_rate:
+        return pcm
+    if source_rate > target_rate:
+        raise ValueError(
+            f"refusing to downsample {source_rate} Hz to {target_rate} Hz without an "
+            f"anti-alias filter — capture at {target_rate} Hz or lower instead"
+        )
+    src = array("h")
+    src.frombytes(pcm)
+    if not src:
+        return pcm
+    count = len(src) * target_rate // source_rate
+    step = source_rate / target_rate
+    out = array("h")
+    for index in range(count):
+        position = index * step
+        left = int(position)
+        right = min(left + 1, len(src) - 1)
+        frac = position - left
+        out.append(int(src[left] + (src[right] - src[left]) * frac))
+    return out.tobytes()
 
 
 def _load_wav(path: Path) -> AudioChunk:
@@ -323,6 +367,7 @@ class OpenAIRealtimeClient:
         instructions: str,
         max_output_tokens: int,
         turn_detection: dict[str, Any],
+        transcription_model: str,
         tools: Sequence[dict[str, Any]] = (),
     ) -> None:
         self._api_key = (
@@ -333,6 +378,7 @@ class OpenAIRealtimeClient:
         self._instructions = instructions
         self._max_output_tokens = max_output_tokens
         self._turn_detection = turn_detection
+        self._transcription_model = transcription_model
         # Tool declarations (§6.6) are session-level and part of the cached prefix (§6.2.2), so
         # they are fixed at construction, never sent per-turn. Empty until #125 supplies the
         # recall/forget/remember_fact schemas via the composition root; a vendor-shaped dict
@@ -363,17 +409,48 @@ class OpenAIRealtimeClient:
         if memory_block:
             instructions = f"{instructions}\n\n{memory_block}"
         config: dict[str, Any] = {
+            # GA shape (§6.10 volatility, R-10). The beta interface — `OpenAI-Beta: realtime=v1`
+            # plus a bare "pcm16" format string and no session type — is switched off server-side
+            # and closes the socket with 4000 invalid_request_error.beta_api_shape_disabled.
+            "type": "realtime",
             "instructions": instructions,
             "audio": {
                 "input": {
-                    "format": "pcm16",
+                    "format": {"type": "audio/pcm", "rate": _WIRE_INPUT_RATE},
+                    # Without this the API never transcribes the user and
+                    # `conversation.item.input_audio_transcription.completed` never arrives — so
+                    # `UserTranscript` never crosses the port, `conversation.user_transcribed` is
+                    # never published, and LISTENING→THINKING never fires. The turn silently dies.
+                    "transcription": {"model": self._transcription_model},
                     "turn_detection": {
                         **self._turn_detection,
                         "create_response": True,
-                        "interrupt_response": True,
+                        # FALSE, and this is load-bearing. Barge-in is OURS (§6.2.4, #104): local
+                        # VAD cuts the speaker, then this adapter sends truncate(item, played_ms)
+                        # + cancel with the ms the device really emitted. Letting the server also
+                        # interrupt is not redundancy, it is a second cancel racing ours on worse
+                        # information.
+                        #
+                        # It is actively fatal here because of ADR-007's gate: `AudioService.mic()`
+                        # yields *whole utterances*, handed over only once the local VAD has closed
+                        # the turn. So the server sees each utterance arrive as one burst — and a
+                        # burst arriving while a reply is in flight looks exactly like a barge-in,
+                        # even though the user finished speaking before we sent it. Observed on the
+                        # Pi: every response went `response.created` -> `response.done` with no
+                        # output items and zero usage, so the robot only ever played its thinking
+                        # cue. The user hears "one second", forever.
+                        "interrupt_response": False,
                     },
                 },
-                "output": {"format": "pcm16", "voice": self._voice},
+                "output": {
+                    # 24 kHz is what the model emits and what _translate stamps on every
+                    # AssistantAudioChunk; GA requires the rate stated rather than implied.
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": _ASSISTANT_SAMPLE_RATE,
+                    },
+                    "voice": self._voice,
+                },
             },
             "max_output_tokens": self._max_output_tokens,
         }
@@ -395,10 +472,9 @@ class OpenAIRealtimeClient:
         block, and it carries the static prefix + that block as layer 4 (§6.2.2, AC-2)."""
         import websockets  # lazy, adapter-local optional group (AC-2, ADR-008)
 
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        # No `OpenAI-Beta: realtime=v1`: that header selects the beta interface, which is disabled
+        # server-side and rejects the GA session shape this adapter sends (see _session_config).
+        headers = {"Authorization": f"Bearer {self._api_key}"}
         connect = websockets.connect(
             f"{_REALTIME_URL}?model={self._model}", additional_headers=headers
         )
@@ -424,11 +500,24 @@ class OpenAIRealtimeClient:
 
     async def send_audio(self, chunk: AudioChunk) -> None:
         """Append one captured mic frame to the input buffer (``input_audio_buffer.append``).
-        Base64 is the wire encoding for PCM on the Realtime protocol. Non-blocking (P8)."""
+
+        Resampled to :data:`_WIRE_INPUT_RATE` first, because **the API refuses anything below
+        24 kHz** (``integer_below_min_value``: "Expected a value >= 24000") while the Pi captures
+        at 16 kHz — the rate ADR-007's Silero gate needs, since Silero v5 accepts only 8/16 kHz.
+        Both constraints are real and neither side can move, so the conversion lives *here*: a
+        vendor's format demand is exactly what an adapter exists to absorb (CLAUDE.md §3). Nothing
+        upstream — mic, VAD, AudioService, the port — learns that 24 kHz matters.
+
+        Base64 is the wire encoding for PCM on the Realtime protocol. Non-blocking (P8): the
+        resample is pure-stdlib integer work on a 20 ms frame (320 → 480 samples), microseconds,
+        and deliberately not numpy — the default runtime stays pydantic-only (ADR-012)."""
+        pcm = _resample_pcm16(
+            chunk.pcm, source_rate=chunk.sample_rate, target_rate=_WIRE_INPUT_RATE
+        )
         await self._send(
             {
                 "type": "input_audio_buffer.append",
-                "audio": base64.b64encode(chunk.pcm).decode("ascii"),
+                "audio": base64.b64encode(pcm).decode("ascii"),
             }
         )
 

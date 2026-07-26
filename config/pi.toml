@@ -37,6 +37,9 @@ frames_dir = "/var/lib/robot/frames"
 [ai]
 model             = "gpt-realtime-mini-2025-12-15"   # PINNED. §6.10.
 voice             = "cedar"
+# The model that transcribes the USER. Realtime does not transcribe input unless asked;
+# without it no conversation.user_transcribed is ever published (SDS §6.2.2). PINNED.
+transcription_model = "whisper-1"
 max_output_tokens = 512                                  # §6.10 guardrail
 personality       = "config/personality/default.toml"    # §6.5
 

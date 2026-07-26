@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+import avid.adapters.realtime as rt
 from avid.adapters.clock import FakeClock
 from avid.adapters.realtime import (
     OpenAIRealtimeClient,
@@ -86,6 +87,7 @@ def client(request: pytest.FixtureRequest) -> RealtimeClient:
             instructions="You are a test.",
             max_output_tokens=512,
             turn_detection={"type": "server_vad"},
+            transcription_model="whisper-1",
         )
     return ReplayRealtimeClient.from_dir(_SESSIONS / "two_turn", clock=FakeClock())
 
@@ -364,6 +366,7 @@ def test_openai_client_repr_never_leaks_the_key() -> None:
         instructions="You are a test.",
         max_output_tokens=512,
         turn_detection={"type": "server_vad"},
+        transcription_model="whisper-1",
     )
     assert "sk-super-secret-value" not in repr(client)
     assert isinstance(client, RealtimeClient)  # port-shaped without a connection (P6)
@@ -377,6 +380,7 @@ def _openai(**overrides: object) -> OpenAIRealtimeClient:
         "instructions": "You are a test.",
         "max_output_tokens": 512,
         "turn_detection": {"type": "server_vad"},
+        "transcription_model": "whisper-1",
     }
     kwargs.update(overrides)
     return OpenAIRealtimeClient(**kwargs)  # type: ignore[arg-type]
@@ -403,6 +407,55 @@ def test_tools_are_declared_in_the_session_update_prefix() -> None:
     tool = {"type": "function", "name": "recall", "parameters": {}}
     assert "tools" not in _openai()._session_config()  # empty default — no key at all
     assert _openai(tools=[tool])._session_config()["tools"] == [tool]
+
+
+def test_the_session_update_uses_the_ga_shape_not_the_disabled_beta_one() -> None:
+    """The GA session shape, pinned (§6.10 volatility, R-10).
+
+    All three assertions are regressions from the **first live run this adapter ever had** (the
+    #106 prep — CI had only ever exercised the ``replay`` fake). The beta interface is switched off
+    server-side: a bare ``"pcm16"`` format string with no session ``type`` gets the socket closed
+    with ``4000 invalid_request_error.beta_api_shape_disabled``, and omitting either ``rate`` earns
+    ``missing_required_parameter: session.audio.output.format.rate``.
+
+    Both rates are 24 kHz because that is the API's **floor** on input, not because it is the mic's
+    rate — the Pi captures 16 kHz (Silero takes only 8/16 kHz) and ``send_audio`` resamples up.
+    """
+    config = _openai()._session_config()
+
+    assert config["type"] == "realtime"
+    assert config["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
+    assert config["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
+
+
+def test_mic_audio_is_resampled_up_to_the_api_floor() -> None:
+    """16 kHz capture reaches the wire as 24 kHz (a 3:2 sample count), and downsampling is refused.
+
+    The API rejects input below 24 kHz outright; ADR-007's Silero gate accepts only 8/16 kHz. Both
+    constraints are real, so the adapter absorbs the conflict — which means the *count* of samples
+    it puts on the wire must change, and a regression here is inaudible to every offline test but
+    fatal on hardware."""
+    frame = b"\x00\x10" * 320  # 20 ms of 16 kHz mono S16_LE
+    out = rt._resample_pcm16(frame, source_rate=16000, target_rate=24000)
+
+    assert len(out) == 480 * 2  # 320 samples in, 480 out — the 3:2 ratio
+    assert rt._resample_pcm16(frame, source_rate=24000, target_rate=24000) is frame
+    with pytest.raises(ValueError, match="refusing to downsample"):
+        rt._resample_pcm16(frame, source_rate=48000, target_rate=24000)
+
+
+def test_the_session_update_asks_the_api_to_transcribe_the_user() -> None:
+    """Realtime does **not** transcribe input audio unless the session asks it to.
+
+    Without this key no ``conversation.item.input_audio_transcription.completed`` frame ever
+    arrives, so ``UserTranscript`` never crosses the port, ``conversation.user_transcribed`` is
+    never published, and LISTENING→THINKING never fires: the robot answers out loud while the
+    state machine believes nothing was said. Every ``assets/sessions/`` fixture *records* that
+    frame, which is precisely why replay-based CI could not see it missing — it took one live
+    session (#106 prep) to find, and this test is what stops it coming back."""
+    config = _openai(transcription_model="whisper-1")._session_config()
+
+    assert config["audio"]["input"]["transcription"] == {"model": "whisper-1"}
 
 
 def test_memory_block_is_appended_after_the_static_instructions() -> None:

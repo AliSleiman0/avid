@@ -165,7 +165,27 @@ class SileroVad:
         if self._session is None:
             import onnxruntime
 
-            self._session = onnxruntime.InferenceSession(str(self._model_path))
+            # Single-threaded, non-spinning — and both halves are load-bearing on a 4-core Pi.
+            #
+            # ONNX Runtime defaults to one intra-op thread PER CORE and, between inferences,
+            # those threads **spin-wait** rather than sleep. For Silero that is a catastrophic
+            # default: the model is tiny (a 32 ms window, ~0.4 ms per call) so the parallelism
+            # buys nothing, while the spin burns three cores permanently. Measured on the Pi at
+            # the #106 gate: 306% CPU, 11m28s of CPU in 3m44s of wall clock, with the audio loop
+            # starved to the point that the robot stopped hearing anything at all.
+            #
+            # It went unnoticed through the sealed M4 gate because nothing else wanted the CPU
+            # there — the loopback had no websocket, no playback stream and no resampling to
+            # compete with. M5 put real work on the other cores and the starvation surfaced.
+            options = onnxruntime.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+            # Belt and braces: even at one thread, the pool spins between calls unless told not to.
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            self._session = onnxruntime.InferenceSession(
+                str(self._model_path), sess_options=options
+            )
             self._state = np.zeros((2, 1, 128), dtype=np.float32)
             self._sr_arg = np.array(self._sample_rate, dtype=np.int64)
         return np
