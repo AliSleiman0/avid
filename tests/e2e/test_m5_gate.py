@@ -557,12 +557,19 @@ def test_the_gate_rejects_silence_slow_turns_and_an_unaffordable_robot() -> None
     # O7: fast and mute-free, but unaffordable.
     assert _verdict(demo, [turn(400.0)], projected_usd=25.01) == 1
     assert _verdict(demo, [turn(400.0)], projected_usd=24.99) == 0
-    # A wrong-rate / dropping speaker: 2000 ms "played" in 1200 ms of wall clock.
+    # A wrong-rate / dropping speaker: 2000 ms "played" in 1200 ms of wall clock. The device
+    # cannot emit two seconds of audio in one — that shortfall is the #146 defect.
     assert _verdict(demo, [turn(400.0, played=2000, elapsed=1200.0)]) == 1
     assert (
         _verdict(demo, [turn(400.0, played=2000, elapsed=1200.0)], check_playback=False)
         == 0
     )
+    # …but the OPPOSITE direction is normal at M5 and must not fail. Assistant audio arrives as
+    # streamed deltas, so wall time includes every inter-delta network gap; the real numbers are
+    # turn 4 of the #106 run (1650 ms played over 3099 ms), a cold reconnect that the symmetric
+    # M4-era check reported as a speaker fault.
+    assert _verdict(demo, [turn(400.0, played=1650, elapsed=3099.0)]) == 0
+    assert _verdict(demo, [turn(400.0, played=2000, elapsed=20000.0)]) == 0
     # No turns at all is a failure, never a vacuous pass.
     assert _verdict(demo, []) == 1
 
