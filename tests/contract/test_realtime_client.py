@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+import avid.adapters.realtime as rt
 from avid.adapters.clock import FakeClock
 from avid.adapters.realtime import (
     OpenAIRealtimeClient,
@@ -86,6 +87,7 @@ def client(request: pytest.FixtureRequest) -> RealtimeClient:
             instructions="You are a test.",
             max_output_tokens=512,
             turn_detection={"type": "server_vad"},
+            transcription_model="whisper-1",
         )
     return ReplayRealtimeClient.from_dir(_SESSIONS / "two_turn", clock=FakeClock())
 
@@ -416,15 +418,30 @@ def test_the_session_update_uses_the_ga_shape_not_the_disabled_beta_one() -> Non
     with ``4000 invalid_request_error.beta_api_shape_disabled``, and omitting either ``rate`` earns
     ``missing_required_parameter: session.audio.output.format.rate``.
 
-    The input rate is injected rather than assumed because this adapter **never resamples** — it
-    base64s whatever PCM ``send_audio`` is handed — so a declared rate that disagrees with the mic's
-    is a lie the API cannot detect and the user hears as a chipmunk (the #146 defect, one layer up).
+    Both rates are 24 kHz because that is the API's **floor** on input, not because it is the mic's
+    rate — the Pi captures 16 kHz (Silero takes only 8/16 kHz) and ``send_audio`` resamples up.
     """
-    config = _openai(input_sample_rate=16000)._session_config()
+    config = _openai()._session_config()
 
     assert config["type"] == "realtime"
-    assert config["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 16000}
+    assert config["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert config["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
+
+
+def test_mic_audio_is_resampled_up_to_the_api_floor() -> None:
+    """16 kHz capture reaches the wire as 24 kHz (a 3:2 sample count), and downsampling is refused.
+
+    The API rejects input below 24 kHz outright; ADR-007's Silero gate accepts only 8/16 kHz. Both
+    constraints are real, so the adapter absorbs the conflict — which means the *count* of samples
+    it puts on the wire must change, and a regression here is inaudible to every offline test but
+    fatal on hardware."""
+    frame = b"\x00\x10" * 320  # 20 ms of 16 kHz mono S16_LE
+    out = rt._resample_pcm16(frame, source_rate=16000, target_rate=24000)
+
+    assert len(out) == 480 * 2  # 320 samples in, 480 out — the 3:2 ratio
+    assert rt._resample_pcm16(frame, source_rate=24000, target_rate=24000) is frame
+    with pytest.raises(ValueError, match="refusing to downsample"):
+        rt._resample_pcm16(frame, source_rate=48000, target_rate=24000)
 
 
 def test_the_session_update_asks_the_api_to_transcribe_the_user() -> None:

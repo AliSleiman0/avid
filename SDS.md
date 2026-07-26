@@ -1082,7 +1082,7 @@ SESSION_CONFIG = {
     "instructions": composed_instruction_block,     # §6.4 — STATIC for session life
     "audio": {
         "input": {
-            "format": {"type": "audio/pcm", "rate": 16000},   # the MIC's rate — we never resample
+            "format": {"type": "audio/pcm", "rate": 24000},   # API MINIMUM — adapter resamples up
             "transcription": {"model": "whisper-1"},          # or no user transcript ever arrives
             "turn_detection": {
                 "type": "server_vad",
@@ -1120,11 +1120,14 @@ Notes on the non-obvious choices:
   crosses the port, `conversation.user_transcribed` is never published, and LISTENING→THINKING never
   fires — the robot answers aloud while the state machine believes nothing was said. The fixtures
   all *record* that frame, which is why only a live session could reveal its absence.
-- **The input `rate` must be the microphone's, not the model's.** The adapter base64s exactly the
-  PCM it is handed and never resamples, so the declared rate is a promise about our own bytes. Pi
-  capture is 16 kHz while the model emits 24 kHz; declaring 24 kHz for a 16 kHz mic is a lie the API
-  cannot detect and the user hears as a chipmunk — the #146 defect one layer up. Hence
-  `[microphone] sample_rate` is injected into the adapter (P7).
+- **24 kHz is the API's floor, and our capture is 16 kHz — so the adapter resamples.** Anything
+  lower is rejected outright (`integer_below_min_value`: "Expected a value >= 24000"), while
+  capture cannot simply be raised: ADR-007's Silero gate accepts **only 8 or 16 kHz**. Both
+  constraints are real and neither side can move, so `send_audio` converts 16 kHz → 24 kHz inside
+  the adapter — a vendor format demand is exactly what an adapter exists to absorb (CLAUDE.md §3),
+  and nothing upstream (mic, VAD, `AudioService`, the port) learns that 24 kHz matters. The
+  resampler is pure stdlib, keeping the default runtime pydantic-only (ADR-012). It **refuses to
+  downsample** rather than alias quietly — the #146 lesson, one layer down.
 - **`model` and `voice` are fixed at connect time.** Everything else is updatable via `session.update`. This matters for §6.5: you cannot A/B two voices inside one session.
 - **`instructions` and `tools` are static for the session's life.** This is not laziness — it is the entire cost strategy (§6.10). They form the cacheable prefix. Mutating them mid-session throws away the ~98.75% caching discount on every subsequent turn.
 - **`voice: cedar`** — Cedar and Marin are GA voices exclusive to the Realtime API.
