@@ -1,0 +1,56 @@
+key loaded (164 chars), tracing 150s with /etc/robot/config.toml
+TRACE: speak whenever you like. Columns: t, event, corr, state, mic-queue depth, mic frames sent to the API.
+  29.950s  >>> client.open() #1 ...
+  30.026s  AudioSpeechStarted               corr=d170bbb9 state=LISTENING qsize=1    sent=0 ring_buffer_ms=300
+  30.747s  AudioSpeechEnded                 corr=d170bbb9 state=LISTENING qsize=41   sent=0 duration_ms=320
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state LISTENING [correlation_id=e6af1aef-19fa-4752-a5ea-020c24027ba3]
+  32.348s  AudioSpeechStarted               corr=e6af1aef state=LISTENING qsize=42   sent=0 ring_buffer_ms=300
+  32.967s  AudioSpeechEnded                 corr=e6af1aef state=LISTENING qsize=73   sent=0 duration_ms=140
+  36.602s  >>> client.open() #1 done in 6652 ms
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_PLAYBACK_STARTED in state LISTENING [correlation_id=e6af1aef-19fa-4752-a5ea-020c24027ba3]
+  37.572s  AudioPlaybackStarted             corr=e6af1aef state=LISTENING qsize=0    sent=73
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state LISTENING [correlation_id=363fce6f-6d8d-4e56-8fa4-b9d3134f6b34]
+  37.841s  AudioSpeechStarted               corr=363fce6f state=LISTENING qsize=0    sent=74 ring_buffer_ms=300
+  37.873s  ConversationTurnStarted          corr=363fce6f state=SPEAKING  qsize=0    sent=76
+  37.874s  ConversationUserTranscribed      corr=363fce6f state=SPEAKING  qsize=0    sent=76 text='Hello.'
+  37.874s  AudioPlaybackStarted             corr=363fce6f state=SPEAKING  qsize=0    sent=76
+  38.363s  AudioSpeechEnded                 corr=363fce6f state=SPEAKING  qsize=0    sent=101 duration_ms=60
+  39.388s  ConversationAssistantResponded   corr=363fce6f state=IDLE      qsize=0    sent=101 text='Hi there! How’s your day going?'
+  39.388s  AudioPlaybackFinished            corr=363fce6f state=IDLE      qsize=0    sent=101 played_ms=1500 truncated=False
+  39.388s  ConversationTurnEnded            corr=363fce6f state=IDLE      qsize=0    sent=101
+  40.320s  AudioSpeechStarted               corr=2bf5e164 state=LISTENING qsize=0    sent=102 ring_buffer_ms=300
+  42.626s  AudioSpeechEnded                 corr=2bf5e164 state=LISTENING qsize=0    sent=218 duration_ms=900
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state LISTENING [correlation_id=543f12c7-620f-4903-8db3-3cab74dee82c]
+  51.212s  AudioSpeechStarted               corr=543f12c7 state=LISTENING qsize=0    sent=219 ring_buffer_ms=300
+  51.983s  AudioSpeechEnded                 corr=543f12c7 state=LISTENING qsize=0    sent=260 duration_ms=240
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_PLAYBACK_STARTED in state LISTENING [correlation_id=543f12c7-620f-4903-8db3-3cab74dee82c]
+  52.482s  AudioPlaybackStarted             corr=543f12c7 state=LISTENING qsize=0    sent=260
+  53.594s  ConversationTurnStarted          corr=543f12c7 state=THINKING  qsize=0    sent=260
+  53.594s  ConversationUserTranscribed      corr=543f12c7 state=THINKING  qsize=0    sent=260 text="Hi. Hi, how- I'm doing good. How is your day going?"
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_PLAYBACK_FINISHED in state THINKING [correlation_id=543f12c7-620f-4903-8db3-3cab74dee82c]
+  56.197s  ConversationAssistantResponded   corr=543f12c7 state=THINKING  qsize=0    sent=260 text="I'm glad to hear you're doing well! My day’s going great so "
+  56.197s  AudioPlaybackFinished            corr=543f12c7 state=THINKING  qsize=0    sent=260 played_ms=3800 truncated=False
+  56.197s  ConversationTurnEnded            corr=543f12c7 state=THINKING  qsize=0    sent=260
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state THINKING [correlation_id=333d039e-9498-4f80-b4a4-5f1067a40628]
+  58.986s  AudioSpeechStarted               corr=333d039e state=THINKING  qsize=0    sent=261 ring_buffer_ms=300
+  59.546s  AudioSpeechEnded                 corr=333d039e state=THINKING  qsize=0    sent=291 duration_ms=120
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state THINKING [correlation_id=63d465cf-1b52-4b18-bf3d-cd7cda658115]
+  60.171s  AudioSpeechStarted               corr=63d465cf state=THINKING  qsize=0    sent=292 ring_buffer_ms=300
+  61.074s  AudioPlaybackStarted             corr=63d465cf state=SPEAKING  qsize=0    sent=339
+  61.943s  AudioSpeechEnded                 corr=63d465cf state=SPEAKING  qsize=0    sent=383 duration_ms=1060
+WARNING avid.state: ignored illegal transition: no rule for CONVERSATION_USER_TRANSCRIBED in state IDLE [correlation_id=63d465cf-1b52-4b18-bf3d-cd7cda658115]
+  64.597s  ConversationAssistantResponded   corr=63d465cf state=IDLE      qsize=0    sent=383 text='Yes, I can hear you loud and clear! Let me know what’s on yo'
+  64.597s  AudioPlaybackFinished            corr=63d465cf state=IDLE      qsize=0    sent=383 played_ms=3600 truncated=False
+  64.597s  ConversationTurnEnded            corr=63d465cf state=IDLE      qsize=0    sent=383
+  64.597s  ConversationTurnStarted          corr=63d465cf state=IDLE      qsize=0    sent=383
+  64.597s  ConversationUserTranscribed      corr=63d465cf state=IDLE      qsize=0    sent=383 text='Can you hear me? Great!'
+  71.625s  AudioSpeechStarted               corr=dea30cd4 state=LISTENING qsize=0    sent=384 ring_buffer_ms=300
+  72.567s  AudioSpeechEnded                 corr=dea30cd4 state=LISTENING qsize=0    sent=433 duration_ms=80
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state LISTENING [correlation_id=f6fa38bd-8cb9-4bb8-9a08-ae2874ce629c]
+  96.592s  AudioSpeechStarted               corr=f6fa38bd state=LISTENING qsize=0    sent=434 ring_buffer_ms=300
+  97.103s  AudioSpeechEnded                 corr=f6fa38bd state=LISTENING qsize=0    sent=462 duration_ms=80
+WARNING avid.state: ignored illegal transition: no rule for AUDIO_SPEECH_STARTED in state LISTENING [correlation_id=f8bc774a-cacf-4a6f-ace4-8d2d830fc4e3]
+ 105.732s  AudioSpeechStarted               corr=f8bc774a state=LISTENING qsize=0    sent=463 ring_buffer_ms=300
+ 106.383s  AudioSpeechEnded                 corr=f8bc774a state=LISTENING qsize=0    sent=498 duration_ms=200
+ 150.008s  >>> client.aclose() #1
+TRACE: done

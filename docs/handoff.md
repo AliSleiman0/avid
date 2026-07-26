@@ -5,171 +5,122 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-26 (late) · `main = 122679a` + the #153 branch · gh `AliSleiman0`.
+**As of:** 2026-07-26 (late) · `main = 6a560bf` · gh `AliSleiman0`.
 
-**⭐ M5 IS NOT SEALED, but the blocker is now fixed and unverified.** #153 — the streaming fix — is
-written, green on both interpreters, and **waiting for a bench re-run to prove it**. The numbers
-below are what produced the miss; what the fix does follows them.
+**⭐ M5 IS NOT SEALED. #153 shipped, and the bench proved it was not the blocker.** Three new
+defects were measured on hardware tonight — **#157, #158, #159** — and any one of them alone is
+enough to keep M5 from sealing. Read those three before touching anything.
 
-Two bench sessions on the Pi took the conversation loop from *"cannot open a socket"* to *"six real
-spoken exchanges"* — and produced the first honest O1 measurement in the project's life:
+Full evidence, committed: [`docs/demos/m5_evidence/trace_2026-07-26_streaming.log`](demos/m5_evidence/trace_2026-07-26_streaming.log)
+(one line per bus event, with state, mic-queue depth and frames-sent-to-API), produced by
+[`docs/demos/m5_evidence/trace_turns.py`](demos/m5_evidence/trace_turns.py) — a throwaway tracer
+kept because it is the instrument that found all three. It also lives on the Pi at
+`/tmp/trace_turns.py` with a no-quoting wrapper at `/tmp/run_trace.sh` (`bash /tmp/run_trace.sh 150`).
+
+### What the bench actually showed
+
+Three turns worked, then the conversation died with the socket still open:
 
 ```
-O1  min 1004 / P50 1350 / P95 11278 ms   (budget P50 800 / P95 1500)
-O7  projected $3.01/month vs $25         cached-input 54.3%
+36.602s  client.open() #1 done in 6652 ms          <- §6.3 budgets 200 ms
+37.874s  ConversationUserTranscribed  text='Hello.'
+53.594s  ConversationUserTranscribed  text="Hi. Hi, how- I'm doing good. How is your day going?"
+64.597s  ConversationTurnEnded        state=IDLE
+64.597s  ConversationTurnStarted      state=IDLE   <- turn STARTED after it ENDED
+64.597s  ConversationUserTranscribed  state=IDLE   text='Can you hear me? Great!'
+71.6s / 96.6s / 105.7s   AudioSpeechStarted ... sent climbs 384 -> 433 -> 462 -> 498
+                         and NOT ONE conversation.* event follows. Dead until 150s.
 ```
 
-**AC-5 (O7) passes comfortably. AC-4 (O1) fails by ~70%,** and the *floor* over six turns is
-1004 ms — even the best turn misses. The owner's verdict matches the number: *"still a bit slow and
-doesn't feel like a conversation."*
+Audio keeps reaching the API (`sent` climbing) and the model answers nothing.
 
-**The cause is a divergence from SDS §6.3, filed as #153.** ADR-007 specifies *"replay the 300ms
-pre-speech ring buffer → **stream live**"*. `AudioService._run()` instead accumulates
-`self._utterance += chunk.pcm` and only `_end_speech()` hands the **whole utterance** over, 500 ms
-after the user stops. The model gets its first byte after the turn is already over, then runs its
-*own* 500 ms server VAD across that blob before generating — two turn-detections plus an upload, in
-series, where the design has one. It cannot prefill while you speak. §6.3 predicts what compliance
-should yield (*"~810 ms first-turn P50, in range on subsequent turns"*); we measured 1350 ms.
+### The three defects
 
-**#153 is now implemented** (branch `fix/153-stream-mic-live`). `AudioService` hands the drained
-pre-roll up the `TurnSink` at the rising edge and then one `AudioChunk` **per mic frame**, trailing
-silence included — `_capture()` is the single place the seam and the M4 loopback diverge, and the
-loopback still buffers because an echo needs the whole clip. Three consequences worth knowing:
+- **#157 — session open costs 1.5–6.7 s** against §6.3's 200 ms. `open()` measured at 1494/1922/832 ms
+  idle and 6652/6377 ms live. **While it is in flight `sent=0`** and the mic queue fills to 122
+  frames, so the utterance that opens a session is fully buffered no matter what #153 does.
+- **#158 — the state machine wedges in LISTENING, and that is why barge-in scores zero.**
+  `AUDIO_PLAYBACK_STARTED` is legal only from THINKING; THINKING is reachable only via
+  `CONVERSATION_USER_TRANSCRIBED`, which is the *async Whisper transcript* — and it arrives after the
+  assistant's audio, sometimes after `turn_ended`. `AudioService._begin_speech` gates barge-in on
+  `state is SPEAKING`, which is never reached. Proposed fix in the issue: drive LISTENING→THINKING
+  from our own `audio.speech_ended`.
+- **#159 — the robot's own voice is streamed back to the model.** Local VAD fires 269 ms after
+  playback starts; with #153 the echo is forwarded live instead of as a post-hoc blob. There is **no
+  half-duplex gate and no AEC anywhere in the design**, and §6.2.4 assumes a VAD can tell the user
+  from the robot. It cannot — it is speech either way. Strongly suspected cause of the conversation
+  dying: the server's turn detection sees near-continuous audio and stops committing.
 
-- **The trailing silence must be streamed.** The server closes the turn on silence *it* hears, so
-  cutting the stream at our falling edge would leave the turn uncommitted forever.
-- **`[gate] silence_hold_ms` >= `[ai.turn_detection] silence_duration_ms`** is now asserted in
-  `Config` at load. A shorter local hold starves the server VAD: the robot listens and then simply
-  never answers, with nothing in the log. Both are 500 ms in the shipped configs.
-- **The mic-up queue is bounded (500 frames ≈10 s) and drops oldest**, warning once per episode.
-  Per-frame emission into the old unbounded queue would leak captured audio whenever nothing drains
-  it — between sessions, or while a degraded robot's `open()` keeps failing.
+### What was ruled out — by measurement, so do not re-derive it
 
-**What is still owed: the bench re-run.** The millisecond win is hardware-only; CI can prove the
-*shape* (the e2e gate now asserts the model received audio before `audio.speech_ended`, which under
-the old buffering was impossible) but not the number. **M5's seal is one Pi session away.**
+| Suspect | Verdict |
+|---|---|
+| #153 streaming as a CPU regression | **No.** 0.8 ms per 20 ms frame = 4% of one core; identical per second of audio at any chunk size |
+| #153 streaming starving the loop | **No.** Loop lag median **0.99 ms**, p95 2.93 ms; `open()` takes the same time with the mic loop running as idle |
+| The network | **No.** DNS 1–5 ms, TCP 38–87 ms, TLS 51–64 ms — ~150 ms total to `api.openai.com` |
+| DNS misconfiguration from dual-homing | **No.** Single nameserver, both routes via the same gateway |
+| The lazy `import websockets` | **No.** 59 ms, once per process |
+| The mic or Silero | **No.** Controlled 15 s capture: 178 speech frames, 2.8→13.7 s, correctly ignoring a ~4500-rms room-noise floor |
+| `chunk_ms=20` vs Silero's 512-sample window | **No.** The adapter re-windows internally and holds the standing verdict for partial windows |
+| `session_idle_close_s = 30` causing repeated cold opens | **Real, but not the killer.** Bumped to 300 on the Pi; the 150 s trace then had exactly **one** open — and the conversation still died |
 
-**Six defects found and fixed on hardware this session** (PR #152, merged as `e9cc416`; #154 open):
+### Ethernet is now plugged in, and it mattered
 
-1. **Beta API shape** — the socket closed with `4000 beta_api_shape_disabled`. GA needs session
-   `"type": "realtime"` and format-as-object with explicit `rate` on both sides.
-2. **User transcription was never enabled** — Realtime does not transcribe input unless asked, so
-   `UserTranscript` never crossed the port and `LISTENING → THINKING` never fired.
-3. **16 kHz capture rejected** — the API floors input at 24 kHz; Silero v5 ceilings at 16 kHz. The
-   adapter now resamples (pure stdlib, ADR-012).
-4. **`interrupt_response` cancelled every reply** — the server read each whole-utterance burst as a
-   barge-in and killed its own response: `response.created` → `response.done`, zero output, zero
-   usage, six turns, $0.00. The robot answered every utterance with its thinking cue: *"one second"*,
-   forever. Barge-in is ours (§6.2.4); the server cannot see our speaker and must not try.
-5. **Silero's ONNX pool spun three cores** — `InferenceSession` had no `SessionOptions`, so ONNX ran
-   one *spin-waiting* intra-op thread per core. **306% CPU, 11m28s of CPU in 3m44s wall**; the audio
-   loop starved and the robot went deaf mid-conversation. Now 16.8%.
-6. **The harness's own playback check was M4-shaped** (#154) — `abs(elapsed - played)` is right for
-   M4's single-`play` echo and wrong for M5's streamed deltas, where wall time legitimately exceeds
-   audio duration. Now one-sided.
+RTT to `api.openai.com` went **67/102/167 ms → 15/36/134 ms**. `eth0` is the default route (metric
+100 vs wlan0's 600). Wi-Fi was −70 dBm, 2.4 GHz ch11, 167 retries — keep the cable in for any
+latency measurement.
 
-Defects 1–4 were **invisible to CI by construction**: every `assets/sessions/` fixture *records* the
-frames they suppress, so replay-based tests could not have caught them. #105 shipped this adapter
-network-gated and it had **never run** — that was unverified debt, not tested code.
+### ⚠️ Machine drift deliberately left in place
 
-**The Pi is powered on and idle**, `robot.service` **disabled**, `/opt/avid` on `main`, key at
-`/etc/robot/robot.env` (600, root), `[adapters] realtime = "openai"`.
+`/etc/robot/config.toml` has **`session_idle_close_s = 30 → 300`**, backup at
+`/etc/robot/config.toml.bak-153`. **The repo's `config/pi.toml` was NOT changed.** Decide whether to
+fold it in: the ADR-007 cost argument is about not *streaming* while silent, which the gate still
+does, and an idle open socket sends no tokens — but that has not been measured, and OpenAI may drop
+idle sockets on its own. Measured cost is $3.01/mo against the $25 O7 budget, so there is 8× headroom
+to spend here.
+
+### Where #153 stands
+
+Merged as `6a560bf`, CI green on 3.11 + 3.13, and the code is right — `AudioService` streams the
+pre-roll then one chunk per frame, per §6.3. But it was **framed as the M5 blocker and it is not**.
+It helps turns 2+ inside an already-open session; the first turn of every session is still fully
+buffered behind #157's 1.5–6.7 s open. Last night's P50 of 1350 ms was measured on an open session,
+and the 11278 ms outlier was a cold reopen — which got filed as a footnote on #153 ("worth reviewing
+separately") when it was the headline. And #153 made #159 materially worse by turning a discrete
+echo blob into a continuous one.
 
 ---
 
-## ⭐ Next session — re-run #106 (Pi) · then M7 build (laptop)
+## ⭐ Next session — fix #158 and #159 on the laptop, then one Pi run
 
-**Start here: re-run the #106 bench** with #153 merged. It needs the Pi, a live key, and the owner
-speaking — nothing else is blocking M5. AC-1/AC-2/AC-5 already pass and AC-7 is waived; **AC-4 (O1),
-AC-3 (barge-in) and AC-6 (Wi-Fi recovery) are what the re-run is for.** Expect barge-in to become
-*easy* to trigger rather than awkward — the model can finally hear an interruption — and treat that
-as an independent signal the fix landed. Then tag `v0.M5.0`, close epic #98 and milestone #6.
+**Do not start with another bench run.** Two of tonight's three defects are reproducible without the
+Pi and without spending money, and running the gate again before they are fixed will just reproduce
+the same dead conversation.
 
-**Laptop track after that: #125** (M7 tool dispatch). Read §4 below before the gate run, and settle
-AC wording *first*: four gate ACs so far have turned out unsatisfiable as written.
+**1. #158 (state desync) — laptop, and it unblocks AC-3.** Drive `LISTENING → THINKING` from
+`audio.speech_ended` rather than the async transcript. Touches the normative frozen table in
+`domain/state.py`, `test_no_undocumented_transitions`, SDS §3.10 and §6.2. This is the cheapest of
+the three and it is what makes barge-in possible at all — until the robot can reach SPEAKING, the
+`interrupt()` path in `AudioService._begin_speech` is dead code on hardware.
 
-Two loose ends from the M4 seal, neither blocking:
-- **`docs/handoff-m4-speaker-bugs.md` is now historical** — the defects it describes are fixed and
-  its evidence is superseded by `docs/demos/m4_evidence/`. Retire it when convenient.
-- **`tools/fetch_minilm.py` has never been run on the Pi**, so 6 embedder contract legs fail there.
-  Worth doing before M7's own Pi gates (#127, #129).
+**2. #159 (echo) — laptop design work, Pi to confirm.** Decide between a half-duplex gate, a gate
+plus a barge-in window, or real AEC. Note the tension: option 1 is ten lines and forfeits §6.2.4's
+whole barge-in design; option 3 preserves it and is a genuine piece of work with a new dependency
+inside one adapter. **This is a design decision, not a bug fix — it wants a deliberate choice, not
+whatever is quickest.** A half-duplex gate that silently kills barge-in would be worse than the bug,
+because the gate would then pass while the feature is gone.
 
-The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117 +
-#118 + #120 + #122 + #121 + #124 are merged (8/15); the store, embedder, retriever, `MemoryService`, the
-real OpenAI `TextModel` adapter, **and the `RealtimeClient` tool-call transport** are all in. The remaining
-laptop pickups: **#125** (dispatch, next), then #126 (injection), #123 (episodes), #119 (ONNX embedder).
-- **#125 — ConversationService tool dispatch → `remember_fact`/`recall`/`forget`** (← #122 + #124, now both
-  merged): fills the two seams #124 left. The model emits a `ToolCallRequested` (already flowing through
-  `_pump`, currently log-and-ignored); #125 parses `arguments`, calls `MemoryService.retrieve`/`forget`/
-  `store_fact` **directly** (§9.1.4), and returns the result via `client.send_tool_output(call_id, output)`
-  (which already sends the mandatory `response.create`). Also supplies the three JSON-schema tool
-  **declarations** and threads them through `main._build_realtime` into `OpenAIRealtimeClient(tools=…)` (the
-  `tools=()` param is already there, empty). ⚠️ **#125 is the one that edits `tests/test_main.py`'s exact-set
-  assertions** — it injects a dispatcher into `ConversationService` and/or adds a handler (the #104/#105
-  collision lesson). **#124 did NOT touch them** — correcting the prior baton's mis-attribution.
+**3. #157 (session open) — investigate before optimising.** The 1.3–1.8 s that transport does not
+explain is the interesting part. Instrument around `websockets.connect` versus the first frame after
+`session.update`, and re-measure from the laptop on the same network to separate Pi cost from API
+cost. If it is genuinely the API's handshake, then §6.3's 200 ms assumption is wrong and **AC-4's
+wording has to say what §6.3 already says** — that the open is paid once per conversation rather than
+per turn. That is a conversation to have with numbers in hand. Four gate ACs have already turned out
+unsatisfiable as written; this would be the fifth.
 
-Full dependency order is in epic #114.
+**Then** re-run #106 for AC-3/AC-4/AC-6, tag `v0.M5.0`, close epic #98 and milestone #6.
 
-> Notes for #125 / later: (1) `MemoryService.retrieve` returns hydrated `Fact`s (best-first); `forget`
-> returns a delete count; thread the turn's `correlation_id` into both. (2) The **relevance floor** that
-> would make negative queries return empty is still **deferred** (out of #120/#122's ACs; it's what drags
-> eval `negative`/`paraphrase` down) — decide in #125 whether it lives in the retriever or the tool engine.
-> (3) `store_fact` takes an already-built `Fact` — **fact extraction** (turn → `Fact` via `remember_fact`,
-> §7.6) is #125's work: parse the model's tool arguments into a `Fact`. (4) `ConversationService._pump`
-> already has the `ToolCallRequested` case + a `send_tool_output` on the port; a `tool_call` fixture ships.
-
-**Pi track: M2 ✅ M3 ✅ M4 ✅ are SEALED. ONE gate remains — #106 (M5).** Read
-[`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md) first. Expect the **P8 "exempt" banner** on
-every real-HAL run (one-time device init, by design since #130 — the run still exits 0; see
-[[avid-p8-hardware-init-carveout]]). ⚠️ **`sudo systemctl stop robot` before any gate or test run** —
-it holds `127.0.0.1:8787` and, with real adapters, the ALSA capture device.
-
-### 1 · M2 gate — ✅ SEALED `v0.M2.0` (`a83cc36`)
-`pytest tests/contract/ -m hardware` → **20 passed, zero skips** on a Pi 4B. Evidence in
-`docs/demos/m2_evidence/`. Milestone #3 + epic #56 closed. Found and fixed a real bug: the `pi`
-extra's unpinned numpy resolved to 2.x and silently killed `picamera2`.
-
-### 2 · M3 gate — ✅ SEALED `v0.M3.0` (`0f704e3`)
-All eight affects on the panel: **min 7.8 / median 9.6 / max 11.2 ms** vs the 150 ms budget.
-Evidence in `docs/demos/m3_evidence/` (eight pixel-exact framebuffer readbacks + tour log).
-Milestone #4 + epic #67 closed. The 7-vs-8 reconciliation is now a **PMP §5.2 footnote**.
-
-### 3 · M4 gate — ✅ SEALED `v0.M4.0` (`10bfb6e`)
-**0.12 / 0.13 / 0.14 ms** turnaround vs the 200 ms budget, echoes confirmed by ear; VAD
-**0.16% false-open** across 8.2 min of non-speech (**0/3000** on deliberate transients) and
-**92.5%** utterance detection. Milestone #5 + epic #84 closed. AC-3 waived by the owner (recorded
-on #91); AC-5's "SDS §5.4" did not exist — §6.3, the section the criterion is about, was updated
-instead. Evidence in `docs/demos/m4_evidence/`.
-
-⚠️ **Two numbers here will mislead whoever re-runs the tools.**
-1. **`--mode vad` reports 2.4% false-open / 35.9% missed-speech on the AC-2 set, and both are
-   wrong.** The scorer counts every frame outside a label span as silence, so inside a *speech*
-   take it scores the pauses between words as silence the VAD should have ignored: 94% of the
-   false opens fall in that one take, and ~70–90% of all disagreement sits within ±100 ms of a
-   hand-drawn boundary. The sound figures come from measuring each half where its ground truth is
-   unambiguous. Full decomposition in `m4_evidence/vad_accuracy.log`.
-2. **`played_ms` exceeds wall-elapsed playback by ~90 ms, always.** That is the ALSA ring-buffer
-   depth, not a defect: `Speaker.play` returns when frames are *accepted*, not when the DAC has
-   clocked them out. Nine measurements, all clustered there. The harness tolerates it via a
-   250 ms absolute floor beside its 15% relative band — a relative bound alone would flag a
-   300 ms cue and miss a mute 6 s echo.
-
-### 4 · M5 gate — #106 (epic #98) → tag `v0.M5.0`
-Mic + speaker **+ network + live key** — the biggest one, and where the **still-owed live
-verification of #105** happens (CI only ever ran the `replay` fake). AC: `conversation_pi.py`
-two-minute live UC-01; **barge-in** cuts the speaker instantly and the cancelled sentence does not
-resume; **O1** histogram P50 ≤ 800 ms / P95 ≤ 1500 ms; **O7** cost meter ≤ $25/mo (report
-$/conv-min); **Wi-Fi unplug → `session_lost` → DEGRADED + CueBank phrase → reconnect → IDLE**;
-60-s demo; tag `v0.M5.0`; close epic #98.
-- **Prep:** `OPENAI_API_KEY` in the Pi env (read once as `SecretStr`, never in a file); flip
-  `[adapters] realtime = "openai"`; `uv sync --extra openai` on the Pi; confirm the pinned snapshot
-  `gpt-realtime-mini-2025-12-15` still resolves — if it rolled, that is a **config edit** (`[ai]
-  model`), not code (§6.10 volatility). `avid --capture NAME` can re-record the `assets/sessions/`
-  fixtures from a live session so replay can't drift.
-
-**After the remaining two tags:** the project's entire critical path through M5 is sealed on
-hardware. Only **M7** (build, laptop — see below) and the never-started M6/M8–M11 remain. M7's own
-Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
+**Laptop track after M5: #125** (M7 tool dispatch). Read §4 below before the gate run.
 
 ---
 
@@ -214,6 +165,14 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ## What just shipped (this session)
 
+- **#153 — `AudioService` streams mic frames live (PR #156, `6a560bf`).** Pre-roll at the rising
+  edge, then one `AudioChunk` per frame, trailing silence included; `_capture()` is the only place
+  the seam and the sealed M4 loopback diverge. Added `gate.silence_hold_ms >=
+  ai.turn_detection.silence_duration_ms` as a load-time assertion, and a bounded (500-frame,
+  drop-oldest, warn-once) mic-up queue. CI green on 3.11 + 3.13, coverage 99.84%. **Correct, and not
+  the M5 blocker** — see the header.
+- **#157, #158, #159 filed** from the bench trace, with the measurements that rule out the obvious
+  suspects so nobody re-derives them.
 - **M4 sealed — `v0.M4.0` (`10bfb6e`)**, milestone #5 + epic #84 + gate #91 closed. AC-1 ✅ AC-2 ✅
   AC-4 ✅ AC-5 ✅ AC-6 ✅; **AC-3 waived by the owner**, recorded on #91 with its cost.
 - **Three defects found by the gate and fixed — #145 / #146 / #147, PR #148 (`29e8537`).** The M4
@@ -334,6 +293,25 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ## Standing gotchas (carry forward)
 
+- ⚠️ **An absence of events is not evidence of a fault — it is evidence of nothing.** Twice tonight a
+  silent log was read as "the robot went deaf" when the true cause was elsewhere (once: the owner was
+  reading a message instead of speaking; once: `client.open()` was still in flight, swallowing the
+  audio). Both readings were wrong and one was asserted to the owner. **Instrument for the positive
+  case before concluding from a negative**: the heartbeat in `m5_evidence/trace_turns.py` prints
+  frames-read, VAD-verdicts and queue depth every second, so a live-but-quiet system is
+  distinguishable from a dead one *without anyone speaking*.
+- ⚠️ **Never start a timed bench run in the same breath as a long explanation.** The owner cannot see
+  tool output while a command runs, so a 150 s timer spent reading a wall of text produces a silent
+  trace and a wasted session — it happened twice. **Hand over the trigger instead**: put the command
+  in a script on the Pi (`/tmp/run_trace.sh`) and let the owner run it with `!` when they are ready.
+  Keep the message before it short.
+- ⚠️ **Nested quotes do not survive PowerShell → ssh → bash.** A command with `"$(sudo grep …)"` inside
+  single quotes works from the Bash tool and silently loses the inner quoting when the owner pastes it
+  into PowerShell — the env var ends up empty and the failure looks like a missing API key. Put it in
+  a shell script on the far side and pass only plain arguments.
+- ⚠️ **`ssh …` and `uv run` both quietly rewrite `uv.lock`.** A bare `uv run` during this session
+  re-locked and collapsed numpy to 1.26.4 (no cp313 wheels → the 3.13 leg breaks). Use
+  `uv run --frozen` / `uv sync --frozen` **always**, and check `git status uv.lock` before committing.
 - ⚠️ **A port's docstring can be right while its only real implementation is wrong.** `TurnSink.mic()`
   always said *"mirroring `Microphone.stream`"* and `FakeTurnSink` always yielded frames; `AudioService`
   yielded whole utterances for two milestones and the contract suite never noticed, because the real
