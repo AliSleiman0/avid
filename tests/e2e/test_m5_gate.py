@@ -337,7 +337,7 @@ async def test_m5_gate_a_turn_replays_end_to_end_on_one_correlation_id() -> None
     crossing two services — AudioService mints it at ``audio.speech_started``, ConversationService
     propagates it onto every fact (SDS §3.12.2) — which is the property one ``grep`` on a live log
     depends on."""
-    collector, speaker, _, _ = await _drive_session(
+    collector, speaker, client, _ = await _drive_session(
         "two_turn",
         until=lambda c: len(c.of_type(ConversationTurnEnded)) >= 1,
     )
@@ -375,6 +375,15 @@ async def test_m5_gate_a_turn_replays_end_to_end_on_one_correlation_id() -> None
     # The assistant audio reached a real speaker through the TurnSink seam — not an echo.
     assert speaker.played, "no assistant PCM reached the speaker"
     assert collector.of_type(SystemHandlerFailed) == []
+
+    # #153, at the stack level: the model was given audio *during* the user's turn. This whole
+    # arc runs before the falling edge — phase 2 advances virtual time, so the mic never emits
+    # another real frame and ``audio.speech_ended`` does not fire here at all. Under the
+    # buffering this replaced, nothing crossed the seam until that falling edge, so ``sent``
+    # would be empty and the fixture would be answering audio the model never received. The
+    # first chunk is §6.3's ring-buffer replay, which is one frame at this rising edge.
+    assert client.sent, "no mic audio reached the model before the turn closed"
+    assert len(client.sent[0].pcm) == _FRAME_BYTES
 
 
 # --- AC-3: barge-in ------------------------------------------------------------------------

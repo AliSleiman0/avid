@@ -119,3 +119,31 @@ def test_non_loopback_bind_is_rejected() -> None:
 def test_loopback_bind_variants_accepted() -> None:
     for bind in ("127.0.0.1", "::1", "localhost"):
         assert ApiConfig.model_validate({"bind": bind}).bind == bind
+
+
+def test_a_local_hold_shorter_than_the_server_vad_is_rejected() -> None:
+    """#153/§6.3: streaming coupled the two VADs. AudioService stops streaming at its own
+    falling edge (``[gate] silence_hold_ms``), and the server closes the turn only after it has
+    heard ``[ai.turn_detection] silence_duration_ms`` of silence — so a shorter local hold
+    starves it and the turn never commits. The robot would listen and simply never answer, with
+    nothing in the log to say why, which is exactly the class of failure worth catching at load."""
+    with pytest.raises(ValidationError, match="never commits"):
+        Config.model_validate(
+            {
+                "gate": {"silence_hold_ms": 300},
+                "ai": {"turn_detection": {"silence_duration_ms": 500}},
+            }
+        )
+
+
+def test_a_local_hold_at_or_above_the_server_vad_is_accepted() -> None:
+    """Equal is the shipped case (both 500 ms in ``config/pi.toml``): the two VADs see the same
+    silence and close together, which is the whole point of streaming the trailing frames."""
+    for hold in (500, 750):
+        config = Config.model_validate(
+            {
+                "gate": {"silence_hold_ms": hold},
+                "ai": {"turn_detection": {"silence_duration_ms": 500}},
+            }
+        )
+        assert config.gate.silence_hold_ms == hold

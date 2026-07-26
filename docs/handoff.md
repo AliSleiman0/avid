@@ -5,11 +5,14 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-26 (late) · `main = e9cc416` · tree CLEAN · gh `AliSleiman0`.
+**As of:** 2026-07-26 (late) · `main = 122679a` + the #153 branch · gh `AliSleiman0`.
 
-**⭐ M5 IS NOT SEALED, and now we know exactly why.** Two bench sessions on the Pi took the
-conversation loop from *"cannot open a socket"* to *"six real spoken exchanges"* — and produced the
-first honest O1 measurement in the project's life:
+**⭐ M5 IS NOT SEALED, but the blocker is now fixed and unverified.** #153 — the streaming fix — is
+written, green on both interpreters, and **waiting for a bench re-run to prove it**. The numbers
+below are what produced the miss; what the fix does follows them.
+
+Two bench sessions on the Pi took the conversation loop from *"cannot open a socket"* to *"six real
+spoken exchanges"* — and produced the first honest O1 measurement in the project's life:
 
 ```
 O1  min 1004 / P50 1350 / P95 11278 ms   (budget P50 800 / P95 1500)
@@ -27,7 +30,24 @@ after the user stops. The model gets its first byte after the turn is already ov
 *own* 500 ms server VAD across that blob before generating — two turn-detections plus an upload, in
 series, where the design has one. It cannot prefill while you speak. §6.3 predicts what compliance
 should yield (*"~810 ms first-turn P50, in range on subsequent turns"*); we measured 1350 ms.
-**#153 is the next piece of work and it is what stands between M5 and a seal.**
+
+**#153 is now implemented** (branch `fix/153-stream-mic-live`). `AudioService` hands the drained
+pre-roll up the `TurnSink` at the rising edge and then one `AudioChunk` **per mic frame**, trailing
+silence included — `_capture()` is the single place the seam and the M4 loopback diverge, and the
+loopback still buffers because an echo needs the whole clip. Three consequences worth knowing:
+
+- **The trailing silence must be streamed.** The server closes the turn on silence *it* hears, so
+  cutting the stream at our falling edge would leave the turn uncommitted forever.
+- **`[gate] silence_hold_ms` >= `[ai.turn_detection] silence_duration_ms`** is now asserted in
+  `Config` at load. A shorter local hold starves the server VAD: the robot listens and then simply
+  never answers, with nothing in the log. Both are 500 ms in the shipped configs.
+- **The mic-up queue is bounded (500 frames ≈10 s) and drops oldest**, warning once per episode.
+  Per-frame emission into the old unbounded queue would leak captured audio whenever nothing drains
+  it — between sessions, or while a degraded robot's `open()` keeps failing.
+
+**What is still owed: the bench re-run.** The millisecond win is hardware-only; CI can prove the
+*shape* (the e2e gate now asserts the model received audio before `audio.speech_ended`, which under
+the old buffering was impossible) but not the number. **M5's seal is one Pi session away.**
 
 **Six defects found and fixed on hardware this session** (PR #152, merged as `e9cc416`; #154 open):
 
@@ -57,12 +77,16 @@ network-gated and it had **never run** — that was unverified debt, not tested 
 
 ---
 
-## ⭐ Next session — M7 build (laptop, active) · one Pi gate left (#106)
+## ⭐ Next session — re-run #106 (Pi) · then M7 build (laptop)
 
-**Start here: #125** (M7 tool dispatch) on the laptop. The only hardware work left in the project
-is **#106**, the M5 gate, and it is blocked on a decision rather than on effort — putting a live
-`OPENAI_API_KEY` on the Pi and spending real money. Read §4 below before starting it, and settle
-its AC wording *first*: four gate ACs so far have turned out unsatisfiable as written.
+**Start here: re-run the #106 bench** with #153 merged. It needs the Pi, a live key, and the owner
+speaking — nothing else is blocking M5. AC-1/AC-2/AC-5 already pass and AC-7 is waived; **AC-4 (O1),
+AC-3 (barge-in) and AC-6 (Wi-Fi recovery) are what the re-run is for.** Expect barge-in to become
+*easy* to trigger rather than awkward — the model can finally hear an interruption — and treat that
+as an independent signal the fix landed. Then tag `v0.M5.0`, close epic #98 and milestone #6.
+
+**Laptop track after that: #125** (M7 tool dispatch). Read §4 below before the gate run, and settle
+AC wording *first*: four gate ACs so far have turned out unsatisfiable as written.
 
 Two loose ends from the M4 seal, neither blocking:
 - **`docs/handoff-m4-speaker-bugs.md` is now historical** — the defects it describes are fixed and
@@ -310,6 +334,16 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
 
 ## Standing gotchas (carry forward)
 
+- ⚠️ **A port's docstring can be right while its only real implementation is wrong.** `TurnSink.mic()`
+  always said *"mirroring `Microphone.stream`"* and `FakeTurnSink` always yielded frames; `AudioService`
+  yielded whole utterances for two milestones and the contract suite never noticed, because the real
+  leg is **skipped** there (a stateful service, not a stateless adapter). P6 buys nothing on a port
+  whose real leg does not run — check that the skip list is not hiding the thing you care about.
+- ⚠️ **Two VADs in series are coupled even when the config pretends they aren't.** Streaming made
+  `[gate] silence_hold_ms` load-bearing for `[ai.turn_detection] silence_duration_ms`: the mic stream
+  stops at the local hold, so a shorter one starves the server and the turn never commits — a robot
+  that listens and then never answers, silently. Asserted in `Config` now. Whenever a local timer
+  decides how long a remote timer gets to observe, write the inequality down.
 - ⚠️ **A network-gated adapter is UNVERIFIED DEBT, not tested code.** `OpenAIRealtimeClient` sat
   behind `OPENAI_API_KEY` + `AVID_LIVE` from #105 until the #106 bench, and its first live run
   found **four** defects in a row, each hiding the next. Budget a live smoke before any gate that

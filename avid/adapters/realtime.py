@@ -431,14 +431,16 @@ class OpenAIRealtimeClient:
                         # interrupt is not redundancy, it is a second cancel racing ours on worse
                         # information.
                         #
-                        # It is actively fatal here because of ADR-007's gate: `AudioService.mic()`
-                        # yields *whole utterances*, handed over only once the local VAD has closed
-                        # the turn. So the server sees each utterance arrive as one burst — and a
-                        # burst arriving while a reply is in flight looks exactly like a barge-in,
-                        # even though the user finished speaking before we sent it. Observed on the
-                        # Pi: every response went `response.created` -> `response.done` with no
-                        # output items and zero usage, so the robot only ever played its thinking
-                        # cue. The user hears "one second", forever.
+                        # How we learned it, since the symptom looks nothing like the cause: at the
+                        # #106 bench run every response went `response.created` -> `response.done`
+                        # with no output items and zero usage, so the robot only ever played its
+                        # thinking cue — the user hears "one second", forever. `AudioService` then
+                        # buffered each utterance and handed it over in one burst, and a burst
+                        # arriving while a reply is in flight is indistinguishable from a barge-in,
+                        # so the server cancelled every reply it had just started. #153 removed the
+                        # burst (capture is streamed live now, §6.3), which removes that particular
+                        # trigger — but this setting stays off for the reason above, which never
+                        # depended on it. Turning it back on is a second canceller, not a fix.
                         "interrupt_response": False,
                     },
                 },
