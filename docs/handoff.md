@@ -5,16 +5,23 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-26 · `main = baa7d78` · tree CLEAN · gh `AliSleiman0`.
-**⭐ M2 AND M3 ARE SEALED — `v0.M2.0` (`a83cc36`) and `v0.M3.0` (`0f704e3`), milestones #3 and #4
-closed.** Both gates were driven **entirely from the laptop over SSH**; the only physical task was
-wiring the bench. M3: all eight affects on the real ILI9486 panel, **max 11.2 ms against a 150 ms
-budget** (13× headroom — composing `RGB888` in the stdlib, ADR-012, costs almost nothing); evidence
-in `docs/demos/m3_evidence/` as pixel-exact framebuffer readbacks. M2: 20 hardware contract legs,
-zero skips. **M4 (#91) is now prepped and gate-ready** — Silero installed, config and unit drift
-fixed, software chain measured at **0.43 ms** turnaround — but it needs the user's voice (AC-1) and
-a 60-second recording (AC-3, explicitly *not* waived). **Only two Pi gates remain: #91 (M4) and
-#106 (M5).**
+**As of:** 2026-07-26 · `main = 10bfb6e` · tree CLEAN · gh `AliSleiman0`.
+**⭐⭐⭐ M4 IS SEALED — `v0.M4.0` (`10bfb6e`), milestone #5 + epic #84 + gate #91 closed.** The robot
+hears and speaks on real hardware: **0.12–0.14 ms** processing turnaround against a 200 ms budget,
+and a VAD that ignores real-world noise — **0/3000 frames on deliberate transients** (SDS §6.3's
+door-slam requirement met on *real* audio, not a synthesised burst) and 0/15000 on five minutes of
+loud broadband noise. Evidence in `docs/demos/m4_evidence/`.
+
+**The gate had to be re-run, because the first attempt printed `PASS` while the robot was mute.**
+Three defects made that possible — all found, filed, fixed and verified on hardware this session
+(#145 / #146 / #147 → PR #148). That is the headline of the session, above the tag itself: a gate
+that can pass on silence is not a gate.
+
+**AC-3 (the 60-second demo) was WAIVED by the project owner**, with the reasons *and the cost*
+recorded on #91 — what is lost is *independent witness*, since every other number is self-reported
+by the software under test and the only external confirmation on record is the operator's ear.
+
+**Only ONE Pi gate remains in the whole project: #106 (M5).** M0–M4 are all sealed on hardware.
 
 📕 **New: [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md)** — how to drive the Pi from the
 laptop and every trap the three runs cost us. **Read it before touching the Pi.** The expensive
@@ -47,7 +54,18 @@ forget/remember_fact schemas + wiring to `MemoryService`).
 
 ---
 
-## ⭐ Next session — two tracks: M7 build (laptop, active) · Pi seal day (below)
+## ⭐ Next session — M7 build (laptop, active) · one Pi gate left (#106)
+
+**Start here: #125** (M7 tool dispatch) on the laptop. The only hardware work left in the project
+is **#106**, the M5 gate, and it is blocked on a decision rather than on effort — putting a live
+`OPENAI_API_KEY` on the Pi and spending real money. Read §4 below before starting it, and settle
+its AC wording *first*: four gate ACs so far have turned out unsatisfiable as written.
+
+Two loose ends from the M4 seal, neither blocking:
+- **`docs/handoff-m4-speaker-bugs.md` is now historical** — the defects it describes are fixed and
+  its evidence is superseded by `docs/demos/m4_evidence/`. Retire it when convenient.
+- **`tools/fetch_minilm.py` has never been run on the Pi**, so 6 embedder contract legs fail there.
+  Worth doing before M7's own Pi gates (#127, #129).
 
 The work splits cleanly by hardware. **Laptop track (active): keep building M7.** #115 + #116 + #117 +
 #118 + #120 + #122 + #121 + #124 are merged (8/15); the store, embedder, retriever, `MemoryService`, the
@@ -73,7 +91,7 @@ Full dependency order is in epic #114.
 > §7.6) is #125's work: parse the model's tool arguments into a `Fact`. (4) `ConversationService._pump`
 > already has the `ToolCallRequested` case + a `send_tool_output` on the port; a `tool_call` fixture ships.
 
-**Pi track: M2 ✅ and M3 ✅ are SEALED. Two gates remain — #91 (M4) then #106 (M5).** Read
+**Pi track: M2 ✅ M3 ✅ M4 ✅ are SEALED. ONE gate remains — #106 (M5).** Read
 [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md) first. Expect the **P8 "exempt" banner** on
 every real-HAL run (one-time device init, by design since #130 — the run still exits 0; see
 [[avid-p8-hardware-init-carveout]]). ⚠️ **`sudo systemctl stop robot` before any gate or test run** —
@@ -89,31 +107,25 @@ All eight affects on the panel: **min 7.8 / median 9.6 / max 11.2 ms** vs the 15
 Evidence in `docs/demos/m3_evidence/` (eight pixel-exact framebuffer readbacks + tour log).
 Milestone #4 + epic #67 closed. The 7-vs-8 reconciliation is now a **PMP §5.2 footnote**.
 
-### 3 · M4 gate — #91 (epic #84) → tag `v0.M4.0` ⭐ NEXT, prep DONE
-Mic + speaker, **measurement not bring-up**. The Pi is ready; what remains needs a human voice.
+### 3 · M4 gate — ✅ SEALED `v0.M4.0` (`10bfb6e`)
+**0.12 / 0.13 / 0.14 ms** turnaround vs the 200 ms budget, echoes confirmed by ear; VAD
+**0.16% false-open** across 8.2 min of non-speech (**0/3000** on deliberate transients) and
+**92.5%** utterance detection. Milestone #5 + epic #84 closed. AC-3 waived by the owner (recorded
+on #91); AC-5's "SDS §5.4" did not exist — §6.3, the section the criterion is about, was updated
+instead. Evidence in `docs/demos/m4_evidence/`.
 
-**Already done (this session):**
-- **Silero v5.1.2** at `/var/lib/robot/models/silero_vad.onnx`, ONNX signature verified against
-  `SileroVad._run_window`'s exact call. **`test_vad.py` is 9/9** — that leg was red through *both*
-  prior seals.
-- `/etc/robot/config.toml` **replaced from `config/pi.toml`** (it was an M1-era file, 83 lines
-  stale) and flipped to `microphone = "alsa"`, `speaker = "alsa"`, `vad = "silero"`.
-- `robot.service` unit drift fixed; service left **stopped**.
-- **Software chain proven end to end: 0.43 ms turnaround vs the 200 ms budget.**
-- AC-2's scorer validated on real recorded ambience + mixed cue speech: **false-open 0.2%** — the
-  door-slam transients and `boot_chime` correctly do *not* open the gate (§6.3 satisfied).
-
-**Still needs the user:** AC-1 (speak N phrases), AC-3 (the 60-second recording — explicitly **not**
-waived, unlike M0/M2/M3; for an audio milestone a recording is the only artifact that demonstrates
-the thing). ⚠️ **Settle AC-1's wording first:** "≤200 ms mouth-to-ear" is unachievable by
-construction — `[gate] silence_hold_ms = 500` means a turn-based echo cannot beat half a second.
-The harness measures `playback_started − speech_ended` (processing turnaround), already documented
-in `docs/demos/README.md` §2.8.1.
-
-**AC-2 can run unattended, file-based** — `--mode vad` reads a WAV, so it needs no speaker. Build
-the sample by mixing known cue speech into recorded room ambience at known offsets. Label the
-**speech-energy region, not the clip extent** (TTS head/tail padding produced a bogus 56% "missed"
-on the first attempt).
+⚠️ **Two numbers here will mislead whoever re-runs the tools.**
+1. **`--mode vad` reports 2.4% false-open / 35.9% missed-speech on the AC-2 set, and both are
+   wrong.** The scorer counts every frame outside a label span as silence, so inside a *speech*
+   take it scores the pauses between words as silence the VAD should have ignored: 94% of the
+   false opens fall in that one take, and ~70–90% of all disagreement sits within ±100 ms of a
+   hand-drawn boundary. The sound figures come from measuring each half where its ground truth is
+   unambiguous. Full decomposition in `m4_evidence/vad_accuracy.log`.
+2. **`played_ms` exceeds wall-elapsed playback by ~90 ms, always.** That is the ALSA ring-buffer
+   depth, not a defect: `Speaker.play` returns when frames are *accepted*, not when the DAC has
+   clocked them out. Nine measurements, all clustered there. The harness tolerates it via a
+   250 ms absolute floor beside its 15% relative band — a relative bound alone would flag a
+   300 ms cue and miss a mute 6 s echo.
 
 ### 4 · M5 gate — #106 (epic #98) → tag `v0.M5.0`
 Mic + speaker **+ network + live key** — the biggest one, and where the **still-owed live
@@ -141,9 +153,18 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
   **camera (ov5647 CSI — `AVID_HARDWARE=1 pytest tests/contract/test_camera.py` = 11/11, RGB888
   640×480 auto-negotiated, no code change)**. M2's contract-suite proof (#57) can run with every
   `real` param active.
-- **Sealed on hardware: M0, M1, M2, M3** (`v0.M0.0`/`v0.M1.0`/`v0.M2.0`/`v0.M3.0`). **Remaining Pi
-  gates: #91** (M4 — prepped, needs the user's voice) and **#106** (M5 — needs the API key on the
-  Pi, a decision not yet taken).
+- **Sealed on hardware: M0, M1, M2, M3, M4** (`v0.M0.0` … `v0.M4.0`). **One Pi gate left in the
+  entire project: #106** (M5 — needs the API key on the Pi, a decision not yet taken).
+- ⚠️ **The bench mic changed mid-session and the machine config followed it.** A Logitech H540
+  headset was swapped in, then back out to the original **USB PnP "Device"** card;
+  `/etc/robot/config.toml` and `/etc/asound.conf` were restored from their `*.bak-pre-headset`
+  copies, so the machine matches `config/pi.toml` again (the H540 state is kept at `*.bak-h540`).
+  The PnP mic has a **−21 dBFS constant noise floor**, ~34 dB above the headset's — Silero ignores
+  it completely (0/15000), but energy-threshold analysis of its recordings is misleading.
+- ⚠️ **6 failures in the full Pi suite are M7, not audio:** `tests/contract/test_embedder.py`'s real
+  leg fails on a missing MiniLM blob at `/var/lib/robot/models/all-MiniLM-L6-v2.onnx`. Run
+  `tools/fetch_minilm.py` on the Pi to clear them. Otherwise **786 passed / 10 skipped** at
+  `29e8537`.
 - ⚠️ **The Pi is not the repo.** `/etc/robot/config.toml` and `/etc/systemd/system/robot.service`
   are copies and both had rotted (83 stale lines; a lost `SupplementaryGroups=video gpio` causing
   `PermissionError: /dev/fb0` and 942 restarts). Diff both against the repo before any gate. Missing
@@ -165,6 +186,43 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
 - **M0 / M1 sealed** (`v0.M0.0` / `v0.M1.0`).
 
 ## What just shipped (this session)
+
+- **M4 sealed — `v0.M4.0` (`10bfb6e`)**, milestone #5 + epic #84 + gate #91 closed. AC-1 ✅ AC-2 ✅
+  AC-4 ✅ AC-5 ✅ AC-6 ✅; **AC-3 waived by the owner**, recorded on #91 with its cost.
+- **Three defects found by the gate and fixed — #145 / #146 / #147, PR #148 (`29e8537`).** The M4
+  harness had printed `PASS: all 3 turns within the 200 ms turnaround budget` **while the robot was
+  mute**:
+  - **#145** `AlsaSpeaker` discarded `write()`'s return. A persistent handle used *intermittently*
+    underruns, and ALSA fails the *next* write instantly having played nothing — every other
+    utterance vanished. At M5 this same handle takes one `play()` per Realtime delta.
+  - **#146** `AudioChunk.sample_rate` was ignored: the 16 kHz echo went through a 24 kHz handle,
+    1.5× fast and a fifth high. `[speaker] sample_rate` is now the **nominal** format — chunks are
+    honoured, a deviation logs once at INFO.
+  - **#147** `played_ms` was arithmetic, not measurement. **`Speaker.play`/`play_file` now return
+    the ms the device *accepted*** (an SDS §3.9.1 port change); the harness fails on
+    `played_ms == 0` and on elapsed-vs-played divergence, and prints `playback integrity: NOT
+    CHECKED` **out loud** behind a fake speaker — a check that disarms itself quietly is the same
+    defect wearing a hat.
+- **Verified by A/B against the old adapter on one device, in one process:** 2.00 s of 16 kHz audio
+  played in **1.24 s** (old) vs **1.90 s** (new); three utterances 1.5 s apart went **1.90 / 0.00
+  silent / 1.92** (old) vs **1.90 / 1.90 / 1.90** (new). The underrun was also reproduced against
+  the raw library with no Avid code in the path, and recovered by close+reopen.
+- **Two corrections to the original defect analysis**, proven rather than argued: the underrun needs
+  a **gap** between utterances (written back-to-back nothing fails, which is why it survived casual
+  testing), and **period-slicing alone does not fix it** — sliced writes still fail period 0 of
+  every later utterance. Recover-and-retry is the whole fix; slicing only shrinks the loss from an
+  utterance to 20 ms.
+- **Two latent concurrency bugs fixed in passing:** a lock now spans the *whole* write loop
+  (per-period would let a barge-in close the handle and the loop reopen and resume the audio the
+  user just interrupted), and `stop()`'s deferred close re-checks its own flag so it cannot kill
+  the utterance that replaced what was interrupted.
+- **Docs: #149** (PMP §5.2 footnotes + SDS §6.3 "as measured") and **#150** (the seal).
+- **A false alarm worth remembering:** "some echoes were silent" was the H540's **hardware boom
+  mute**, which reports `[on]` at 89% while returning frames of *exact zero*. The 16 kHz playback
+  path was briefly suspected as a regression from the rate fix and **exonerated** — 440 Hz tones at
+  24k / 16k / 24k were all equally audible.
+
+### Previously (M2/M3 seals)
 
 - **M2 sealed — `v0.M2.0` (`a83cc36`)**, plus `c7eeb1a` (the numpy cap + four stale runbook steps).
   20 hardware contract legs, zero skips, under `PYTHONASYNCIODEBUG=1`.
@@ -254,11 +312,37 @@ Pi gates (#127 SPK-3, #129 gate) come later, once the M7 build issues land.
   config/unit drift, live framebuffer streaming, ALSA, the `pkill`-kills-its-own-SSH-session trap,
   and reading gate results honestly. Read it before touching the Pi.
 - ⚠️ **A gate AC written before the design settled may be unsatisfiable — settle the wording on the
-  issue *before* the run.** Three instances so far: M2's "full contract suite, none skipped"
+  issue *before* the run.** Four instances so far: M2's "full contract suite, none skipped"
   (impossible once the network-gated M5/M7 legs landed; `-m hardware` carries the claim now), M4's
-  "≤200 ms mouth-to-ear" (impossible with `silence_hold_ms = 500` on a turn-based echo), and
-  `docs/demos/README.md` asserting a `v0.M4.0` tag that never existed. Check the remaining gate
-  issues for the same optimism.
+  "≤200 ms mouth-to-ear" (impossible with `silence_hold_ms = 500` on a turn-based echo), M4 AC-5's
+  **"SDS §5.4", a section that does not exist** (numbering shifted after the AC was drafted; §6.3 is
+  what the criterion is about), and `docs/demos/README.md` asserting a `v0.M4.0` tag that never
+  existed. **#106 is the last gate issue — check it for the same optimism before running it.**
+- ⚠️ **A gate that measures the *event* path can pass while the hardware does nothing.** The M4
+  harness printed `PASS` over a mute robot because it timed `playback_started − speech_ended` and
+  took `played_ms` from arithmetic over the submitted buffer. **Any "did it work" number must come
+  from the device, not from what we handed the device.** When a check cannot apply (a fake adapter),
+  say so **loudly in the output** — a silently disarmed check is indistinguishable from a passing
+  one. Apply this reading to #106's O1 histogram and cost meter.
+- ⚠️ **A silent capture is diagnosed by counting non-zero samples, not by reading the mixer.** The
+  Logitech H540's boom mute is a **hardware** switch ALSA cannot see: `amixer` reports `Mic … 89%
+  [on]` while `arecord` returns frames of *exact zero*. Cost ~30 min this session chasing a
+  playback defect that did not exist.
+- ⚠️ **Never run bare `uv run` — it silently re-locks `uv.lock`.** It collapsed numpy mid-session,
+  which is exactly the known 3.13-breaking trap. Pass **`--frozen`** to every `uv run`; check
+  `git status uv.lock` before committing. (On the Pi the rule is stricter still: never `uv run` at
+  all — see `PI_OPERATIONS.md` §2.)
+- ⚠️ **`mypy avid` aborts inside numpy's stubs locally** ("Type statement is only supported in
+  Python 3.12 and greater") whenever the `memory` extra is installed, because the 3.11 target meets
+  numpy's 3.12-syntax stubs. CI's `lint` job never installs that extra, so it is green. Reproduce CI
+  exactly with **`uv run --frozen --exact mypy avid`**.
+- ⚠️ **Frame-level scoring against hand-drawn labels is boundary-noise dominated.** On short spans
+  the disagreement is dominated by ±1–2 frames of boundary error, not by detector quality — 134
+  spans produced ~15 s of spurious "missed speech" *and* ~14 s of spurious false opens. Measure each
+  half where its ground truth is unambiguous (false-open on material with **no** speech at all;
+  detection at the utterance boundary the system itself defines via `[gate] silence_hold_ms`), and
+  never let a detector label its own test. Label the speech-**energy** region, never the clip
+  extent.
 - ⚠️ **Board project number ≠ node-ID intuition.** "Pico — Avid" is `gh project` **2**
   (`PVT_kwHOBcHqys4Bdmkk`); project **1** is an unrelated untitled scratch board. `gh project
   item-add` takes the **number** — use `2`. Added 16 M7 items to `1` by mistake this session and had
