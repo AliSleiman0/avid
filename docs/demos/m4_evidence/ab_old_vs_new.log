@@ -1,0 +1,24 @@
+$ /opt/avid/.venv/bin/python -u /tmp/ab.py
+# Both adapters, same audio, same device, one process. OLD is avid/adapters/speaker.py
+# at 85522f5 loaded by path; NEW is the same file at 285512c imported normally.
+
+--- OLD (85522f5) ---
+  DEFECT 2 -- 2.00 s of 16 kHz audio: elapsed 1.24s  returned None
+  DEFECT 1 -- three 2 s utterances at 24 kHz, 1.5 s apart:
+    utterance 1: elapsed 1.90s  returned None   AUDIBLE
+    utterance 2: elapsed 0.00s  returned None   *** DROPPED (silent) ***
+    utterance 3: elapsed 1.92s  returned None   AUDIBLE
+--- NEW (285512c) ---
+  DEFECT 2 -- 2.00 s of 16 kHz audio: elapsed 1.90s  returned 2000
+  DEFECT 1 -- three 2 s utterances at 24 kHz, 1.5 s apart:
+    utterance 1: elapsed 1.90s  returned 2000   AUDIBLE
+    utterance 2: elapsed 1.90s  returned 2000   AUDIBLE
+    utterance 3: elapsed 1.90s  returned 2000   AUDIBLE
+
+# DEFECT 2: 2.00 s of 16 kHz played through a 24 kHz handle finishes in 1.24 s -- 1.5x
+#   fast and a fifth high. The fix reopens the device at the chunk's own rate: 1.90 s.
+# DEFECT 1: the middle utterance returns in 0.00 s having played nothing, because the
+#   previous write drained the buffer and ALSA failed the next one with -EPIPE.
+# The NEW column's 1.90 s (not 2.00 s) is the ~100 ms ALSA ring-buffer depth: play()
+#   returns when the last frames are ACCEPTED, not when the DAC has clocked them out.
+#   That residual is documented on the port and in SDS 6.2.4.

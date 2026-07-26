@@ -1,0 +1,75 @@
+# AC-2 -- VAD gate accuracy over a 10.58-minute labelled set, real SileroVad on the Pi.
+#
+# The set is assembled from FOUR separate takes of known provenance, because energy alone
+# cannot tell a voice from a door slam -- which is the very thing under test:
+#   ambience_b  300s  fresh room tone (this mic's -21 dBFS noise floor)   ground truth: no speech
+#   takeA       140s  the operator speaking                              ground truth: energy regions
+#   ambience_a  135s  unstaged room, 47 loud non-speech events           ground truth: no speech
+#   takeB        60s  deliberate transients: knocks, clap, door, chair   ground truth: no speech
+# The ~10-min WAV lives outside the repo (like the M3 tour video); labels ship here.
+
+
+## The official scorer, reported for completeness -- NOT the headline. See below.
+
+$ .venv/bin/python -u docs/demos/audio_pi.py --mode vad --config /etc/robot/config.toml \
+      --wav /tmp/m4_vad_10min.wav --labels /tmp/m4_vad_10min.labels.json
+frames        31750 (20 ms each, 16000 Hz)
+speech frames 2219   silence frames 29531
+false-open    715   (2.4%)
+missed-speech 796   (35.9%)
+
+
+## Why those two numbers are labelling artifacts, not VAD behaviour
+
+The scorer counts every frame outside a label span as silence. Inside a SPEECH take that
+is wrong: the pauses between words are not "silence the VAD must ignore", and Silero
+firing across one is not a false open. Decomposition:
+
+  false opens by segment: takeA 675, ambience_a 40, ambience_b 0, takeB 0
+  within +/- 60ms of a label boundary: false-open 451/715 (63%), missed 443/796 (56%)
+  within +/-100ms of a label boundary: false-open 548/715 (77%), missed 557/796 (70%)
+  within +/-200ms of a label boundary: false-open 613/715 (86%), missed 713/796 (90%)
+
+94% of the false opens are inside the speech take, and ~70-90% of ALL disagreement sits
+within a couple of frames of a hand-drawn boundary. This is the same class of error that
+once produced a bogus 56% missed-speech from labelling clip extents; it recurs at finer
+scale whenever spans are short. Frame-level scoring against hand labels cannot resolve
+better than its boundary precision.
+
+
+## The measurements that ARE sound
+
+Each half is measured where its ground truth is unambiguous.
+
+FALSE OPEN -- material containing no speech at all, so there are no boundaries to get wrong:
+
+  ambience_b   silence   300s     0/15000 frames = 0.00%
+  ambience_a   silence   135s    40/ 6750 frames = 0.59%
+  takeB        noise      60s     0/ 3000 frames = 0.00%
+  TOTAL non-speech: 40/24750 frames = 0.16%  (8.2 minutes)
+
+  takeB's 0/3000 is SDS 6.3's door-slam requirement met on real audio rather than a
+  synthesised burst. ambience_b is five minutes of loud broadband mic noise (-21 dBFS
+  floor, 0.7 dB spread) with not one false trigger -- Silero is spectral, not energy-based.
+
+MISSED SPEECH -- utterances in the known-speech take. The utterance boundary is 500 ms of
+silence because that is [gate] silence_hold_ms, the robot's OWN definition of a turn
+ending, rather than a threshold chosen to flatter the result:
+
+  53 utterances, 66.8s total speech
+  detected (>=1 positive frame):     49/53 = 92.5%
+  detected (>=200 ms of positives):  44/53 = 83.0%
+  UNDETECTED utterances (s): 316.2-317.0, 347.1-347.7, 401.6-402.1, 415.0-416.1
+
+  The four undetected regions are 0.5-1.1 s energy bursts inside a speech take. They are
+  ASSUMED to be voice and counted as misses; they were not listened to, so some may be
+  breaths, chair movement or throat noise, in which case Silero is right to ignore them
+  and the true rate is higher. Counted conservatively.
+
+
+## Cross-check of the labels themselves (not used to score)
+
+Independent energy labelling found 44.4s of speech in takeA; Silero independently found
+42.6s of sustained (>=200 ms) positives there. Agreement within 4% is a sanity check that
+the labels are sane -- it is NOT evidence about the VAD, since using a detector to label
+its own test would be circular.

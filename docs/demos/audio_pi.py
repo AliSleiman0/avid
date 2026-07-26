@@ -16,6 +16,17 @@ tag."
   the config-selected VAD frame by frame and reports **false-open / missed-speech** counts — the
   10-min-VAD gate part.
 
+**The playback-integrity gate (AVID-91).** Turnaround alone is not enough: this harness once
+printed ``PASS: all 3 turns within the 200 ms turnaround budget`` **while the robot was mute**,
+because ``playback_started − speech_ended`` proves only that the *event* path fired. It says
+nothing about PCM reaching a DAC. So every run also checks two things about the audio itself:
+``played_ms > 0`` — now a device-sourced figure, since ``Speaker.play`` returns the ms it
+accepted — and, behind a real speaker, that the playback's **wall-clock elapsed time matches the
+ms played**. A mute run reports 6000 ms played in ~0 ms elapsed; a run at the wrong sample rate
+reports 6000 ms played in 4010 ms elapsed. Both now fail. A gate that can pass on silence is not
+a gate, and a gate that quietly disarms itself is the same bug wearing a hat — hence the loud
+``NOT CHECKED`` line when the config selects a fake speaker.
+
 **What "round-trip latency" means here, and why.** ``AudioService`` is *turn-based*: it buffers
 a whole utterance and echoes it with one ``speaker.play`` **after** ``audio.speech_ended`` (it is
 the M4 loopback stand-in for the M5 AI client, not a per-frame passthrough). So the only honest
@@ -53,6 +64,7 @@ import json
 import logging
 import statistics
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
@@ -78,21 +90,43 @@ _LATENCY_BUDGET_MS = 200.0  # PMP §5.2 — the number the M4 milestone is grade
 _SPEECH_FRAMES = 5  # scripted (laptop) turn length, in mic frames.
 _LIVE_TIMEOUT_S = 120.0  # how long to wait for a human to speak the requested phrases.
 
+# How far a turn's wall-clock playback may diverge from the ms the device says it played.
+# BOTH bounds are needed, because the two error sources scale differently: the ALSA ring
+# buffer is a FIXED depth (~107 ms at 24 kHz with a 2560-frame buffer) that a relative
+# bound would call fine on a 6 s echo and a failure on a 300 ms cue, while a wrong sample
+# rate is a PROPORTIONAL error (1.5x) that an absolute bound would miss on long audio.
+_PLAYBACK_ABS_TOL_MS = 250.0  # buffer depth + a device reopen + scheduling slop
+_PLAYBACK_REL_TOL = 0.15
+
+
+@dataclass(frozen=True, slots=True)
+class _Turn:
+    """One completed turn: the graded metric plus the evidence that audio really played."""
+
+    turnaround_ms: float  # playback_started − speech_ended (the number M4 is graded on)
+    played_ms: int  # what the speaker reported accepting (AVID-91)
+    elapsed_ms: float  # playback_finished − playback_started, wall
+
 
 class _LatencyCollector:
-    """Records per-turn round-trip turnaround from ``audio.*`` ``monotonic_ns`` deltas.
+    """Records per-turn turnaround **and playback integrity** from ``audio.*`` events.
 
     Subscribed (before the bus starts, P3) to ``speech_ended`` / ``playback_started`` /
     ``playback_finished``. For each turn it pairs the origin's ``speech_ended`` with the echo's
     ``playback_started`` by ``correlation_id`` and records ``(started − ended)`` in ms — the
     software turnaround (see the module docstring). ``playback_finished`` marks the turn complete
     and fires the awaitable so the driver never has to sleep-and-hope.
+
+    It also records how long playback actually took and how much the speaker said it played.
+    Those two came free — both events were already subscribed — and they are what separates a
+    passing gate from a mute one (AVID-91).
     """
 
     def __init__(self) -> None:
         self._ended_ns: dict[UUID, int] = {}
         self._started_ns: dict[UUID, int] = {}
         self.samples: list[float] = []
+        self.turns: list[_Turn] = []
         self._arrived = asyncio.Event()
 
     async def on_speech_ended(self, event: Event) -> None:
@@ -108,7 +142,16 @@ class _LatencyCollector:
         if ended is not None and started is not None:
             # monotonic, never timestamp_ms: wall-clock steps (NTP, boot correction) yield
             # negative latencies that poison the graded metric (SDS §9.1.1).
-            self.samples.append((started - ended) / _NS_PER_MS)
+            turnaround = (started - ended) / _NS_PER_MS
+            self.samples.append(turnaround)
+            played = event.played_ms if isinstance(event, AudioPlaybackFinished) else 0
+            self.turns.append(
+                _Turn(
+                    turnaround_ms=turnaround,
+                    played_ms=played,
+                    elapsed_ms=(event.monotonic_ns - started) / _NS_PER_MS,
+                )
+            )
         self._arrived.set()
 
     async def wait_for_turns(self, count: int, *, timeout_s: float) -> None:
@@ -220,16 +263,48 @@ async def _run_loopback(
         finally:
             await service.stop()
 
-    return _report_loopback(collector.samples, turns=turns, budget_ms=budget_ms)
+    return _report_loopback(
+        collector.turns,
+        turns=turns,
+        budget_ms=budget_ms,
+        # Gated on the SPEAKER, not the `live` flag above (which is the VAD's): a real
+        # speaker driven by a scripted VAD is exactly how this fix gets benched, and it
+        # must still be checked. FakeSpeaker.play returns instantly, so elapsed-vs-played
+        # would false-fail there.
+        check_playback=config.adapters.speaker != "fake",
+    )
 
 
-def _report_loopback(samples: list[float], *, turns: int, budget_ms: float) -> int:
-    """Print the per-turn latency table + summary; return the process exit code."""
-    print(f"{'turn':<6} {'round-trip':>14}")
-    print(f"{'-' * 6} {'-' * 14}")
-    for index, latency in enumerate(samples, start=1):
-        print(f"{index:<6} {latency:>11.2f} ms")
-    print(f"{'-' * 6} {'-' * 14}")
+def _diverged(turn: _Turn) -> bool:
+    """Did this turn's wall-clock playback disagree with the ms the device says it played?
+
+    The tolerance is the looser of an absolute floor and a relative band — see the constants.
+    Catches a mute speaker (6000 ms "played" in ~0 ms) and a wrong-rate one (6000 ms in
+    4010 ms) alike, because both are the same lie told at different scales."""
+    allowed = max(_PLAYBACK_ABS_TOL_MS, _PLAYBACK_REL_TOL * turn.played_ms)
+    return abs(turn.elapsed_ms - turn.played_ms) > allowed
+
+
+def _report_loopback(
+    turns_seen: list[_Turn], *, turns: int, budget_ms: float, check_playback: bool
+) -> int:
+    """Print the per-turn table + summary; return the process exit code.
+
+    Two independent gates. **Turnaround** is the graded PMP §5.2 metric. **Playback
+    integrity** is the AVID-91 gate: a turn that played nothing fails always, and — behind a
+    real device — a turn whose wall-clock playback disagrees with its reported ms fails too.
+    ``check_playback`` is false when the config selected a fake speaker, whose instant
+    ``play`` makes elapsed-vs-played meaningless; that case prints its own scope rather than
+    silently skipping, because a quietly disarmed check is the very defect being fixed."""
+    samples = [turn.turnaround_ms for turn in turns_seen]
+    print(f"{'turn':<6} {'round-trip':>14} {'played':>10} {'elapsed':>10}")
+    print(f"{'-' * 6} {'-' * 14} {'-' * 10} {'-' * 10}")
+    for index, turn in enumerate(turns_seen, start=1):
+        print(
+            f"{index:<6} {turn.turnaround_ms:>11.2f} ms {turn.played_ms:>7d} ms "
+            f"{turn.elapsed_ms:>7.0f} ms"
+        )
+    print(f"{'-' * 6} {'-' * 14} {'-' * 10} {'-' * 10}")
     if not samples:
         print("FAIL: no turns captured")
         return 1
@@ -244,7 +319,37 @@ def _report_loopback(samples: list[float], *, turns: int, budget_ms: float) -> i
     if worst > budget_ms:
         print(f"FAIL: max turnaround {worst:.2f} ms exceeds {budget_ms:.0f} ms budget")
         return 1
+
+    # Playback integrity. The silent-turn half is device-independent: played_ms comes from
+    # Speaker.play's return, so zero means the device took nothing (AVID-91).
+    silent = [i for i, turn in enumerate(turns_seen, start=1) if turn.played_ms == 0]
+    if silent:
+        print(f"FAIL: {len(silent)} turn(s) played no audio at all: {silent}")
+        return 1
+    if check_playback:
+        bad = [i for i, turn in enumerate(turns_seen, start=1) if _diverged(turn)]
+        if bad:
+            print(
+                f"FAIL: {len(bad)} turn(s) played for the wrong length of time: {bad} — "
+                f"audio is being dropped or played at the wrong sample rate"
+            )
+            return 1
+
     print(f"PASS: all {turns} turns within the {budget_ms:.0f} ms turnaround budget")
+    if check_playback:
+        worst_div = max(
+            abs(turn.elapsed_ms - turn.played_ms) / max(1, turn.played_ms)
+            for turn in turns_seen
+        )
+        print(
+            f"      playback integrity: {turns}/{turns} turns, "
+            f"worst divergence {worst_div * 100:.1f}%   (speaker=alsa)"
+        )
+    else:
+        print(
+            '      playback integrity: NOT CHECKED — [adapters] speaker = "fake"; this run '
+            "proves\n      nothing about audio reaching a DAC (see docs/demos/README.md, M4)"
+        )
     return 0
 
 

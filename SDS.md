@@ -788,8 +788,8 @@ class Microphone(Protocol):
 
 
 class Speaker(Protocol):
-    async def play(self, chunk: AudioChunk) -> None: ...
-    async def play_file(self, path: Path) -> None: ...   # degraded-mode WAV bank
+    async def play(self, chunk: AudioChunk) -> int: ...  # ms ACCEPTED by the device; honours chunk.sample_rate
+    async def play_file(self, path: Path) -> int: ...    # degraded-mode WAV bank; ms accepted
     async def stop(self) -> None: ...                     # barge-in
 
 
@@ -811,7 +811,7 @@ class TurnSink(Protocol):                # the ConvSvc↔AudioSvc audio seam (§
     def mic(self) -> AsyncIterator[AudioChunk]: ...            # captured PCM up
     async def play(self, chunk: AudioChunk, *, item_id: str) -> None: ...  # assistant PCM down
     async def end_response(self) -> None: ...  # normal completion → playback_finished, SPEAKING→IDLE
-    async def interrupt(self) -> int: ...  # barge-in; returns played_ms ACTUALLY emitted (§6.2.4)
+    async def interrupt(self) -> int: ...  # barge-in; returns played_ms the device ACCEPTED (§6.2.4)
 
 
 class MemoryTools(Protocol):             # the §6.6 tool surface ConvSvc dispatches to (#125, ADR-004)
@@ -866,7 +866,9 @@ Three details worth defending:
 
 **`Servo.axes` and `Camera.capabilities` exist** because of §3.9.3 — the system must run on a 1-servo rig, a 2-servo rig, and a simulator with 6, without conditionals scattered through the services.
 
-**`TurnSink.interrupt()` returns `played_ms`, not `None`.** Barge-in (§6.2.4) needs `audio_end_ms` to be *what the speaker actually emitted*, and only the sink at the bottom of the playback path knows that — it differs from what we received by the entire buffer depth. Returning it from `interrupt()` puts the honest figure at the one layer that can measure it, exactly as `Servo.move_to` clamps at the one layer that owns the limit. Get it wrong and the model believes it said things the user never heard, which then poisons the conversation context. The method is named `interrupt`, not `stop`, because the real sink (`AudioService`, AVID-103) is also a `Service`, whose `stop()` unwinds the mic loop — a lifecycle shutdown is a different act from cutting a turn's playback, and the two must not collide. Its sibling `end_response()` is the *normal* end (no barge-in): the service calls it on `response.done`, and the sink then publishes `audio.playback_finished(truncated=False)` and drives `SPEAKING → IDLE`.
+**`Speaker.play()` returns milliseconds *accepted*, not `None` (AVID-91).** A write that moved no samples must not be indistinguishable from one that moved all of them. `pyalsaaudio`'s `write()` returns `-EPIPE` after an underrun having played nothing — measured on the Pi at the M4 gate as `write 1: 48000 @1.898s / write 2: -32 @0.000s / write 3: 48000 @1.909s` — so an adapter that discards its return drops every other utterance in silence, and the service then publishes `audio.playback_finished` for audio the room never heard. The figure therefore crosses the port, and `AudioService` accumulates *that* rather than recomputing it from the buffer it submitted. **Be exact about what the number is:** a device acknowledges frames **into its ring buffer**, not out of its DAC. So it is *accepted by the device* — exact about **drops**, and still optimistic by up to one buffer depth (~107 ms at 24 kHz with a 2560-frame buffer) about **photons**. That residual is the same error §6.2.4 step 3 already carries; closing it needs a device-level query and is deliberately out of scope. `play()` also **honours `chunk.sample_rate`/`channels`**: the chunk carries those fields precisely so a consumer can obey them, and an adapter that plays 16 kHz loopback PCM through its configured 24 kHz handle is 1.5× fast and a fifth high (measured: 6.00 s of capture echoed in 4.01 s). `[speaker] sample_rate` is therefore the **nominal** format the rig is tuned around, not a rate imposed on the audio — a deviation is logged once, never silently obeyed.
+
+**`TurnSink.interrupt()` returns `played_ms`, not `None`.** Barge-in (§6.2.4) needs `audio_end_ms` to be *what the speaker actually accepted from us* — the frames the device took, not the frames the DAC has clocked out — and only the sink at the bottom of the playback path knows that. It is the sum of `Speaker.play()`'s returns, so it differs from what we *received* by everything that was dropped, and from what was *heard* by at most the buffer depth. Returning it from `interrupt()` puts the honest figure at the one layer that can measure it, exactly as `Servo.move_to` clamps at the one layer that owns the limit. Get it wrong and the model believes it said things the user never heard, which then poisons the conversation context. The method is named `interrupt`, not `stop`, because the real sink (`AudioService`, AVID-103) is also a `Service`, whose `stop()` unwinds the mic loop — a lifecycle shutdown is a different act from cutting a turn's playback, and the two must not collide. Its sibling `end_response()` is the *normal* end (no barge-in): the service calls it on `response.done`, and the sink then publishes `audio.playback_finished(truncated=False)` and drives `SPEAKING → IDLE`.
 
 ### 3.9.2 Simulator adapters
 
@@ -1126,8 +1128,8 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 ```
 1. Local VAD fires while state == SPEAKING
 2. Speaker.stop()                    ← immediate; must be on the port (§3.9.1)
-3. Compute audio_end_ms = how much of the assistant item ACTUALLY played
-   (bytes written to ALSA ÷ 48 bytes/ms at 24kHz mono 16-bit)
+3. Compute audio_end_ms = how much the device ACCEPTED — the sum of Speaker.play()'s
+   returns (frames ALSA took ÷ 48 bytes/ms at 24kHz mono 16-bit), NOT what we submitted
 4. Send conversation.item.truncate(item_id, content_index, audio_end_ms)
 5. Send response.cancel
 6. Mute inbound deltas for item_id until the next assistant item begins
@@ -1136,7 +1138,7 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 Three traps, all of which will cost you an afternoon each if you meet them cold:
 
 - **Step 6 is not optional.** Audio deltas already in flight keep arriving *after* truncation. Without muting by item ID you will hear the robot's cancelled sentence resume for ~200 ms after it should have stopped.
-- **Step 3 must measure what the speaker played, not what we received.** Those differ by the entire playback buffer depth. Getting this wrong makes the model believe it said things the user never heard — which then poisons the conversation context.
+- **Step 3 must measure what the speaker *took*, not what we received.** There are **three** quantities here, not two: what we **received** from the model, what the device **accepted** (`Speaker.play()`'s return), and what the DAC **emitted**. Received-vs-accepted is the entire dropped-audio class — an underrun makes ALSA refuse a whole utterance while returning instantly (AVID-91) — and closing it is what we implement. Accepted-vs-emitted is the playback buffer depth (~107 ms at 24 kHz) and remains a bounded, knowingly-accepted over-report: do not build anything that assumes it is zero. Note step 3's formula above measures **accepted**; that is the deliberate choice, not an oversight. Getting this wrong makes the model believe it said things the user never heard — which then poisons the conversation context.
 - **`conversation.item.truncate` also drops the transcript for the unplayed portion.** Audio/transcript alignment is imprecise, so the transcript you keep for memory extraction (§7.6) is approximate at the truncation boundary. Don't build anything that assumes it's exact.
 
 ## 6.3 The session gate — ADR-007, accepted
@@ -2074,7 +2076,7 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 
 `audio.speech_started` mints the `correlation_id` for a user-initiated turn. It is one of exactly two turn origins; `behavior.trigger_fired` is the other.
 
-`played_ms` on `audio.playback_finished` is §6.2.4's barge-in measurement — what the speaker actually emitted, not what we received.
+`played_ms` on `audio.playback_finished` is §6.2.4's barge-in measurement — the milliseconds the speaker **accepted from us**, summed from `Speaker.play()`'s return, not the length of the buffer we submitted. `played_ms == 0` therefore means the device took nothing, and a gate may treat it as a hard failure (AVID-91).
 
 #### `conversation`
 

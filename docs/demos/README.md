@@ -137,25 +137,56 @@ the **processing turnaround** (`playback_started − speech_ended` from event `m
 part of latency the software owns (§2.8.1). The *physical* mouth-to-ear ≤ 200 ms is judged by ear
 on the Pi, exactly as the M3 face gate is judged by eye.
 
+> ⚠️ **The repo's `config/pi.toml` selects `"fake"` for every device, by design** — choosing real
+> hardware is a provisioning-time act (`deploy/PI_OPERATIONS.md` §3), and `test_supervision.py`
+> boots the real app from this file on Linux CI. So `--config config/pi.toml` on the Pi measures
+> **fakes, not hardware**: it is a second, independent way this gate can pass while nothing plays.
+> The gate run must use `/etc/robot/config.toml` with `[adapters] speaker = "alsa"`,
+> `microphone = "alsa"`, `vad = "silero"` applied. Missing keys fall back to schema defaults, so
+> drift there yields *silently wrong* results rather than errors.
+
 Reproduce it — on a laptop (fakes, deterministic) or on the Pi (real `AlsaMicrophone` /
 `AlsaSpeaker` / `SileroVad`):
 
-1. **Loopback round-trip latency** — drives (laptop) or listens for (Pi) N turns, prints a
-   per-turn table + `min/median/max/count`, and exits non-zero if the max blows the budget:
+1. **Loopback round-trip latency + playback integrity** — drives (laptop) or listens for (Pi) N
+   turns, prints a per-turn table (`round-trip`, `played`, `elapsed`) + `min/median/max/count`,
+   and exits non-zero if the max blows the budget:
    ```
    uv run python docs/demos/audio_pi.py --mode loopback --config config/sim.toml      # laptop
-   /opt/avid/.venv/bin/python docs/demos/audio_pi.py --mode loopback --config config/pi.toml  # Pi: speak N phrases
+   /opt/avid/.venv/bin/python -u docs/demos/audio_pi.py --mode loopback --config /etc/robot/config.toml  # Pi: speak N phrases
    ```
+   Two further gates guard against a pass over silence (AVID-91). **`played_ms > 0`** is checked
+   on every run — the figure comes from `Speaker.play`'s return, so zero means the device took
+   nothing. **Elapsed-vs-played divergence** is checked behind a real speaker: a mute run reports
+   6000 ms played in ~0 ms elapsed, and a wrong-rate one reports 6000 ms in 4010 ms. Behind a fake
+   speaker that second check cannot mean anything and the summary says `playback integrity: NOT
+   CHECKED` in as many words — if you see that line on the Pi, the adapter flips never reached the
+   machine and the run proves nothing.
+   Use `python -u`: stdout buffers when it is not a terminal, so the "Speak N phrases" prompt
+   otherwise never reaches the log and the operator talks into a void.
 2. **VAD gate accuracy** — replays a labelled recording through the config-selected VAD and
    reports false-open / missed-speech counts (meaningful with `SileroVad` on the Pi). The
    ~10-min WAV lives outside the repo; point `--wav`/`--labels` at it (`--labels` is a JSON list
    of `[start_ms, end_ms]` speech spans):
    ```
    /opt/avid/.venv/bin/python docs/demos/audio_pi.py --mode vad \
-     --config config/pi.toml --wav ~/vad_10min.wav --labels ~/vad_10min.labels.json
+     --config /etc/robot/config.toml --wav ~/vad_10min.wav --labels ~/vad_10min.labels.json
    ```
+   ⚠️ **Read this tool's output with care.** It counts every frame outside a label span as
+   silence, so pointing it at a set that contains a *speech* take scores the natural pauses
+   between words as silence the VAD should have ignored — and firing across one is counted as
+   a false open. On the AC-2 set that inflates the report to 2.4% false-open / 35.9% missed,
+   while the sound figures are **0.16% false-open** (measured only on material with no speech,
+   where ground truth has no boundaries to misplace) and **92.5% utterance detection**
+   (measured at the 500 ms boundary `[gate] silence_hold_ms` itself defines). ~70–90% of the
+   raw disagreement sits within ±100 ms of a hand-drawn label boundary. Label the
+   speech-**energy** region, never the clip extent, and prefer separate takes of known
+   provenance — energy alone cannot tell a voice from a door slam, which is the thing under
+   test. See `m4_evidence/vad_accuracy.log` for the full decomposition.
 
-**Not yet tagged.** The M4 harness and its permanent test are merged, but the on-Pi gate
-(AVID-91) is still open: the ≤200 ms round-trip has not been measured on real ALSA, the
-10-minute VAD recording has not been run, and `/var/lib/robot/models/silero_vad.onnx` is not
-yet on the Pi. `v0.M4.0` lands with that gate, not before.
+**Evidence so far:** `m4_evidence/` holds the on-Pi proof for **AC-1** (loopback round-trip,
+confirmed by ear) and **AC-2** (VAD accuracy), captured against `285512c`.
+
+**Not yet tagged.** `v0.M4.0` lands with the whole of AVID-91, not before. Still open: **AC-3**
+the 60-second recorded demo, **AC-4/AC-5** the remaining docs and PMP §5.2 / SDS rows, and
+**AC-6** the tag itself plus closing epic #84.

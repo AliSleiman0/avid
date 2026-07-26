@@ -103,6 +103,10 @@ class CueBank:
         a missing cue is greppable to its turn. The missing-*file* case rides on
         ``play_file`` raising from its worker thread — no filesystem ``stat`` touches the loop
         (P8); only the missing-*directory* case is decided in-process, which needs no I/O.
+
+        A **third** failure has no exception to ride on: the file is there, the device takes
+        nothing, and the robot is silent at the one moment it was trying hardest to speak.
+        ``play_file`` returns the ms accepted (AVID-91), so that case is logged too.
         """
         if self._asset_dir is None:
             _log.warning(
@@ -113,12 +117,24 @@ class CueBank:
             return
         path = self._asset_dir / CUE_FILES[cue]
         try:
-            await self._speaker.play_file(path)
+            played_ms = await self._speaker.play_file(path)
         except (FileNotFoundError, OSError) as exc:
             _log.warning(
                 "cue %s unavailable at %s: %s [correlation_id=%s]",
                 cue.name,
                 path,
                 exc,
+                correlation_id,
+            )
+            return
+        if played_ms == 0:
+            # The file opened and the device took nothing — the degraded path degraded. A
+            # *short* return is a barge-in truncating the cue and is normal; zero is not.
+            # Not knowing the clip's length is deliberate: reading it would put a file stat
+            # on the loop (P8) to learn something the return value already tells us.
+            _log.warning(
+                "cue %s played no audio from %s [correlation_id=%s]",
+                cue.name,
+                path,
                 correlation_id,
             )

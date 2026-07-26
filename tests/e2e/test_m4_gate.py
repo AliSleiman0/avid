@@ -22,8 +22,13 @@ slow-callback gate under coverage).
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import sys
 from pathlib import Path
+from types import ModuleType
 from uuid import UUID
+
+import pytest
 
 from avid.adapters import (
     FakeClock,
@@ -32,6 +37,8 @@ from avid.adapters import (
     FakeVoiceActivityDetector,
 )
 from avid.core.event_bus import AsyncioEventBus
+from avid.core.hal import AudioChunk, pcm_duration_ms
+from avid.core.ports import Speaker
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioPlaybackFinished,
@@ -42,7 +49,6 @@ from avid.domain import (
     RobotState,
 )
 from avid.services import AudioService
-from avid.services.audio import _pcm_ms
 
 _SAMPLE_RATE = 16000
 _CHANNELS = 1
@@ -88,16 +94,20 @@ class _Collector:
                 await self._arrived.wait()
 
 
-async def test_m4_gate_one_turn_loops_back_on_one_correlation_id(
-    tmp_path: Path,
-) -> None:
-    """A scripted turn emits the four audio facts on one id, and the clip is echoed back.
+_SCRIPT = [False, False, True, True, True, False, False]
 
-    ``[False, False, True, True, True, False, False]`` = 2 idle-silence pre-roll frames, 3 speech
-    frames, 2 trailing silence (= ``silence_hold_ms`` at 10 ms/frame, closing the turn). The
-    pre-roll seeds the utterance, so the echoed clip is all 7 captured frames.
+# The bench harness, loaded by path (see _load_audio_pi) — not a package, by design.
+_DEMO_MODULE = "avid_demo_audio_pi"
+
+
+async def _drive_one_turn(speaker: Speaker) -> _Collector:
+    """Run one scripted turn through the real bus and service; return the collected facts.
+
+    ``_SCRIPT`` = 2 idle-silence pre-roll frames, 3 speech frames, 2 trailing silence
+    (= ``silence_hold_ms`` at 10 ms/frame, closing the turn). The pre-roll seeds the
+    utterance, so the echoed clip is all 7 captured frames. Shared so the mute-robot gate
+    test drives the *identical* loop and differs in one thing only: the speaker.
     """
-    script = [False, False, True, True, True, False, False]
     clock = FakeClock()
     bus = AsyncioEventBus(clock=clock)
     state = StateManager(bus=bus, clock=clock, initial=RobotState.IDLE)
@@ -107,8 +117,7 @@ async def test_m4_gate_one_turn_loops_back_on_one_correlation_id(
         chunk_ms=_CHUNK_MS,
         pcm=_FRAME_PCM,
     )
-    speaker = FakeSpeaker(out_dir=tmp_path)
-    vad = FakeVoiceActivityDetector(script=script)
+    vad = FakeVoiceActivityDetector(script=_SCRIPT)
     service = AudioService(
         bus=bus,
         clock=clock,
@@ -137,6 +146,16 @@ async def test_m4_gate_one_turn_loops_back_on_one_correlation_id(
             await collector.wait_for_type(AudioPlaybackFinished, 1)
         finally:
             await service.stop()
+    return collector
+
+
+async def test_m4_gate_one_turn_loops_back_on_one_correlation_id(
+    tmp_path: Path,
+) -> None:
+    """A scripted turn emits the four audio facts on one id, and the clip is echoed back."""
+    script = _SCRIPT
+    speaker = FakeSpeaker(out_dir=tmp_path)
+    collector = await _drive_one_turn(speaker)
 
     # Exactly the four facts of one turn — one of each, nothing else. (Cross-subscriber arrival
     # order is not asserted: the bus is FIFO per-subscriber, not across them, #72.)
@@ -162,9 +181,110 @@ async def test_m4_gate_one_turn_loops_back_on_one_correlation_id(
     assert echoed.sample_rate == _SAMPLE_RATE
     assert echoed.channels == _CHANNELS
     assert echoed.pcm == _FRAME_PCM * len(script)
-    assert p_finished.played_ms == _pcm_ms(
+    assert p_finished.played_ms == pcm_duration_ms(
         echoed.pcm, sample_rate=_SAMPLE_RATE, channels=_CHANNELS
     )
 
     # Latency wiring guard: turnaround is non-negative (deterministically 0 under FakeClock).
     assert p_started.monotonic_ns - ended.monotonic_ns >= 0
+
+
+# --- AVID-91: the gate must be unable to pass on silence -----------------------------------
+
+
+class _MuteSpeaker(FakeSpeaker):
+    """Records every chunk faithfully and reports that the device took none of it.
+
+    The mute robot, reproduced: the PCM is offered, the trace shows it, and nothing plays."""
+
+    async def play(self, chunk: AudioChunk) -> int:
+        await super().play(chunk)
+        return 0
+
+
+def _load_audio_pi() -> ModuleType:
+    """Import ``docs/demos/audio_pi.py`` by path.
+
+    ``docs/demos`` is not a package and is not on the path — deliberately, since these are
+    bench tools rather than shipped code (they build their own object graph outside P3's
+    composition root). A file loader is the zero-config way to reach it, and reaching it is
+    the point: the *previous* version of this gate's pass/fail logic had no test at all,
+    which is how it came to print PASS over a mute robot (AVID-91)."""
+    if (cached := sys.modules.get(_DEMO_MODULE)) is not None:
+        return cached
+    path = Path(__file__).resolve().parents[2] / "docs" / "demos" / "audio_pi.py"
+    spec = importlib.util.spec_from_file_location(_DEMO_MODULE, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registered BEFORE exec: @dataclass resolves a slotted class's annotations through
+    # sys.modules[cls.__module__], so a module loaded by path but left unregistered blows up
+    # inside dataclasses, not in anything this test wrote.
+    sys.modules[_DEMO_MODULE] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_a_mute_robot_fails_the_gate() -> None:
+    """End to end: a speaker that plays nothing publishes ``played_ms == 0``, and the bench
+    harness's own reporter turns that into a **failing** exit code.
+
+    This is the composition the M4 gate was missing. Each half was individually fine — the
+    service published a number, the harness checked a latency — and between them a mute robot
+    scored a clean PASS. Asserting the two halves *together* is what makes that impossible."""
+    speaker = _MuteSpeaker()
+    collector = await _drive_one_turn(speaker)
+
+    finished = collector.of_type(AudioPlaybackFinished)[0]
+    assert isinstance(finished, AudioPlaybackFinished)
+    assert finished.played_ms == 0
+    assert speaker.played[0].pcm == _FRAME_PCM * len(
+        _SCRIPT
+    )  # it was offered the audio
+
+    demo = _load_audio_pi()
+    turn = demo._Turn(turnaround_ms=0.1, played_ms=finished.played_ms, elapsed_ms=0.0)
+    assert (
+        demo._report_loopback([turn], turns=1, budget_ms=200.0, check_playback=True)
+        == 1
+    )
+
+
+def test_the_gate_rejects_silence_and_a_wrong_sample_rate() -> None:
+    """The reporter's own truth table, in milliseconds, driven by the measured numbers.
+
+    ``(6000, 4010)`` is not invented: it is the real 6.00 s of capture that came back in
+    4.01 s when 16 kHz PCM was played through a 24 kHz handle. ``(6000, 0)`` is the mute run.
+    Both must fail; a healthy echo and a short cue within the buffer-depth floor must not."""
+    demo = _load_audio_pi()
+
+    def verdict(played: int, elapsed: float, *, check: bool = True) -> int:
+        turn = demo._Turn(turnaround_ms=1.0, played_ms=played, elapsed_ms=elapsed)
+        return int(
+            demo._report_loopback(
+                [turn], turns=1, budget_ms=200.0, check_playback=check
+            )
+        )
+
+    assert verdict(6000, 5900.0) == 0  # healthy 6 s echo
+    assert verdict(300, 200.0) == 0  # short cue, inside the absolute floor
+    assert verdict(0, 0.0) == 1  # defect 1/3: the device took nothing
+    assert verdict(6000, 4010.0) == 1  # defect 2: 1.5x fast, the measured numbers
+    assert verdict(6000, 0.0) == 1  # mute, but claiming six seconds
+    # Behind a fake speaker the divergence half cannot mean anything and is not applied —
+    # but a turn that played nothing still fails, on every adapter.
+    assert verdict(6000, 0.0, check=False) == 0
+    assert verdict(0, 0.0, check=False) == 1
+
+
+def test_a_disarmed_playback_check_says_so_out_loud(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A check that quietly skips is the defect wearing a hat, so the PASS names its scope."""
+    demo = _load_audio_pi()
+    turn = demo._Turn(turnaround_ms=1.0, played_ms=880, elapsed_ms=0.0)
+
+    assert (
+        demo._report_loopback([turn], turns=1, budget_ms=200.0, check_playback=False)
+        == 0
+    )
+    assert "NOT CHECKED" in capsys.readouterr().out

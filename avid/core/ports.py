@@ -203,12 +203,38 @@ class Microphone(Protocol):
 class Speaker(Protocol):
     """Audio output, including barge-in (SDS §3.9.1)."""
 
-    async def play(self, chunk: AudioChunk) -> None:
-        """Play one chunk of synthesized audio."""
+    async def play(self, chunk: AudioChunk) -> int:
+        """Play one chunk of synthesized audio; return the milliseconds the device **accepted**.
+
+        A write that moved no samples must be distinguishable from one that moved all of
+        them. ALSA returns ``-EPIPE`` after an underrun having played nothing — measured on
+        the Pi at the M4 gate as ``write 1: 48000 @1.898s / write 2: -32 @0.000s /
+        write 3: 48000 @1.909s`` — so an adapter that discards its own return drops every
+        other utterance in silence, and the caller then publishes
+        ``audio.playback_finished`` for audio the room never heard (AVID-91). The figure
+        therefore crosses the port: ``AudioService`` sums *this*, never the length of the
+        buffer it submitted.
+
+        **Accepted, not emitted.** A device acknowledges frames *into its ring buffer*, not
+        out of its DAC. So this is exact about **drops** and optimistic by up to one buffer
+        depth (~107 ms at 24 kHz) about **photons** — the residual §6.2.4 step 3 already
+        carries. A caller needing sub-buffer precision must query the device, which this
+        port deliberately does not expose.
+
+        The chunk's ``sample_rate``/``channels`` are **honoured, not advisory** — the fields
+        exist so a consumer can obey them. Playing 16 kHz PCM at a configured 24 kHz is
+        1.5x fast and a fifth high (measured: 6.00 s of capture echoed in 4.01 s). Only
+        sample *width* is implicit (S16_LE), because ``AudioChunk`` carries no field for it.
+        """
         ...
 
-    async def play_file(self, path: Path) -> None:
-        """Play a WAV from disk — the degraded-mode canned-response bank."""
+    async def play_file(self, path: Path) -> int:
+        """Play a WAV from disk — the degraded-mode canned-response bank.
+
+        Returns the milliseconds the device accepted, under the same reading as
+        :meth:`play`. A barge-in truncates the clip, so a short return is a **fact**, not an
+        error — the caller decides whether a cue that did not finish is worth logging.
+        """
         ...
 
     async def stop(self) -> None:
