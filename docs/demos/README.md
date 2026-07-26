@@ -184,9 +184,11 @@ Reproduce it — on a laptop (fakes, deterministic) or on the Pi (real `AlsaMicr
    provenance — energy alone cannot tell a voice from a door slam, which is the thing under
    test. See `m4_evidence/vad_accuracy.log` for the full decomposition.
 
-**Evidence so far:** `m4_evidence/` holds the on-Pi proof for **AC-1** (loopback round-trip,
-confirmed by ear) and **AC-2** (VAD accuracy), captured against `285512c`.
+**Evidence:** `m4_evidence/` holds the on-Pi proof for **AC-1** (loopback round-trip, confirmed
+by ear) and **AC-2** (VAD accuracy), captured against `285512c`.
 
-**Not yet tagged.** `v0.M4.0` lands with the whole of AVID-91, not before. Still open: **AC-3**
-the 60-second recorded demo, **AC-4/AC-5** the remaining docs and PMP §5.2 / SDS rows, and
-**AC-6** the tag itself plus closing epic #84.
+**Tagged `v0.M4.0`.** The gate (AVID-91) is sealed with **AC-3 deferred by the project owner** —
+the 60-second recorded demo was waived, with the reasons and what it costs recorded on the
+issue. In short: every behaviour the demo would show is measured and banked, but a video would
+have been *independent witness*, and without it the only external confirmation on record is the
+operator's ear. Accepted deliberately, not overlooked.
