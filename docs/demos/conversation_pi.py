@@ -177,6 +177,7 @@ class _ConversationCollector:
         self.degraded_entered = 0
         self.degraded_exited = 0
         self.downtime_s = 0.0
+        self.barge_ins = 0
         self._arrived = asyncio.Event()
 
     async def on_speech_ended(self, event: Event) -> None:
@@ -191,6 +192,10 @@ class _ConversationCollector:
         cid = event.correlation_id
         ended = self._ended_ns.get(cid)
         started = self._started_ns.get(cid)
+        if isinstance(event, AudioPlaybackFinished) and event.truncated:
+            # AC-3: local VAD cut the speaker mid-reply. Counted from the fact AudioService
+            # publishes, so the barge-in evidence is machine-produced rather than remembered.
+            self.barge_ins += 1
         if ended is not None and started is not None:
             played = event.played_ms if isinstance(event, AudioPlaybackFinished) else 0
             self.turns.append(
@@ -339,6 +344,7 @@ def _report_conversation(
     budget_usd: float = _O7_MONTHLY_BUDGET_USD,
     check_playback: bool,
     live: bool,
+    barge_ins: int = 0,
     recovery: _Recovery | None = None,
 ) -> int:
     """Print the per-turn table, the O1 histogram and the O7 projection; return the exit code.
@@ -402,6 +408,10 @@ def _report_conversation(
         f"O7  projected ${projected_monthly_usd:.2f}/month vs ${budget_usd:.0f} budget, "
         f"cached-input {cached_ratio * 100:.1f}%"
     )
+    # AC-3 is demonstrated, not gated: a run where nobody interrupted is a valid O1/O7 run, so
+    # this reports what happened rather than failing on it. Zero here with a barge-in attempted
+    # means the local VAD never cut the speaker -- which IS the AC-3 failure, read by a human.
+    print(f"AC-3 barge-ins observed (playback truncated by local VAD): {barge_ins}")
 
     # Playback integrity first: it is the one that can invalidate every number above it.
     silent = [i for i, turn in enumerate(turns_seen, start=1) if turn.played_ms == 0]
@@ -614,6 +624,7 @@ async def _run_conversation(
         # instantly, so elapsed-vs-played would false-fail there.
         check_playback=config.adapters.speaker != "fake",
         live=live,
+        barge_ins=collector.barge_ins,
         recovery=collector.recovery if require_recovery else None,
     )
 
