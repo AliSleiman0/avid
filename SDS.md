@@ -1162,6 +1162,24 @@ IDLE after 30s of no speech: close session. Cost: $0 again.
 
 **Value of the gate:** see §6.10. It is the difference between $4/month and $108/month.
 
+> **As measured on hardware (AVID-91).** The door-slam claim above is the one this section
+> stakes itself on, and it holds on real audio rather than a synthesised burst: **0 false opens
+> in 3000 frames** of deliberate transients — knocks, a clap, a door, a chair — and **0 in
+> 15000 frames** of five minutes of loud broadband mic noise (a −21 dBFS constant floor, which
+> a loudness threshold would have opened on continuously). Across 8.2 minutes of material
+> containing no speech at all: **40/24750 frames = 0.16% false-open**. Speech detection, measured
+> at the 500 ms utterance boundary `[gate] silence_hold_ms` itself defines: **49/53 = 92.5%**.
+>
+> Two cautions for anyone re-measuring. `audio_pi.py --mode vad` counts every frame outside a
+> label span as silence, so pointing it at a set containing a *speech* take scores the pauses
+> between words as silence the VAD should have ignored — on this set that inflates the report to
+> 2.4% / 35.9%, of which 94% of the false opens are in the one speech take and ~70–90% of all
+> disagreement lies within ±100 ms of a hand-drawn boundary. And label the speech-**energy**
+> region, never the clip extent: doing the latter once produced a bogus 56% missed-speech that
+> was pure labelling artifact. Separate takes of known provenance are what make labels
+> trustworthy, because energy alone cannot tell a voice from a door slam — which is precisely
+> the discrimination under test. Evidence: `docs/demos/m4_evidence/`.
+
 ## 6.4 Instruction composition architecture
 
 The instruction block is assembled once per session, at open, from four layers. It is then **frozen** for the session's life (§6.2.2).
