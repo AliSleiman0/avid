@@ -364,6 +364,7 @@ def test_openai_client_repr_never_leaks_the_key() -> None:
         instructions="You are a test.",
         max_output_tokens=512,
         turn_detection={"type": "server_vad"},
+        transcription_model="whisper-1",
     )
     assert "sk-super-secret-value" not in repr(client)
     assert isinstance(client, RealtimeClient)  # port-shaped without a connection (P6)
@@ -377,6 +378,7 @@ def _openai(**overrides: object) -> OpenAIRealtimeClient:
         "instructions": "You are a test.",
         "max_output_tokens": 512,
         "turn_detection": {"type": "server_vad"},
+        "transcription_model": "whisper-1",
     }
     kwargs.update(overrides)
     return OpenAIRealtimeClient(**kwargs)  # type: ignore[arg-type]
@@ -403,6 +405,40 @@ def test_tools_are_declared_in_the_session_update_prefix() -> None:
     tool = {"type": "function", "name": "recall", "parameters": {}}
     assert "tools" not in _openai()._session_config()  # empty default — no key at all
     assert _openai(tools=[tool])._session_config()["tools"] == [tool]
+
+
+def test_the_session_update_uses_the_ga_shape_not_the_disabled_beta_one() -> None:
+    """The GA session shape, pinned (§6.10 volatility, R-10).
+
+    All three assertions are regressions from the **first live run this adapter ever had** (the
+    #106 prep — CI had only ever exercised the ``replay`` fake). The beta interface is switched off
+    server-side: a bare ``"pcm16"`` format string with no session ``type`` gets the socket closed
+    with ``4000 invalid_request_error.beta_api_shape_disabled``, and omitting either ``rate`` earns
+    ``missing_required_parameter: session.audio.output.format.rate``.
+
+    The input rate is injected rather than assumed because this adapter **never resamples** — it
+    base64s whatever PCM ``send_audio`` is handed — so a declared rate that disagrees with the mic's
+    is a lie the API cannot detect and the user hears as a chipmunk (the #146 defect, one layer up).
+    """
+    config = _openai(input_sample_rate=16000)._session_config()
+
+    assert config["type"] == "realtime"
+    assert config["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 16000}
+    assert config["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
+
+
+def test_the_session_update_asks_the_api_to_transcribe_the_user() -> None:
+    """Realtime does **not** transcribe input audio unless the session asks it to.
+
+    Without this key no ``conversation.item.input_audio_transcription.completed`` frame ever
+    arrives, so ``UserTranscript`` never crosses the port, ``conversation.user_transcribed`` is
+    never published, and LISTENING→THINKING never fires: the robot answers out loud while the
+    state machine believes nothing was said. Every ``assets/sessions/`` fixture *records* that
+    frame, which is precisely why replay-based CI could not see it missing — it took one live
+    session (#106 prep) to find, and this test is what stops it coming back."""
+    config = _openai(transcription_model="whisper-1")._session_config()
+
+    assert config["audio"]["input"]["transcription"] == {"model": "whisper-1"}
 
 
 def test_memory_block_is_appended_after_the_static_instructions() -> None:

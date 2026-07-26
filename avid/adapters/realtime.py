@@ -323,6 +323,8 @@ class OpenAIRealtimeClient:
         instructions: str,
         max_output_tokens: int,
         turn_detection: dict[str, Any],
+        transcription_model: str,
+        input_sample_rate: int = _ASSISTANT_SAMPLE_RATE,
         tools: Sequence[dict[str, Any]] = (),
     ) -> None:
         self._api_key = (
@@ -333,6 +335,11 @@ class OpenAIRealtimeClient:
         self._instructions = instructions
         self._max_output_tokens = max_output_tokens
         self._turn_detection = turn_detection
+        self._transcription_model = transcription_model
+        # GA declares the input PCM rate explicitly (the beta shape's bare "pcm16" implied 24 kHz).
+        # It must match what send_audio actually puts on the wire — this adapter never resamples —
+        # so the composition root injects the mic's [microphone] sample_rate (P7).
+        self._input_sample_rate = input_sample_rate
         # Tool declarations (§6.6) are session-level and part of the cached prefix (§6.2.2), so
         # they are fixed at construction, never sent per-turn. Empty until #125 supplies the
         # recall/forget/remember_fact schemas via the composition root; a vendor-shaped dict
@@ -363,17 +370,34 @@ class OpenAIRealtimeClient:
         if memory_block:
             instructions = f"{instructions}\n\n{memory_block}"
         config: dict[str, Any] = {
+            # GA shape (§6.10 volatility, R-10). The beta interface — `OpenAI-Beta: realtime=v1`
+            # plus a bare "pcm16" format string and no session type — is switched off server-side
+            # and closes the socket with 4000 invalid_request_error.beta_api_shape_disabled.
+            "type": "realtime",
             "instructions": instructions,
             "audio": {
                 "input": {
-                    "format": "pcm16",
+                    "format": {"type": "audio/pcm", "rate": self._input_sample_rate},
+                    # Without this the API never transcribes the user and
+                    # `conversation.item.input_audio_transcription.completed` never arrives — so
+                    # `UserTranscript` never crosses the port, `conversation.user_transcribed` is
+                    # never published, and LISTENING→THINKING never fires. The turn silently dies.
+                    "transcription": {"model": self._transcription_model},
                     "turn_detection": {
                         **self._turn_detection,
                         "create_response": True,
                         "interrupt_response": True,
                     },
                 },
-                "output": {"format": "pcm16", "voice": self._voice},
+                "output": {
+                    # 24 kHz is what the model emits and what _translate stamps on every
+                    # AssistantAudioChunk; GA requires the rate stated rather than implied.
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": _ASSISTANT_SAMPLE_RATE,
+                    },
+                    "voice": self._voice,
+                },
             },
             "max_output_tokens": self._max_output_tokens,
         }
@@ -395,10 +419,9 @@ class OpenAIRealtimeClient:
         block, and it carries the static prefix + that block as layer 4 (§6.2.2, AC-2)."""
         import websockets  # lazy, adapter-local optional group (AC-2, ADR-008)
 
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        # No `OpenAI-Beta: realtime=v1`: that header selects the beta interface, which is disabled
+        # server-side and rejects the GA session shape this adapter sends (see _session_config).
+        headers = {"Authorization": f"Bearer {self._api_key}"}
         connect = websockets.connect(
             f"{_REALTIME_URL}?model={self._model}", additional_headers=headers
         )

@@ -487,6 +487,12 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
                 instructions=config.ai.instructions + "\n\n" + CAPABILITY_INSTRUCTIONS,
                 max_output_tokens=config.ai.max_output_tokens,
                 turn_detection=config.ai.turn_detection.model_dump(),
+                # Realtime transcribes the user's speech only when asked; without this no
+                # UserTranscript is ever produced and the turn arc stalls (§6.2.2).
+                transcription_model=config.ai.transcription_model,
+                # GA states the input PCM rate rather than implying it, and this adapter never
+                # resamples — so it must be the mic's own rate (P7), not a literal.
+                input_sample_rate=config.microphone.sample_rate,
                 # The §6.6 tool declarations (#125): recall/forget/remember_fact as JSON Schema,
                 # static for the session's life. Vendor-neutral dicts, injected like turn_detection.
                 tools=TOOL_SCHEMAS,
