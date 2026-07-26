@@ -87,6 +87,8 @@ chunk_ms    = 20                # frame size — the 20 ms mic-capture budget
 
 [speaker]                       # audio playback params for the speaker adapter (AVID-54)
 device      = "default"         # ALSA device — only the alsa adapter uses it (the fake writes WAVs)
+# NOMINAL playback format — what the rig is tuned around, NOT a rate imposed on the audio.
+# Every AudioChunk carries its own rate/channels and the adapter honours them (#91).
 sample_rate = 24000             # 24 kHz — the Realtime output rate (§6.2.4), NOT the mic's 16 kHz
 channels    = 1                 # mono playback
 wav_dir     = ".artifacts/speaker"  # where FakeSpeaker writes its eyeball-able WAVs (§3.9.2)

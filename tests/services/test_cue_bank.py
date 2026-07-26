@@ -102,3 +102,38 @@ async def test_missing_file_is_swallowed_and_logged_with_correlation_id(
     assert speaker.files_played == [tmp_path / CUE_FILES[Cue.CONNECTION_TROUBLE]]
     assert "CONNECTION_TROUBLE" in caplog.text
     assert str(corr) in caplog.text
+
+
+class _MuteSpeaker(FakeSpeaker):
+    """Finds the file, opens it, and plays none of it — the failure with no exception."""
+
+    async def play_file(self, path: str | Path) -> int:
+        await super().play_file(path)
+        return 0
+
+
+async def test_a_cue_that_played_no_audio_is_logged_with_correlation_id(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-91: the third failure, the one with nothing to raise.
+
+    The directory is configured and the file is present, so neither existing guard fires —
+    yet the room hears nothing. ``play_file`` reports the ms accepted, which is how this
+    becomes visible at all. Silence in the *degraded* path is the worst kind: it is what the
+    robot falls back to precisely when it has nothing else to say."""
+    clip = tmp_path / CUE_FILES[Cue.CONNECTION_TROUBLE]
+    with wave.open(str(clip), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24000)
+        handle.writeframes(b"\x00" * 4800)  # 100 ms
+    bank = CueBank(speaker=_MuteSpeaker(), asset_dir=tmp_path)
+    corr = uuid4()
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await bank.play(Cue.CONNECTION_TROUBLE, correlation_id=corr)
+
+    assert "played no audio" in caplog.text
+    assert "CONNECTION_TROUBLE" in caplog.text
+    assert str(corr) in caplog.text

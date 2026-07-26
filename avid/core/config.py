@@ -156,11 +156,20 @@ class SpeakerConfig(_Section):
     """Audio playback parameters, injected into the speaker adapter (P7, AVID-54).
 
     Describes the *one* playback stream the M2 rig opens: the ALSA ``device`` (the MAX98357 I2S
-    DAC), and the ``sample_rate``/``channels`` at which ``play`` streams. 24 kHz mono is the rate
-    the Realtime API *emits* (SDS §6.2.4, "PCM16 24 kHz mono 16-bit") — distinct from the mic's
-    16 kHz *capture* rate. ``wav_dir`` is where the ``FakeSpeaker`` writes its eyeball-able WAVs
-    (SDS §3.9.2), parallel to ``[display] frames_dir``; only the ``alsa`` adapter reads
-    ``device``. The adapter never reaches for these itself — the composition root injects them.
+    DAC), and the **nominal** ``sample_rate``/``channels`` the rig is tuned around. 24 kHz mono
+    is the rate the Realtime API *emits* (SDS §6.2.4, "PCM16 24 kHz mono 16-bit") — distinct
+    from the mic's 16 kHz *capture* rate.
+
+    ``sample_rate``/``channels`` are **not a format imposed on the audio**. Every ``AudioChunk``
+    carries its own rate and channel count and the adapter honours them, reopening the device
+    when they differ; these values are what a deviation is reported *against* — one ``INFO``
+    line per adapter lifetime. That distinction is the whole of AVID-91's second defect: the
+    adapter used to open at this rate and play whatever it was handed, so the M4 loopback's
+    16 kHz echo came back through a 24 kHz stream, 1.5x fast and a fifth high, for three weeks.
+
+    ``wav_dir`` is where the ``FakeSpeaker`` writes its eyeball-able WAVs (SDS §3.9.2), parallel
+    to ``[display] frames_dir``; only the ``alsa`` adapter reads ``device``. The adapter never
+    reaches for any of these itself — the composition root injects them.
     """
 
     device: str = "default"

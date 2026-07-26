@@ -19,6 +19,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# S16_LE, 2 bytes per sample per channel — the one PCM format every audio port
+# exchanges (see adapters/microphone.py, adapters/speaker.py). ``AudioChunk``
+# carries no bit-depth field, so sample *width* is implicit; sample *rate* and
+# channel count are not — they are fields, and a consumer must honour them.
+SAMPLE_WIDTH_BYTES = 2
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AudioChunk:
@@ -31,6 +37,39 @@ class AudioChunk:
     pcm: bytes
     sample_rate: int
     channels: int
+
+
+def pcm_duration_ms(pcm: bytes, *, sample_rate: int, channels: int) -> int:
+    """Milliseconds of S16_LE *pcm* — its byte length over the bytes-per-ms of its format.
+
+    Floors. Format is a parameter, not a constant: mic capture is 16 kHz (32 bytes/ms)
+    and Realtime playback is 24 kHz (48 bytes/ms), so the same arithmetic serves both —
+    which is exactly AC-3's "÷ 48 at 24 kHz mono 16-bit" for real audio and ÷ 32 for the
+    M4 loopback echo of 16 kHz capture.
+
+    Lives in ``core`` because three layers need it and none may reach for another's copy:
+    ``AudioService`` sizes a turn with it, ``FakeSpeaker`` reports playback with it, and
+    ``AlsaSpeaker`` converts the frames ALSA accepted back into the milliseconds the
+    ``Speaker`` port returns (AVID-91). One formula, one test.
+
+    **This is submitted duration, not played duration.** It answers "how long is this
+    buffer", never "how much of it reached a DAC" — computing the latter from the former
+    is precisely how the M4 gate passed while the robot was mute. The played figure comes
+    from :meth:`~avid.core.ports.Speaker.play`'s return value.
+    """
+    denom = sample_rate * channels * SAMPLE_WIDTH_BYTES
+    return len(pcm) * 1000 // denom if denom else 0
+
+
+def frames_duration_ms(frames: int, *, sample_rate: int) -> int:
+    """Milliseconds of *frames* PCM frames at *sample_rate*. Floors.
+
+    The frame is the unit a sound device counts in — ALSA's ``write()`` returns frames
+    accepted, not bytes — so this is the conversion an adapter needs to answer
+    :meth:`~avid.core.ports.Speaker.play` in the milliseconds the port promises.
+    Channel-independent by definition: a frame is one sample *per channel*.
+    """
+    return frames * 1000 // sample_rate if sample_rate else 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

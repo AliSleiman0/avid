@@ -255,8 +255,10 @@ def _build_speaker(config: Config) -> Speaker:
     ``fake`` is the laptop/sim default — records what it plays and writes eyeball-able WAVs to
     ``[speaker] wav_dir``, no hardware; ``alsa`` plays to the MAX98357 I2S DAC via ALSA (the
     ``alsaaudio`` import lives inside that adapter, pip-on-Pi only, ADR-008). Both are handed the
-    same playback params from ``[speaker]`` (P7), so the play/stop contract behaves identically.
-    Any other value fails loudly rather than silently doing nothing.
+    same **nominal** playback params from ``[speaker]`` (P7), so the play/stop contract behaves
+    identically — nominal because both adapters honour each chunk's own declared format and only
+    report a deviation from these (AVID-91). Any other value fails loudly rather than silently
+    doing nothing.
     """
     match config.adapters.speaker:
         case "fake":

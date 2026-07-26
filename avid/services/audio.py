@@ -47,7 +47,7 @@ from uuid import UUID, uuid4
 
 from avid.core.envelope import envelope
 from avid.core.event_bus import Subscription
-from avid.core.hal import AudioChunk
+from avid.core.hal import SAMPLE_WIDTH_BYTES, AudioChunk, pcm_duration_ms
 from avid.core.ports import (
     Clock,
     EventBus,
@@ -70,22 +70,6 @@ _log = logging.getLogger(__name__)
 
 # The component name stamped on the events this module publishes (SDS §9.1.3).
 _SOURCE = "AudioService"
-
-# S16_LE, 2 bytes/sample/channel — the one PCM format the mic/speaker adapters exchange
-# (see microphone.py / speaker.py). AudioChunk carries no bit-depth field, so it is implicit.
-_SAMPLE_WIDTH_BYTES = 2
-
-
-def _pcm_ms(pcm: bytes, *, sample_rate: int, channels: int) -> int:
-    """Milliseconds of S16_LE *pcm* — its byte length over the bytes-per-ms of its format.
-
-    Floors. Format is a parameter, not a constant: mic capture is 16 kHz (32 bytes/ms) and
-    Realtime playback is 24 kHz (48 bytes/ms), so the same arithmetic serves both — which
-    is exactly AC-3's "÷ 48 at 24 kHz mono 16-bit" for real audio and ÷ 32 for the loopback
-    echo of 16 kHz capture.
-    """
-    denom = sample_rate * channels * _SAMPLE_WIDTH_BYTES
-    return len(pcm) * 1000 // denom if denom else 0
 
 
 class AudioService:
@@ -129,9 +113,7 @@ class AudioService:
         # (#86, P1). 16 kHz mono S16_LE ⇒ 32 bytes/ms.
         self._sample_rate = sample_rate
         self._channels = channels
-        self._bytes_per_ms = max(
-            1, sample_rate * channels * _SAMPLE_WIDTH_BYTES // 1000
-        )
+        self._bytes_per_ms = max(1, sample_rate * channels * SAMPLE_WIDTH_BYTES // 1000)
         self._preroll = AudioPreRoll(
             capacity_ms=ring_buffer_ms, bytes_per_ms=self._bytes_per_ms
         )
@@ -218,8 +200,13 @@ class AudioService:
         The **first** delta of a response opens playback: publish ``audio.playback_started`` and
         drive ``THINKING → SPEAKING`` (the playback belongs to the turn whose ``correlation_id``
         this service minted at ``speech_started``, so it is stamped with that, captured now so a
-        later barge-in keeps it). Subsequent deltas just accumulate ``played_ms`` and stream. The
-        ``Speaker.play`` await means that by :meth:`end_response` the audio has actually gone out.
+        later barge-in keeps it). Subsequent deltas just accumulate ``played_ms`` and stream.
+
+        ``played_ms`` accumulates **what** :meth:`~avid.core.ports.Speaker.play` **returned** —
+        the ms the device accepted — never the length of the buffer we handed down. Those
+        differ: ALSA returns ``-EPIPE`` after an underrun having played nothing, so a service
+        that recomputed this from ``chunk.pcm`` would publish ``audio.playback_finished`` for
+        audio the room never heard (AVID-91). A shortfall is logged against the turn.
         """
         if self._playing_item is None:
             self._playing_item = item_id
@@ -235,10 +222,19 @@ class AudioService:
             await self._state.transition(
                 Trigger.AUDIO_PLAYBACK_STARTED, correlation_id=corr
             )
-        self._playing_ms += _pcm_ms(
+        submitted_ms = pcm_duration_ms(
             chunk.pcm, sample_rate=chunk.sample_rate, channels=chunk.channels
         )
-        await self._speaker.play(chunk)
+        accepted_ms = await self._speaker.play(chunk)
+        self._playing_ms += accepted_ms
+        if accepted_ms < submitted_ms:
+            _log.warning(
+                "speaker accepted %d of %d ms for item %s [correlation_id=%s]",
+                accepted_ms,
+                submitted_ms,
+                item_id,
+                self._playback_corr(),
+            )
 
     async def end_response(self) -> None:
         """Normal end of the response's audio (``TurnSink``, §9.1.4).
@@ -255,12 +251,16 @@ class AudioService:
         self._clear_playback()
 
     async def interrupt(self) -> int:
-        """Barge-in: cut playback immediately and report the ms the speaker **actually** emitted
+        """Barge-in: cut playback immediately and report the ms the speaker **accepted**
         (``TurnSink``, SDS §6.2.4). Idempotent — 0 when nothing is playing.
 
         Stops the speaker (on the port so this is instant), publishes the truncated
-        ``audio.playback_finished`` fact, and returns ``played_ms`` — the honest ``audio_end_ms``
-        the model-side truncate (#104) needs. It does **not** drive a transition: the
+        ``audio.playback_finished`` fact, and returns ``played_ms`` — the ``audio_end_ms``
+        the model-side truncate (#104) needs. *Accepted*, not *emitted*: the figure is summed
+        from :meth:`~avid.core.ports.Speaker.play`'s returns, so it is exact about audio the
+        device refused and still optimistic by up to one playback-buffer depth (~107 ms at
+        24 kHz) about audio the DAC had not yet clocked out (SDS §6.2.4). Strictly better than
+        the buffer length it replaced, and bounded. It does **not** drive a transition: the
         ``SPEAKING → LISTENING`` move is the ``speech_started`` origin's (see :meth:`_begin_speech`).
         """
         await self._speaker.stop()
@@ -308,7 +308,7 @@ class AudioService:
         async for chunk in self._mic.stream():
             speech = self._vad.is_speech(chunk)
             self._preroll.append(chunk.pcm)
-            frame_ms = _pcm_ms(
+            frame_ms = pcm_duration_ms(
                 chunk.pcm, sample_rate=chunk.sample_rate, channels=chunk.channels
             )
             if speech:
@@ -410,9 +410,11 @@ class AudioService:
 
         Publishes ``audio.playback_started`` / ``audio.playback_finished`` around a single
         ``Speaker.play`` of the whole utterance, propagating *turn_id* so one grep on it
-        reconstructs the turn including its echo. ``played_ms`` is what the speaker actually
-        emitted (SDS:1982), computed from the played PCM's own format; ``truncated`` is
-        always ``False`` at M4 (no barge-in truncation path yet).
+        reconstructs the turn including its echo. ``played_ms`` is **what the speaker
+        returned** — the ms the device accepted — not the length of the PCM we submitted;
+        the two differ exactly when audio is being dropped, which is the failure this gate
+        exists to catch (AVID-91). ``truncated`` is always ``False`` at M4 (no barge-in
+        truncation path yet).
 
         Deliberately does **not** drive the state machine: the ``THINKING → SPEAKING →
         IDLE`` arc is a real conversation turn's, and there is no ConversationService at M4
@@ -430,10 +432,20 @@ class AudioService:
                 item_id=item_id,
             )
         )
-        await self._speaker.play(
+        played_ms = await self._speaker.play(
             AudioChunk(pcm=pcm, sample_rate=self._sample_rate, channels=self._channels)
         )
-        played_ms = _pcm_ms(pcm, sample_rate=self._sample_rate, channels=self._channels)
+        submitted_ms = pcm_duration_ms(
+            pcm, sample_rate=self._sample_rate, channels=self._channels
+        )
+        if played_ms < submitted_ms:
+            _log.warning(
+                "loopback %s: speaker accepted %d of %d ms [correlation_id=%s]",
+                item_id,
+                played_ms,
+                submitted_ms,
+                turn_id,
+            )
         await self._bus.publish(
             AudioPlaybackFinished(
                 **envelope(clock=self._clock, correlation_id=turn_id, source=_SOURCE),

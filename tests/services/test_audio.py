@@ -23,16 +23,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NamedTuple
 from uuid import uuid4
+
+import pytest
 
 from avid.adapters.clock import FakeClock
 from avid.adapters.microphone import FakeMicrophone
 from avid.adapters.speaker import FakeSpeaker
 from avid.adapters.vad import FakeVoiceActivityDetector
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.hal import AudioChunk
+from avid.core.hal import AudioChunk, pcm_duration_ms
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioPlaybackFinished,
@@ -44,7 +47,7 @@ from avid.domain import (
     SystemHandlerFailed,
 )
 from avid.domain.events import REASON_HANDLER_RAISED
-from avid.services.audio import AudioService, _pcm_ms
+from avid.services.audio import AudioService
 
 # Generous ceiling: frames arrive every 10 ms of real time, so even a two-turn script
 # (~8 frames) plus its loopback lands well inside this, while a wedged bus still fails fast.
@@ -188,12 +191,12 @@ async def _rig(
 def test_played_ms_is_bytes_over_the_chunks_own_format() -> None:
     """AC-3's "÷ 48 bytes/ms at 24 kHz mono 16-bit", and the same rule at the 16 kHz the
     loopback echoes. Format is a parameter, so one formula serves capture and playback."""
-    assert _pcm_ms(b"\x00" * 48, sample_rate=24000, channels=1) == 1
-    assert _pcm_ms(b"\x00" * 96, sample_rate=24000, channels=1) == 2
+    assert pcm_duration_ms(b"\x00" * 48, sample_rate=24000, channels=1) == 1
+    assert pcm_duration_ms(b"\x00" * 96, sample_rate=24000, channels=1) == 2
     assert (
-        _pcm_ms(b"\x00" * 32, sample_rate=16000, channels=1) == 1
+        pcm_duration_ms(b"\x00" * 32, sample_rate=16000, channels=1) == 1
     )  # the loopback rate
-    assert _pcm_ms(b"", sample_rate=24000, channels=1) == 0
+    assert pcm_duration_ms(b"", sample_rate=24000, channels=1) == 0
 
 
 # --- the service shape (SDS §9.2) ----------------------------------------------------------
@@ -270,6 +273,79 @@ async def test_a_full_turn_publishes_the_four_audio_facts_on_one_correlation_id(
         assert len(rig.speaker.played) == 1
         assert len(rig.speaker.played[0].pcm) == 7 * _FRAME_BYTES
         assert rig.speaker.played[0].sample_rate == _SAMPLE_RATE
+
+
+# --- AVID-91: played_ms is the device's answer, never our own arithmetic -------------------
+
+
+class _LossySpeaker(FakeSpeaker):
+    """A ``FakeSpeaker`` that accepts only a fraction of what it is handed.
+
+    Stands in for the failure the M4 gate could not see: ALSA taking nothing after an
+    underrun, or a device that dropped periods. ``fraction=0`` is a mute speaker — the exact
+    condition under which the harness once printed ``PASS``. Subclassing the fake is this
+    file's established way to vary one behaviour (see ``_StateSpySpeaker``); no mock, which
+    is banned outside ``tests/adapters/`` anyway (SDS §14.3).
+    """
+
+    def __init__(self, *, fraction: float) -> None:
+        super().__init__()
+        self._fraction = fraction
+
+    async def play(self, chunk: AudioChunk) -> int:
+        return int(await super().play(chunk) * self._fraction)
+
+
+async def test_loopback_played_ms_is_what_the_speaker_accepted_not_what_we_sent() -> (
+    None
+):
+    """AVID-91: the published fact reports the device's answer, halved here, not the 70 ms
+    of PCM handed down. Recomputing this from the buffer is what let a mute run pass."""
+    script = [False, False, True, True, True, False, False]
+    async with _rig(
+        vad_script=script,
+        loopback=True,
+        speaker_factory=lambda _state: _LossySpeaker(fraction=0.5),
+    ) as rig:
+        await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
+        await rig.collector.settle()
+
+        finished = rig.collector.of_type(AudioPlaybackFinished)[0]
+        assert isinstance(finished, AudioPlaybackFinished)
+        assert finished.played_ms == 35  # half of the 70 ms submitted
+        assert (
+            len(rig.speaker.played[0].pcm) == 7 * _FRAME_BYTES
+        )  # all of it was offered
+
+
+async def test_a_mute_speaker_reports_zero_played_ms(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """**The regression for the headline defect.** A speaker that plays nothing must publish
+    ``played_ms == 0``, so a gate can fail on it — and the shortfall must name the turn.
+
+    This is the whole of AVID-91 in one assertion. The old service computed ``played_ms``
+    from the length of the buffer it submitted, so a mute robot published a confident
+    ``played_ms=6000`` and the gate printed ``PASS: all 3 turns within the 200 ms budget``.
+    """
+    script = [False, False, True, True, True, False, False]
+    with caplog.at_level(logging.WARNING, logger="avid.services.audio"):
+        async with _rig(
+            vad_script=script,
+            loopback=True,
+            speaker_factory=lambda _state: _LossySpeaker(fraction=0.0),
+        ) as rig:
+            await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
+            await rig.collector.settle()
+
+            finished = rig.collector.of_type(AudioPlaybackFinished)[0]
+            assert isinstance(finished, AudioPlaybackFinished)
+            assert finished.played_ms == 0
+            turn_id = finished.correlation_id
+
+    # DoD: a new failure path logs against its correlation id (SDS §3.12.2).
+    assert "accepted 0 of 70 ms" in caplog.text
+    assert str(turn_id) in caplog.text
 
 
 async def test_speech_start_drives_idle_to_listening_without_barge_in() -> None:

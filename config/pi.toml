@@ -115,6 +115,9 @@ chunk_ms    = 20                # frame size — the 20 ms mic-capture budget
 # contract run flips it (AVID-57), exactly as camera/servo/mic did. device is the MAX98357 I2S
 # DAC's ALSA name (e.g. "plughw:CARD=MAX98357A") — set it when flipping to alsa on the Pi.
 device      = "default"         # ALSA device — only the alsa adapter uses it
+# NOMINAL playback format — what the rig is tuned around, NOT a rate imposed on the audio.
+# Every AudioChunk carries its own rate/channels and the adapter honours them, reopening the
+# device when they differ (#91); a deviation from these is announced once at INFO.
 sample_rate = 24000             # 24 kHz — the Realtime output rate (§6.2.4), NOT the mic's 16 kHz
 channels    = 1                 # mono playback
 # The code tree is read-only under the unit's ProtectSystem=strict, so the fake speaker's WAVs
