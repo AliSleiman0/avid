@@ -5,7 +5,7 @@
 > and **Working discipline** as accumulating reference. This is the working baton; the weekly
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
-**As of:** 2026-07-26 (late) · `main = 6a560bf` · gh `AliSleiman0`.
+**As of:** 2026-07-26 (late) · `main = a7ab5e2` · tree CLEAN · gh `AliSleiman0`.
 
 **⭐ M5 IS NOT SEALED. #153 shipped, and the bench proved it was not the blocker.** Three new
 defects were measured on hardware tonight — **#157, #158, #159** — and any one of them alone is
@@ -69,6 +69,23 @@ Audio keeps reaching the API (`sent` climbing) and the model answers nothing.
 RTT to `api.openai.com` went **67/102/167 ms → 15/36/134 ms**. `eth0` is the default route (metric
 100 vs wlan0's 600). Wi-Fi was −70 dBm, 2.4 GHz ch11, 167 retries — keep the cable in for any
 latency measurement.
+
+### Pi state at session end — LAST KNOWN, not verified
+
+⚠️ **The Pi was unreachable when this was written** — `AVID` and `avid.local` both failed to resolve
+and both IPs timed out. Powered off, or the laptop moved networks. **Re-verify everything below
+before trusting it.** Last confirmed state, ~15:40 local:
+
+- `/opt/avid` on `6a560bf`, tree clean. **It does not yet have `a7ab5e2`** (this handoff) — pull first.
+- `robot.service` **stopped** (still enabled). Keep it stopped for any bench run: it holds
+  `127.0.0.1:8787` and, with real adapters, the ALSA capture device.
+- **Ethernet plugged in.** `eth0` = `192.168.10.171` (default route, metric 100), `wlan0` =
+  `192.168.10.172` (metric 600). `AVID` resolved by name all session and then stopped — if it fails,
+  try the IPs.
+- Tools left on the box: `/tmp/trace_turns.py` (the tracer, also committed under
+  `docs/demos/m5_evidence/`) and `/tmp/run_trace.sh` (`bash /tmp/run_trace.sh 150`, no quoting to
+  mangle, sources the key itself). `/tmp` does not survive a reboot — re-copy from the repo copy.
+- The key is at `/etc/robot/robot.env` (600, root). `[adapters] realtime = "openai"`.
 
 ### ⚠️ Machine drift deliberately left in place
 
