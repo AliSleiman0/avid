@@ -346,12 +346,18 @@ anything unsatisfiable on the issue first — four ACs have already been renegot
   holds the last verdict — so a plain `extend` lands *behind* the cursor and is silently never
   reached. #162's e2e rig did exactly that: it passed on 3.13 (fewer frames consumed first) and hung
   on 3.11. **A leg-dependent hang is an index race, not a flake** — and it is why both legs are run.
-- ⚠️ **The local P8 async-debug gate fails on the Windows dev box for a reason that is not the
-  code.** `PYTHONASYNCIODEBUG=1 uv run --frozen pytest -q` exits **1** while reporting every test
-  passed, on `tests/contract/test_fact_repository.py::test_a_few_thousand_rows_stay_off_the_loop`
-  (~55–69 ms against the 50 ms bar). Verified pre-existing by running the same gate at a prior SHA in
-  a clean worktree, and CI's `async-debug` leg is green. **Do not chase it as a regression, and do
-  not claim a local run is "clean under PYTHONASYNCIODEBUG=1" — say CI is.**
+- ⚠️ **The P8 async-debug gate has tests sitting marginally over its 50 ms bar, and they flake on
+  BOTH platforms.** Two known, neither a code defect:
+  - **Windows dev box:** `tests/contract/test_fact_repository.py::test_a_few_thousand_rows_stay_off_the_loop`
+    (~55–69 ms) fails *every* local run. Verified pre-existing at a prior SHA in a clean worktree.
+    **Do not claim a local run is "clean under PYTHONASYNCIODEBUG=1" — say CI is.**
+  - **Linux CI:** `tests/e2e/test_m4_gate.py::test_a_mute_robot_fails_the_gate` (0.054 s) failed the
+    `async-debug` leg on a **docs-only** commit and passed on `gh run rerun --failed`.
+  Note the failure mode: pytest reports every test passed and the *session* fails, so the summary
+  line looks green. **Diagnose by exit code, and read the "P8 async-debug gate FAILED" block, not
+  the pass count.** If this starts costing reruns, the fix is to give those two tests headroom (or
+  their own threshold) rather than to raise the bar for everything — but that is its own change with
+  its own measurement, and nothing has filed it yet.
 - ⚠️ **Use a worktree, not a stash, to decide whether a suite anomaly is yours.**
   `git worktree add <tmp> <sha>` → `uv run --frozen pytest <tmp> --rootdir <tmp> -p no:cacheprovider`
   → `git worktree remove <tmp> --force`. It settles a changed test count or a suspicious failure in
