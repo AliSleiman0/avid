@@ -20,11 +20,12 @@ It owns three seams, none of which it imports the other side of:
   Assistant PCM goes down via :meth:`~avid.core.ports.TurnSink.play` and mic PCM comes up via
   :meth:`~avid.core.ports.TurnSink.mic` — a **direct call, never a bus event** (§9.1.4), because
   audio does not belong on an at-most-once bus.
-* **State** — it drives the injected ``StateManager`` by **direct call** for exactly three
-  edges (SDS §3.10.3): ``CONVERSATION_USER_TRANSCRIBED`` (LISTENING→THINKING),
-  ``CONVERSATION_SESSION_LOST`` (any→DEGRADED) and ``SYSTEM_DEGRADED_EXITED`` (DEGRADED→IDLE).
-  The LISTENING entry and the THINKING→SPEAKING→IDLE playback arc are **AudioService's**
-  (``audio.speech_started`` / ``audio.playback_*``), not this service's.
+* **State** — it drives the injected ``StateManager`` by **direct call** for exactly two
+  edges (SDS §3.10.3), both of them *session lifecycle*: ``CONVERSATION_SESSION_LOST``
+  (any→DEGRADED) and ``SYSTEM_DEGRADED_EXITED`` (DEGRADED→IDLE). The **whole turn arc** —
+  LISTENING, THINKING, SPEAKING, IDLE — is **AudioService's**, driven from its own
+  ``audio.*`` facts. LISTENING→THINKING was this service's until AVID-158 measured the
+  transcript that drove it arriving *after* the assistant's audio.
 
 **Barge-in is split across the two services (#104, SDS §6.2.4).** AudioService owns the *local*
 half — local VAD cuts the speaker instantly (``interrupt()``), measures what actually played,
@@ -343,10 +344,15 @@ class ConversationService:
     async def _on_user_transcript(self, ev: UserTranscript) -> None:
         """A user utterance was transcribed: a turn begins (SDS §9.1.3).
 
-        Opens the turn (``conversation.turn_started``), publishes
-        ``conversation.user_transcribed``, drives LISTENING→THINKING, and kicks a best-effort
-        thinking cue to cover the ~600 ms until first audio (SDS §6.9). ``is_approximate`` is
-        propagated straight through — a barge-in truncation makes the tail unreliable (§6.2.4).
+        Opens the turn (``conversation.turn_started``) and publishes
+        ``conversation.user_transcribed``. ``is_approximate`` is propagated straight through —
+        a barge-in truncation makes the tail unreliable (§6.2.4).
+
+        **Publishes facts; drives nothing** (AVID-158). This used to drive LISTENING→THINKING,
+        but the transcript is a separate, slower transcription pass: on hardware it lands after
+        the assistant's speech-to-speech audio, and sometimes after ``conversation.turn_ended``.
+        The machine follows ``audio.speech_ended`` instead — AudioService's own falling edge,
+        which is local, always fires, and is what §3.10.1 has always called "turn end detected".
         """
         self._turn_active = True
         self._turn_started_ns = self._clock.monotonic_ns()
@@ -359,9 +365,6 @@ class ConversationService:
             ConversationUserTranscribed(
                 **self._env(), text=ev.text, is_approximate=ev.is_approximate
             )
-        )
-        await self._state.transition(
-            Trigger.CONVERSATION_USER_TRANSCRIBED, correlation_id=self._corr()
         )
         self._start_thinking_cue()
 

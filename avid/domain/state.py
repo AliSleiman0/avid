@@ -50,14 +50,22 @@ class Trigger(Enum):
     (``timer.*``): the 10-minute presence-lost nap, the 30 s listen timeout, the 10 s think
     timeout. Modelling them as first-class triggers is what lets the table — and its
     exhaustive test — stay a closed, pure set.
+
+    Membership tracks the **table**, not the call sites: several rows have no driver yet
+    (``BEHAVIOR_TRIGGER_FIRED`` is M6, the three ``timer.*`` expiries are unwired), and that is
+    fine — but a member with *no row* is not an Event-column entry at all, just seven
+    guaranteed-illegal pairs and a false claim in :class:`StateTransitioned`'s payload type.
+    ``test_every_trigger_drives_at_least_one_row`` holds that line; it is why AVID-158 deleted
+    ``CONVERSATION_USER_TRANSCRIBED`` outright rather than leaving it row-less. That fact is
+    still published (``avid/domain/conversation.py``) — it simply drives nothing.
     """
 
     SYSTEM_STARTED = "system.started"
     AUDIO_SPEECH_STARTED = "audio.speech_started"
+    AUDIO_SPEECH_ENDED = "audio.speech_ended"
     BEHAVIOR_TRIGGER_FIRED = "behavior.trigger_fired"
     PRESENCE_LOST_TIMEOUT = "timer.presence_lost"  # IDLE, sustained 10 min
     VISION_PRESENCE_GAINED = "vision.presence_gained"
-    CONVERSATION_USER_TRANSCRIBED = "conversation.user_transcribed"
     LISTEN_TIMEOUT = "timer.listen_timeout"  # LISTENING, 30 s
     AUDIO_PLAYBACK_STARTED = "audio.playback_started"
     THINK_TIMEOUT = "timer.think_timeout"  # THINKING, 10 s
@@ -82,7 +90,7 @@ class IllegalTransition(Exception):
         )
 
 
-# The normative transition table (SDS §3.10.3). The 13 explicit rows are written out so a
+# The normative transition table (SDS §3.10.3). The 14 explicit rows are written out so a
 # reviewer can diff them against the table directly; guards are noted but NOT evaluated here
 # (they belong to the caller — see the module docstring).
 _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
@@ -94,8 +102,20 @@ _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     (RobotState.IDLE, Trigger.PRESENCE_LOST_TIMEOUT): RobotState.SLEEPING,  # +10 min
     (RobotState.SLEEPING, Trigger.VISION_PRESENCE_GAINED): RobotState.IDLE,
     (RobotState.SLEEPING, Trigger.AUDIO_SPEECH_STARTED): RobotState.LISTENING,
-    (RobotState.LISTENING, Trigger.CONVERSATION_USER_TRANSCRIBED): RobotState.THINKING,
+    # The turn ends when OUR OWN gate says the user stopped, never when the model's transcript
+    # arrives (AVID-158). ``conversation.user_transcribed`` is a *separate, slower* transcription
+    # pass: measured on hardware it lands after the assistant's speech-to-speech audio, and
+    # sometimes after ``conversation.turn_ended`` (t=52.482 vs t=53.594 in
+    # docs/demos/m5_evidence/trace_2026-07-26_streaming.log). Driving this edge from it left
+    # AUDIO_PLAYBACK_STARTED arriving in LISTENING — where it is illegal — so SPEAKING was
+    # unreachable, the barge-in row below was dead code on hardware, and two bench runs scored
+    # zero barge-ins. §3.10.1's diagram has always labelled this edge "turn end detected".
+    (RobotState.LISTENING, Trigger.AUDIO_SPEECH_ENDED): RobotState.THINKING,
     (RobotState.LISTENING, Trigger.LISTEN_TIMEOUT): RobotState.IDLE,  # 30 s
+    # The user starts a fresh burst before the reply begins — observed twice in the same trace
+    # (t=58.986, t=60.171). Without this row the fix above only relocates the wedge from
+    # LISTENING to THINKING (AVID-158).
+    (RobotState.THINKING, Trigger.AUDIO_SPEECH_STARTED): RobotState.LISTENING,
     (RobotState.THINKING, Trigger.AUDIO_PLAYBACK_STARTED): RobotState.SPEAKING,
     (RobotState.THINKING, Trigger.THINK_TIMEOUT): RobotState.DEGRADED,  # 10 s
     (RobotState.SPEAKING, Trigger.AUDIO_PLAYBACK_FINISHED): RobotState.IDLE,
