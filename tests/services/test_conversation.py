@@ -778,8 +778,13 @@ async def test_session_closes_after_idle_timeout() -> None:
 async def test_session_loss_degrades_then_reopen_recovers() -> None:
     """AC-4/5/6: a mid-turn drop publishes ``session_lost`` + ``system.degraded_entered``,
     moves any→DEGRADED, and plays the canned CueBank phrase; the next speech re-opens a cold
-    session and drives DEGRADED→IDLE + ``system.degraded_exited`` (reopen-on-next-speech, the
-    recovery ``replay`` affords)."""
+    session and drives DEGRADED→LISTENING + ``system.degraded_exited`` (reopen-on-next-speech,
+    the recovery ``replay`` affords).
+
+    LISTENING, not IDLE, since AVID-162: the reopen is triggered *by* the user's rising edge, so
+    recovery always lands mid-turn and rejoins it. This rig proves the service *announces* the
+    recovery — the whole arc needs the real ``AudioService`` driving the audio edges, and is
+    asserted in ``tests/e2e/test_m5_gate.py``."""
     clock = FakeClock()
     async with _rig(
         client=_replay("session_loss", clock=clock), initial=RobotState.LISTENING
@@ -810,7 +815,7 @@ async def test_session_loss_degrades_then_reopen_recovers() -> None:
         assert any(
             isinstance(e, StateTransitioned)
             and e.trigger is Trigger.SYSTEM_DEGRADED_EXITED
-            and e.to is RobotState.IDLE
+            and e.to is RobotState.LISTENING
             for e in rig.collector.of_type(StateTransitioned)
         )
 

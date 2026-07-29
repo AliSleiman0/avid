@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -72,6 +73,7 @@ from avid.domain import (
     RobotState,
     StateTransitioned,
     SystemDegradedEntered,
+    SystemDegradedExited,
     SystemHandlerFailed,
     TokenUsage,
     Trigger,
@@ -95,6 +97,9 @@ _FRAME_PCM = bytes(i % 256 for i in range(_FRAME_BYTES))
 # Speech long enough to open a turn, then silence_hold + 1 frames to close it.
 _SCRIPT = [True] * 3 + [False] * (_SILENCE_HOLD_MS // _CHUNK_MS + 1)
 
+# The logger StateManager warns on when the table has no rule (SDS §3.10.3).
+_STATE_LOGGER = "avid.state"
+
 # The bench harness, loaded by path (see _load_conversation_pi) — not a package, by design.
 _DEMO_MODULE = "avid_demo_conversation_pi"
 
@@ -105,6 +110,7 @@ _COLLECTED: tuple[type[Event], ...] = (
     ConversationTurnEnded,
     ConversationSessionLost,
     SystemDegradedEntered,
+    SystemDegradedExited,
     AudioPlaybackFinished,
     AudioSpeechStarted,
     AudioSpeechEnded,
@@ -219,6 +225,35 @@ class _RecordingSink:
         return 0
 
 
+class _ScriptedVad(FakeVoiceActivityDetector):
+    """A ``FakeVoiceActivityDetector`` whose timeline the test can extend **mid-run**.
+
+    Needed because the two clocks this file documents do not commute (see
+    :meth:`_Collector.wait_for_type`). A second utterance cannot simply be appended to
+    ``_SCRIPT`` up front: the mic paces frames on **real** time while the replay pays out on
+    **virtual** time, so a pre-scripted second utterance fires whenever the runner happens to
+    get round to it — which is a race against the drop it is supposed to follow.
+
+    Holding silence instead, and appending the next utterance only when the test asks for it,
+    removes the timing assumption entirely: the fake holds its last verdict once the script runs
+    out, so "silence until further notice" is its natural resting state."""
+
+    def __init__(self) -> None:
+        super().__init__(script=_SCRIPT)
+
+    def utter(self) -> None:
+        """Queue one more utterance — three speech frames, then enough silence to close it.
+
+        Written **relative to the frames already judged**, not appended to the end of the list.
+        The fake indexes its script by ``calls``, which runs on past the end while the mic keeps
+        streaming silence, so a plain ``extend`` lands *behind* the read cursor and is never
+        reached: the utterance silently never happens. That is exactly the timing dependence
+        this class exists to remove — and it is leg-dependent, so it passed on 3.13 and hung on
+        3.11 until the pad went in."""
+        self._script.extend([False] * (self.calls - len(self._script)))
+        self._script.extend(_SCRIPT)
+
+
 class _MuteSpeaker(FakeSpeaker):
     """Records every chunk faithfully and reports that the device took none of it.
 
@@ -255,6 +290,8 @@ async def _drive_session(
     *,
     speaker: Speaker | None = None,
     until: Callable[[_Collector], bool],
+    then: Callable[[_Collector], bool] | None = None,
+    barge_in_margin_db: float = 6.0,
 ) -> tuple[_Collector, FakeSpeaker, ReplayRealtimeClient, StateManager]:
     """Run one replayed session through the real AudioService→ConversationService stack.
 
@@ -263,11 +300,22 @@ async def _drive_session(
     the session. AudioService is then handed to ConversationService as the ``TurnSink`` (#103) —
     the same wiring ``main._wire_services`` uses — so assistant PCM crosses the two services
     through the port and lands on a real ``FakeSpeaker``.
-    """
+
+    *then*, when given, asks for a **second utterance** after *until* holds: the arcs that need
+    one (recovery, AVID-162) have to let the first half of the fixture play out first, so the
+    utterance is released rather than pre-scripted (see :class:`_ScriptedVad`).
+
+    *barge_in_margin_db* exists for those arcs too. The mic streams one constant synthetic frame,
+    so every frame sits exactly on the echo floor and AVID-159's dB margin can never be cleared —
+    a second utterance offered while ``_playing_item`` is still set would be judged to be the
+    robot's own echo and dropped. Setting it to 0 says *this arc is about the state machine, not
+    about the discriminator*; the margin's own behaviour is unit-tested in ``test_audio.py``
+    against levels that actually differ."""
     clock = FakeClock()
     bus = AsyncioEventBus(clock=clock)
     state = StateManager(bus=bus, clock=clock, initial=RobotState.IDLE)
     out_speaker = speaker if speaker is not None else FakeSpeaker()
+    vad = _ScriptedVad()
     audio = AudioService(
         bus=bus,
         clock=clock,
@@ -279,11 +327,12 @@ async def _drive_session(
             pcm=_FRAME_PCM,
         ),
         speaker=out_speaker,
-        vad=FakeVoiceActivityDetector(script=_SCRIPT),
+        vad=vad,
         ring_buffer_ms=_RING_BUFFER_MS,
         sample_rate=_SAMPLE_RATE,
         channels=_CHANNELS,
         silence_hold_ms=_SILENCE_HOLD_MS,
+        barge_in_margin_db=barge_in_margin_db,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an M4 echo (#103).
         loopback=False,
     )
@@ -331,6 +380,15 @@ async def _drive_session(
             await collector.settle()
             await _advance_until(clock, lambda: until(collector))
             await collector.settle()
+            if then is not None:
+                # Act two, same alternation: release a second utterance onto the real clock,
+                # wait for both of its edges, then let the replay pay out on the virtual one.
+                vad.utter()
+                await collector.wait_for_type(AudioSpeechStarted, 2)
+                await collector.wait_for_type(AudioSpeechEnded, 2)
+                await collector.settle()
+                await _advance_until(clock, lambda: then(collector))
+                await collector.settle()
         finally:
             await conversation.stop()
             await audio.stop()
@@ -523,6 +581,71 @@ async def test_m5_gate_session_loss_degrades_and_plays_a_cue() -> None:
     assert state.state is RobotState.DEGRADED
     # The user hears something rather than silence: a cue WAV went to the speaker.
     assert speaker.files_played, "no CueBank phrase played on the drop"
+
+
+async def test_m5_gate_the_recovery_turn_drives_a_whole_legal_arc(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-162: the turn that *recovers* from a drop is a real turn, not a stateless one.
+
+    Recovery is rising-edge-driven — ``_exit_degraded`` has one caller, ConversationService's
+    ``audio.speech_started`` handler, after ``open()`` succeeds — so it always lands with a turn
+    in flight. It used to land in IDLE, and the whole recovery turn then drove nothing: no
+    thinking face, no speaking face, and no state move behind a barge-in against that reply.
+
+    Two assertions, and the second is the one that generalises. The arc is asserted as a **whole
+    journey** by ``Trigger`` — AVID-158 and AVID-161 were both cases where every row was
+    defensible alone and the composition dead-ended — and then the run is required to have logged
+    **no illegal transition at all**. Only the second would have caught this defect without
+    knowing to look for it, and it is the reason this test lives here rather than in
+    ``test_conversation.py``: illegal transitions are only reachable when the real
+    ``AudioService`` is the thing driving the audio edges.
+
+    The ``session_loss`` fixture drops *mid-playback*, so the recovery turn also exercises the
+    stale-playback path: the rising edge interrupts what the drop abandoned (since AVID-158 that
+    is gated on ``_playing_item``, not on ``RobotState``). That publishes an
+    ``audio.playback_finished`` **fact** but drives no trigger — ``interrupt`` deliberately
+    transitions nothing — which is exactly why DEGRADED needs no ``playback_*`` rows."""
+    with caplog.at_level(logging.WARNING, logger=_STATE_LOGGER):
+        collector, _, _, _ = await _drive_session(
+            "session_loss",
+            until=lambda c: len(c.of_type(SystemDegradedEntered)) >= 1,
+            then=lambda c: (
+                len(c.of_type(SystemDegradedExited)) >= 1
+                and len(c.of_type(AudioPlaybackFinished)) >= 2
+            ),
+            # The synthetic frame is a constant level; see _drive_session.
+            barge_in_margin_db=0.0,
+        )
+
+    assert collector.of_type(SystemDegradedExited), "the robot never recovered"
+
+    moves = [
+        (e.from_, e.trigger, e.to)
+        for e in collector.of_type(StateTransitioned)
+        if isinstance(e, StateTransitioned)
+    ]
+    lost = moves.index(
+        next(m for m in moves if m[1] is Trigger.CONVERSATION_SESSION_LOST)
+    )
+    assert moves[lost:] == [
+        # The drop, from SPEAKING — the fixture dies with a delta already on the speaker.
+        (RobotState.SPEAKING, Trigger.CONVERSATION_SESSION_LOST, RobotState.DEGRADED),
+        # The rising edge asks for the reopen; absorbed, because open() may still fail.
+        (RobotState.DEGRADED, Trigger.AUDIO_SPEECH_STARTED, RobotState.DEGRADED),
+        # It succeeded, so rejoin the turn the user is in the middle of.
+        (RobotState.DEGRADED, Trigger.SYSTEM_DEGRADED_EXITED, RobotState.LISTENING),
+        # ...which then runs as an ordinary turn, because it is one.
+        (RobotState.LISTENING, Trigger.AUDIO_SPEECH_ENDED, RobotState.THINKING),
+        (RobotState.THINKING, Trigger.AUDIO_PLAYBACK_STARTED, RobotState.SPEAKING),
+        # This fixture is one recorded session replayed twice, so it drops again here. The
+        # recovery turn reached SPEAKING first, which is the whole claim.
+        (RobotState.SPEAKING, Trigger.CONVERSATION_SESSION_LOST, RobotState.DEGRADED),
+    ], "the recovery turn did not rejoin the arc"
+
+    assert "ignored illegal transition" not in caplog.text, (
+        "the recovery turn attempted a transition the §3.10.3 table has no rule for"
+    )
 
 
 # --- the harness's own pass/fail logic (the M4 lesson) -------------------------------------

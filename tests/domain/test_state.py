@@ -99,14 +99,21 @@ def test_speech_started_is_legal_from_every_state_a_turn_can_begin_in() -> None:
     (``_run`` calls ``_begin_speech`` only when ``not self._speaking``, and only
     ``_end_speech`` clears that), so a second rising edge from LISTENING is unreachable. It
     appeared five times in the AVID-158 bench trace *only* because the falling edge did not
-    leave LISTENING. An unreachable self-loop would be a lie in the normative table."""
+    leave LISTENING. An unreachable self-loop would be a lie in the normative table.
+
+    DEGRADED is a fifth source since AVID-162, but it does **not** open a turn — it absorbs the
+    edge and stays put, because the session is still opening and may yet fail."""
     for opens in (RobotState.IDLE, RobotState.SLEEPING):
         assert next_state(opens, Trigger.AUDIO_SPEECH_STARTED) == RobotState.LISTENING
     for interrupts in (RobotState.SPEAKING, RobotState.THINKING):
         assert (
             next_state(interrupts, Trigger.AUDIO_SPEECH_STARTED) == RobotState.LISTENING
         )
-    for refuses in (RobotState.BOOTING, RobotState.LISTENING, RobotState.DEGRADED):
+    assert (
+        next_state(RobotState.DEGRADED, Trigger.AUDIO_SPEECH_STARTED)
+        == RobotState.DEGRADED
+    )
+    for refuses in (RobotState.BOOTING, RobotState.LISTENING):
         with pytest.raises(IllegalTransition):
             next_state(refuses, Trigger.AUDIO_SPEECH_STARTED)
 
@@ -193,6 +200,66 @@ def test_the_overlap_arc_composes_when_the_user_barges_in() -> None:
         RobotState.SPEAKING,
         RobotState.IDLE,
     ]
+
+
+def test_the_recovery_arc_composes_while_the_user_is_still_talking() -> None:
+    """AVID-162: the whole recovery turn, asserted as one journey.
+
+    The rising edge asks for the reopen and is absorbed — the session is still opening and may
+    yet fail — and the successful open rejoins the turn in LISTENING, where the user's own
+    falling edge is waiting for it. Every trigger here after the first used to be illegal, which
+    is what made the first turn after a drop stateless: no thinking face, no speaking face, and
+    no state move behind a barge-in against that reply."""
+    assert _walk(
+        RobotState.DEGRADED,
+        Trigger.AUDIO_SPEECH_STARTED,  # the edge that asks for the reopen
+        Trigger.SYSTEM_DEGRADED_EXITED,  # open() succeeded: rejoin the turn
+        Trigger.AUDIO_SPEECH_ENDED,  # the user finishes
+        Trigger.AUDIO_PLAYBACK_STARTED,
+        Trigger.AUDIO_PLAYBACK_FINISHED,
+    ) == [
+        RobotState.DEGRADED,
+        RobotState.DEGRADED,
+        RobotState.LISTENING,
+        RobotState.THINKING,
+        RobotState.SPEAKING,
+        RobotState.IDLE,
+    ]
+
+
+def test_the_recovery_arc_composes_when_a_slow_open_outran_the_user() -> None:
+    """The other half, and the common one: AVID-157 measured opens at 1.5-6.7 s, far longer
+    than ``[gate] silence_hold_ms``, so the falling edge usually lands *during* the open.
+
+    Recovery then rejoins a turn the user has already finished, and the reply is what moves the
+    machine on — via ``LISTENING + playback_started``, the row AVID-161 added for the overlap.
+    That row doing double duty here is why LISTENING works as the recovery target at all."""
+    assert _walk(
+        RobotState.DEGRADED,
+        Trigger.AUDIO_SPEECH_STARTED,
+        Trigger.AUDIO_SPEECH_ENDED,  # they finished before open() returned
+        Trigger.SYSTEM_DEGRADED_EXITED,
+        Trigger.AUDIO_PLAYBACK_STARTED,  # AVID-161's row carries it
+        Trigger.AUDIO_PLAYBACK_FINISHED,
+    ) == [
+        RobotState.DEGRADED,
+        RobotState.DEGRADED,
+        RobotState.DEGRADED,
+        RobotState.LISTENING,
+        RobotState.SPEAKING,
+        RobotState.IDLE,
+    ]
+
+
+def test_a_failed_reopen_leaves_the_robot_degraded_rather_than_lying() -> None:
+    """The asymmetry that makes the LISTENING target safe: nothing moves off DEGRADED except a
+    *successful* open. If ``open()`` raises there is no ``degraded_exited``, the user's edges are
+    absorbed, and the robot still says it is broken — which it is."""
+    assert _walk(
+        RobotState.DEGRADED,
+        Trigger.AUDIO_SPEECH_STARTED,
+        Trigger.AUDIO_SPEECH_ENDED,
+    ) == [RobotState.DEGRADED, RobotState.DEGRADED, RobotState.DEGRADED]
 
 
 def test_session_lost_degrades_from_any_state() -> None:

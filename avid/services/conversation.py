@@ -22,7 +22,7 @@ It owns three seams, none of which it imports the other side of:
   audio does not belong on an at-most-once bus.
 * **State** — it drives the injected ``StateManager`` by **direct call** for exactly two
   edges (SDS §3.10.3), both of them *session lifecycle*: ``CONVERSATION_SESSION_LOST``
-  (any→DEGRADED) and ``SYSTEM_DEGRADED_EXITED`` (DEGRADED→IDLE). The **whole turn arc** —
+  (any→DEGRADED) and ``SYSTEM_DEGRADED_EXITED`` (DEGRADED→LISTENING). The **whole turn arc** —
   LISTENING, THINKING, SPEAKING, IDLE — is **AudioService's**, driven from its own
   ``audio.*`` facts. LISTENING→THINKING was this service's until AVID-158 measured the
   transcript that drove it arriving *after* the assistant's audio.
@@ -486,9 +486,17 @@ class ConversationService:
         """Recovery (UC-06): a fresh session opened while degraded, so announce it.
 
         Called from :meth:`_on_speech_started` under the lock, after ``open()`` succeeds. Drives
-        DEGRADED→IDLE and publishes ``system.degraded_exited`` with the monotonic downtime.
-        ``replay`` has no reconnect/backoff loop (that is #105) — reopen-on-next-speech is the
-        honest recovery it affords.
+        DEGRADED→**LISTENING** and publishes ``system.degraded_exited`` with the monotonic
+        downtime. ``replay`` has no reconnect/backoff loop (that is #105) —
+        reopen-on-next-speech is the honest recovery it affords.
+
+        LISTENING, not IDLE, since AVID-162. This method's single call site *is* the rising-edge
+        handler, so recovery is never anything but mid-turn: the user is talking right now, and
+        that is what triggered the reopen. Landing in IDLE left the whole recovery turn driving
+        illegal transitions — it never reached THINKING or SPEAKING, so the first turn after the
+        robot had been broken had no thinking face, no speaking face, and no state move behind a
+        barge-in. If a background reconnect is ever added it will recover with *no* turn in
+        flight, and it needs its own trigger rather than this one (SDS §3.10.3).
         """
         downtime_s = 0.0
         if self._lost_at_ns is not None:
