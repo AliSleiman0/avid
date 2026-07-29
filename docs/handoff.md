@@ -6,15 +6,24 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-07-29 · `main = b0dc0fb` · tree CLEAN · gh `AliSleiman0`.
+**As of:** 2026-07-30 · `main = 3f764aa` · tree CLEAN · gh `AliSleiman0`.
 
-**⭐ M5 IS NOT SEALED — but every laptop-side blocker now is, bar one measurement.** The three
-defects the #106 bench found are fixed and merged: **#158** (`b78d242`), **#159** (`6d9f1d4`), plus
-**#161** (`b0dc0fb`) which fell out of #159. **#157** is instrumented in **PR #166 (in review)** and
-needs a live measurement to conclude. Then: **one Pi session** that both seals M5 and produces the
-number AC-3 now demands.
+**⭐ BOTH LAPTOP QUEUES ARE EMPTY. Everything that remains needs hardware or the API key.**
 
-Evidence for all of it: [`docs/demos/m5_evidence/trace_2026-07-26_streaming.log`](demos/m5_evidence/trace_2026-07-26_streaming.log)
+M5's three bench defects are fixed and merged — **#158** (`b78d242`), **#159** (`6d9f1d4`), **#161**
+(`b0dc0fb`) — plus **#157**'s instrumentation (`79eadd2`) and **#162** (`3f764aa`). M7 is **13 of
+15**: everything except its gate and one Pi spike. The **only** laptop-doable build item left
+repo-wide is **#21** (author SDS §13 Security & Privacy, M11, `size:XS`).
+
+So the next session is a **bench day**, and it can retire *both* remaining milestones' gates plus a
+spike in one sitting: **#106** (M5), **#129** (M7), **#127** (SPK-3), and #157's measurement.
+
+⚠️ **The Pi is powered off and 7 merges behind.** Re-checked at this session's close: no DNS for
+`AVID`, TCP/22 closed. It was also unreachable on 07-26, so treat it as off rather than flaky — the
+session starts by turning it on and re-verifying against the repo.
+
+The evidence the four M5 defects were diagnosed from — and the file to re-read before the gate:
+[`docs/demos/m5_evidence/trace_2026-07-26_streaming.log`](demos/m5_evidence/trace_2026-07-26_streaming.log)
 (one line per bus event, with state, mic-queue depth and frames-sent-to-API), produced by
 [`docs/demos/m5_evidence/trace_turns.py`](demos/m5_evidence/trace_turns.py). It also lived on the
 Pi at `/tmp/trace_turns.py` with a wrapper at `/tmp/run_trace.sh` — **`/tmp` does not survive a
@@ -24,8 +33,16 @@ reboot, re-copy from the repo.**
 
 ## ⭐ Next session
 
-**1. Finish #157 (PR #166).** The instrumentation and the probe are merged-ready; the *conclusion*
-is not. Reading the code already settles two things — do not re-derive them:
+**0. Power the Pi on and re-verify it before measuring anything.** It is 7 merges behind and was
+last touched 2026-07-26. `deploy/PI_OPERATIONS.md` is the procedure; the rule it exists to teach is
+that **the machine is not the repo**, and missing config keys fall back to schema defaults, so drift
+yields *silently wrong results* rather than errors. Two `[gate]` keys are new since the Pi last ran
+(`barge_in_margin_db`, `echo_tail_ms`) and both have defaults — a stale `/etc/robot/config.toml`
+will use 6.0/150 **silently** and the file will not show what actually ran.
+
+**1. Finish #157 — the instrumentation shipped, the conclusion did not.** ⚠️ It is **Blocked** on
+the board, not done; do not close it on the strength of PR #166. Reading the code already settles
+two things — do not re-derive them:
 
 - `open()` is `asyncio.gather(connect, memory)` then `_send(session.update)`. `_compose_memory_block`
   hard-bounds the memory leg at `memory_inject_timeout_s` = **1.0 s**, `MemoryService.top_facts` is
@@ -37,6 +54,7 @@ is not. Reading the code already settles two things — do not re-derive them:
 ⚠️ **The laptop has no `OPENAI_API_KEY`** (checked 2026-07-29). The key-free half already runs:
 
 ```
+uv sync --frozen --extra openai                                            # websockets: NOT in the default venv
 uv run --frozen python tools/probe_realtime_open.py --iterations 5          # no key needed
 uv run --frozen python tools/probe_realtime_open.py --iterations 5 --live   # needs the key
 ```
@@ -53,12 +71,21 @@ two commands **on the Pi** and the laptop-vs-Pi comparison is the AC-4 settlemen
 | cold only, warm ~830 ms | once per *process*, not per conversation | **moves**, differently |
 
 That last row is live: `1494 / 1922 / 832` across three opens vs `6652` on a first one looks exactly
-like one-time cost plus warm steady state. #166's log line marks cold vs warm so the next run tells.
+like one-time cost plus warm steady state. The shipped log line marks cold vs warm so one run tells.
 
-**2. The Pi session — a measurement run, not just a seal run.** See the calibration protocol below.
-Re-verify the Pi first: it was unreachable at the last session's close and was on `6a560bf`.
+**2. The M5 gate (#106) — a measurement run, not just a seal run.** See the calibration protocol
+below. Its AC wordings were pre-settled; do not re-open them mid-session.
 
-**3. Not M5 blockers:** #162 (DEGRADED recovery turn drives no legal transitions), #163 (AEC).
+**3. Batch the M7 gate (#129) and SPK-3 (#127) onto the same bench day.** Both need the Pi and
+#129 needs the live key, so they cost almost nothing extra once the bench is up. ⚠️ **#127 is a
+time-boxed spike (0.5 IED): report the number and stop.** ⚠️ #129's real leg needs
+`tools/fetch_minilm.py` run on the Pi — that is the same missing model behind the 6 M7 failures in
+the full Pi suite.
+
+**4. The only laptop work left is #21** (SDS §13 Security & Privacy). #163 (AEC) is laptop-*startable*
+but its own DoD demands Pi-measured echo return loss, and it says so itself: budget a clock-drift
+spike before committing, because if drift cannot be bounded on this hardware then #159's margin is
+the permanent answer and that is worth knowing early.
 
 ### ⭐ The bench run must calibrate `[gate] barge_in_margin_db`
 
@@ -92,20 +119,29 @@ The lesson four previous ACs paid for. Do not re-open these mid-session:
 - **AC-4** → reworded only *after* #157 is measured. If the unexplained time is ours rather than
   the API's, that is a defect and the budget stands.
 
+⚠️ **#129's ACs have NOT had this treatment.** Read them cold before the bench day and settle
+anything unsatisfiable on the issue first — four ACs have already been renegotiated mid-run, and
+#129 was written when M7 was 0/15, before any of the design it describes existed.
+
 ---
 
 ## Current state
 
+- **Every open issue repo-wide**, so this list is the whole picture: **#106** (M5 gate — Pi + key),
+  **#129** (M7 gate — Pi + key), **#127** (SPK-3 spike — Pi), **#157** (Blocked on the key), **#163**
+  (AEC — wants a Pi drift spike first), **#114** + **#98** (epics), **#21** (SDS §13 docs, M11).
+  ⚠️ **Verify this with `gh issue list --state open` before planning** — see the tracker gotcha below.
 - **M5 "It talks" (milestone #6): laptop-complete bar #157's measurement.** #99–#105, #153, #158,
-  #159, #161 merged. Open: #106 (the gate), #157 (PR #166 in review), #98 (epic).
-- **Sealed on hardware: M0, M1, M2, M3, M4.** One Pi gate left in the project: **#106**.
+  #159, #161 merged. Open: #106 (the gate), #157, #98 (epic).
+- **M7 "It remembers" (milestone #8): 13 of 15**, epic #114. **#115–#128 are all closed** — the
+  laptop half of the milestone is *done*, including #125 (tool dispatch, `d145d93`) and #126
+  (pre-session injection). Only **#129** (gate) and **#127** (spike) remain, both hardware.
+- **Sealed on hardware: M0, M1, M2, M3, M4.** Two Pi gates left in the project: **#106** and **#129**.
 - **The five real HALs are hardware-present and the camera real leg is contract-proven** — servo
   (PCA9685 ch0+ch13), speaker (MAX98357A), display (ILI9486 `/dev/fb0`), mic (USB PnP), camera
   (ov5647 CSI, 11/11 contract legs, RGB888 640×480, no code change).
-- **M7 "It remembers" (milestone #8): 8 of 15**, epic #114 — the laptop queue *after* M5. Next is
-  **#125** (ConversationService tool dispatch → remember/recall/forget). ⚠️ **That is the PR that
-  edits the exact-set subscription assertion in `tests/test_main.py`**, and where the deferred
-  relevance floor gets decided. Nothing in #158/#159/#161/#166 touched that file.
+- ⚠️ **The Pi is unreachable** — no DNS for `AVID`, TCP/22 closed, checked 2026-07-30 and also down
+  on 07-26. On `6a560bf`, **7 merges behind**. Treat as powered off, not flaky.
 - ⚠️ **The Pi is not the repo.** `/etc/robot/config.toml` and the systemd unit are copies and both
   have rotted before. Missing keys fall back to schema *defaults*, so drift yields **silently wrong
   results** — the M4 gate would have measured the `fake` VAD while capturing from the amp. Diff both
@@ -144,13 +180,29 @@ The lesson four previous ACs paid for. Do not re-open these mid-session:
   the wedge only moves one step later. Also fixed the half #159 introduced: **barge-in no longer
   requires a rising edge**, so a user already talking when the reply starts can still interrupt —
   before this the robot talked over them and stopped hearing them until they gave up and restarted.
-- **#157 — instrumented (PR #166, in review).** TLS context built once per adapter instead of once
-  per connect (`websockets.connect` had no `ssl=`, so it parsed the CA bundle every time). Every
-  open logs `ssl / connect / memory / send / total` and marks **cold vs warm**. New key-free probe
-  `tools/probe_realtime_open.py`.
-- **New issues filed:** **#162** (the DEGRADED recovery turn recovers into IDLE mid-utterance and
-  drives no legal transitions), **#163** (AEC — removes the margin and un-mutes the uplink; the hard
-  part is not the filter but two ALSA devices with independently drifting clocks).
+- **#157 — instrumented, not concluded (PR #166, `79eadd2`).** TLS context built once per adapter
+  instead of once per connect (`websockets.connect` had no `ssl=`, so it parsed the CA bundle every
+  time — 49.6 ms cold locally, and a Pi is far slower). Every open now logs
+  `ssl / connect / memory / send / total` and marks **cold vs warm**, permanently rather than behind
+  a flag, so any bench run is also a measurement. New key-free probe `tools/probe_realtime_open.py`
+  runs on laptop *and* Pi and separates Pi cost from API cost without spending anything.
+  ⚠️ **Left OPEN and Blocked** — the number that decides AC-4 has not been taken.
+- **#162 — the DEGRADED recovery arc (PR #167, `3f764aa`).** Recovery is **rising-edge-driven**:
+  `_exit_degraded` has exactly one caller — ConvSvc's own `audio.speech_started` handler, after
+  `open()` succeeds — because #105 shipped without a background reconnect loop. So recovery *always*
+  lands with a turn in flight, and IDLE was a state the robot was never actually in; the whole
+  recovery turn then drove illegal transitions and came out **stateless**. Now
+  `(DEGRADED, system.degraded_exited) → **LISTENING**`, the only target that closes both
+  continuations — the second via `LISTENING + playback_started`, **#161's overlap row doing double
+  duty**. DEGRADED also absorbs the user's own two speech edges as self-loops (the network machine is
+  dead, the local one is not). Full reasoning is in **SDS §3.10.3**; read it there.
+  - ⚠️ The two `audio.playback_*` triggers are deliberately **not** absorbed. The plan called for all
+    four `audio.*`, on the assumption that `interrupt()` drives `playback_finished` in DEGRADED — it
+    does not, it publishes the *fact* and drives no trigger at all. Both playback triggers come only
+    from ConvSvc's pump, which `_on_session_closed` tears down before DEGRADED is reachable, so those
+    two rows would have been **unreachable**.
+- **New issue filed:** **#163** (AEC — removes the margin and un-mutes the uplink; the hard part is
+  not the filter but two ALSA devices with independently drifting clocks).
 
 
 ### Previously (M2/M3 seals)
@@ -238,12 +290,31 @@ The lesson four previous ACs paid for. Do not re-open these mid-session:
 
 ## Standing gotchas (carry forward)
 
-- ⚠️ **A state machine with one axis cannot describe two mouths in a room.** #158 and #161 were the
-  same defect twice: every row looked defensible alone and the *composition* dead-ended. #161's
-  obvious `(SPEAKING, speech_ended) → SPEAKING` self-loop reads better than the THINKING hop that
-  shipped, and leaves SPEAKING sticky so the next reply's `playback_started` has no row. **Assert
+- ⚠️ **THE BATON CAN BE WRONG. VERIFY ISSUE STATE BEFORE PLANNING.** A whole planning cycle went
+  into #125 on the strength of a memory file saying "M7 8/15, #125 next" — #125 had merged four days
+  earlier and M7 was 13/15. `gh issue list --state open` is one command and is always right; this
+  file and the memory batons are point-in-time snapshots that rot between sessions. Cheap check,
+  expensive omission.
+- ⚠️ **A state machine with one axis cannot describe two mouths in a room.** #158, #161 and #162 were
+  the same defect three times: every row looked defensible alone and the *composition* dead-ended.
+  #161's obvious `(SPEAKING, speech_ended) → SPEAKING` self-loop reads better than the THINKING hop
+  that shipped, and leaves SPEAKING sticky so the next reply's `playback_started` has no row. #162's
+  recovery landed in IDLE, where nothing in the turn that *caused* the recovery had a row. **Assert
   transition arcs as whole journeys, never as rows** — `tests/domain/test_state.py`'s `_walk`
-  helper exists for exactly this, and would have caught both.
+  helper exists for exactly this, and would have caught all three.
+- ⚠️ **Assert the ABSENCE of the illegal-transition warning, not just the presence of the right
+  moves.** `StateManager` logs `"ignored illegal transition"` at WARNING on the `avid.state` logger;
+  a `caplog` assertion that it never fires is the only check that catches the row you did not know
+  was missing. `tests/e2e/test_m5_gate.py::test_m5_gate_the_recovery_turn_drives_a_whole_legal_arc`
+  is the pattern. It has to live in **e2e**, because illegal transitions are only reachable when the
+  real `AudioService` is driving the audio edges — the service-level rig publishes the events but
+  drives no transitions at all.
+- ⚠️ **An unreachable row is a lie in a normative table** — and "obviously symmetrical" is not
+  evidence of reachability. #162's plan wanted DEGRADED to absorb all four `audio.*` triggers; two of
+  them are driven *only* from a coroutine that is torn down before DEGRADED can be entered, so those
+  rows could never fire. `tests/domain/test_state.py` states the rule explicitly. **Trace the actual
+  driver of every trigger before adding its row**, and note that publishing an *event* and driving a
+  *trigger* are different things: `interrupt()` does the first and not the second.
 - ⚠️ **`uv run --frozen --exact mypy avid` UNINSTALLS numpy** — that is how it reproduces CI's
   extra-free lint env. Re-run `uv sync --frozen --extra memory` immediately after, or the M7 memory
   tests fail with `ModuleNotFoundError: numpy` and look exactly like a regression. Bit twice in one
@@ -267,7 +338,27 @@ The lesson four previous ACs paid for. Do not re-open these mid-session:
 - ⚠️ **Bash heredocs die on apostrophes in prose.** A `cat > file <<'EOF'` block containing "§6.3's"
   aborted with `unexpected EOF while looking for matching` and wrote nothing. For anything with
   quotes in it — commit messages excepted, they are fine — use the Write tool and splice, never a
-  shell heredoc.
+  shell heredoc. **And PowerShell has no heredocs at all**: `uv run python - <<'EOF'` is a parse
+  error there (`Missing file specification after redirection operator`). Two shells, two failure
+  modes, same rule: write a file.
+- ⚠️ **Extending a scripted fake mid-run must be relative to its read cursor, not appended.**
+  `FakeVoiceActivityDetector` indexes its script by `calls`, which runs on past the end while it
+  holds the last verdict — so a plain `extend` lands *behind* the cursor and is silently never
+  reached. #162's e2e rig did exactly that: it passed on 3.13 (fewer frames consumed first) and hung
+  on 3.11. **A leg-dependent hang is an index race, not a flake** — and it is why both legs are run.
+- ⚠️ **The local P8 async-debug gate fails on the Windows dev box for a reason that is not the
+  code.** `PYTHONASYNCIODEBUG=1 uv run --frozen pytest -q` exits **1** while reporting every test
+  passed, on `tests/contract/test_fact_repository.py::test_a_few_thousand_rows_stay_off_the_loop`
+  (~55–69 ms against the 50 ms bar). Verified pre-existing by running the same gate at a prior SHA in
+  a clean worktree, and CI's `async-debug` leg is green. **Do not chase it as a regression, and do
+  not claim a local run is "clean under PYTHONASYNCIODEBUG=1" — say CI is.**
+- ⚠️ **Use a worktree, not a stash, to decide whether a suite anomaly is yours.**
+  `git worktree add <tmp> <sha>` → `uv run --frozen pytest <tmp> --rootdir <tmp> -p no:cacheprovider`
+  → `git worktree remove <tmp> --force`. It settles a changed test count or a suspicious failure in
+  under a minute, touches nothing in the working tree, and cannot silently no-op the way
+  `git stash push <path>` does. Also: a test count that moves by more than the tests you wrote is
+  usually a **parametrized** case derived from the thing you changed (`TRANSITION_CASES` is built from
+  the table, so four new rows added four cases) — reconcile the number rather than shrugging at it.
 
 
 - ⚠️ **An absence of events is not evidence of a fault — it is evidence of nothing.** Twice tonight a
@@ -333,7 +424,8 @@ The lesson four previous ACs paid for. Do not re-open these mid-session:
   "≤200 ms mouth-to-ear" (impossible with `silence_hold_ms = 500` on a turn-based echo), M4 AC-5's
   **"SDS §5.4", a section that does not exist** (numbering shifted after the AC was drafted; §6.3 is
   what the criterion is about), and `docs/demos/README.md` asserting a `v0.M4.0` tag that never
-  existed. **#106 is the last gate issue — check it for the same optimism before running it.**
+  existed. **#106 and #129 are the last two gate issues — check both for the same optimism before
+  running them.** #106's AC-3/AC-4 were pre-settled on the issue; **#129's have not been.**
 - ⚠️ **A gate that measures the *event* path can pass while the hardware does nothing.** The M4
   harness printed `PASS` over a mute robot because it timed `playback_started − speech_ended` and
   took `played_ms` from arithmetic over the submitted buffer. **Any "did it work" number must come
@@ -369,8 +461,9 @@ The lesson four previous ACs paid for. Do not re-open these mid-session:
   (`[type(s) …]`), and the **health map**. Any two M7 PRs touching the same one collide — merge one, then
   `git merge origin/main` into the next and **union-resolve**. Bit #104/#105. (#122 edited the services
   list + health map, *not* the subscription set — MemoryService subscribes to nothing. **#124 touched
-  none of them** — the tool-call transport adds no subscription. **#125 is the one that will edit the
-  subscription set** when it injects a dispatcher / adds the recall-forget handler wiring.)
+  none of them.** ✅ **RESOLVED: #125 turned out not to touch the subscription set either** — tool
+  dispatch rides the Realtime pump rather than the bus, so it added no subscription. Two successive
+  batons predicted that collision and both were wrong; nothing in M7 ever edited it.)
 - ⚠️ **A service may not import an adapter (P1 `layers`: `adapters` sits *above* `services`).** So a
   service that needs an adapter's behaviour depends on a **Protocol** in `core/ports.py`, and `main`
   (the composition root, which *may* import adapters) injects the concrete. This is why #122 had to
