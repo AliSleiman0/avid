@@ -641,12 +641,13 @@ User    Mic    AudioSvc   ConvSvc   Realtime   AffectSvc  ExprSvc  MotionSvc
  │       │         │  stream PCM (async, unawaited)│         │         │
  │       │         ├───────────────────►│          │         │         │
  │       │         │         │          │          │         │         │
- │       │         │         │  state.transitioned(LISTENING)│         │
- │       │         │         ├─────────────────────┼────────►│         │
+ │       │         │  state.transitioned(LISTENING)│         │         │
+ │       │         ├─────────┼──────────┼──────────┼────────►│         │
  │       │         │         │          │          │  draw listening   │
  │       │         │         │          │          │         │         │
- │       │         │         │◄─ server VAD: turn end         │         │
- │       │         │         │  state.transitioned(THINKING) ►│         │
+ │       │         │ local VAD: turn end (silence_hold_ms)    │         │
+ │       │         │  audio.speech_ended → transitioned(THINKING)       │
+ │       │         ├─────────┼──────────┼──────────┼────────►│         │
  │       │         │         │          │          │         │         │
  │       │         │         │◄─ audio delta stream            │        │
  │       │         │◄────────┤          │          │         │         │
@@ -917,6 +918,8 @@ At startup, each adapter reports capabilities. `MotionService` asks: do I have a
                  └──────────┘
 ```
 
+"turn end detected" is **our own** `audio.speech_ended` — the local VAD gate's falling edge, `[gate] silence_hold_ms` after the last speech frame — not the model's transcript (§3.10.3). THINKING also has a back-edge to LISTENING on `audio.speech_started`, for the user who pauses and then keeps talking.
+
 ### 3.10.3 Transition table
 
 Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustively as a pure function. Any transition not in this table raises `IllegalTransition` — loudly, in tests; logged-and-ignored in production.
@@ -929,8 +932,9 @@ Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustivel
 | IDLE | `vision.presence_lost` + 10 min | SLEEPING | — |
 | SLEEPING | `vision.presence_gained` | IDLE | — |
 | SLEEPING | `audio.speech_started` | LISTENING | — |
-| LISTENING | `conversation.user_transcribed` | THINKING | — |
+| LISTENING | `audio.speech_ended` | THINKING | — |
 | LISTENING | timeout 30 s | IDLE | — |
+| THINKING | `audio.speech_started` | LISTENING | the user resumed before the reply began |
 | THINKING | `audio.playback_started` | SPEAKING | — |
 | THINKING | timeout 10 s | DEGRADED | — |
 | SPEAKING | `audio.playback_finished` | IDLE | — |
@@ -939,6 +943,10 @@ Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustivel
 | DEGRADED | `system.degraded_exited` | IDLE | — |
 
 The barge-in row is the one that will bite you. The user interrupting the robot mid-sentence is *the* interaction that separates a companion from a kiosk, and it requires `Speaker.stop()` to be genuinely immediate — which is why it's on the port (§3.9.1) rather than being someone's afterthought.
+
+**The turn-end edge is *our* falling edge, never the model's transcript — do not undo this.** LISTENING→THINKING hung off `conversation.user_transcribed` until the M5 bench measured what that actually is: a separate, slower transcription pass, arriving *after* the assistant's speech-to-speech audio and sometimes after `conversation.turn_ended` (t=52.482 playback vs t=53.594 transcript, `docs/demos/m5_evidence/trace_2026-07-26_streaming.log`). Because `audio.playback_started` is legal only from THINKING, every reply landed in LISTENING where it is illegal, SPEAKING became unreachable, the barge-in row above was dead code on hardware, and two bench runs scored zero barge-ins. `audio.speech_ended` is local, always fires, and needs no network — which is what §3.10.1's diagram has always called "turn end detected". The trap generalises: **an edge driven by a vendor event inherits that vendor's latency and ordering**, and a recorded fixture cannot reproduce a race the live API loses (§14.3), so replay CI was structurally incapable of catching it. `conversation.user_transcribed` remains a published fact in §9.1.3 — it simply drives nothing.
+
+The THINKING→LISTENING row is its companion: a user who pauses past `[gate] silence_hold_ms` and then keeps talking was observed twice in the same trace. Without it the correction merely relocates the wedge from LISTENING to THINKING.
 
 ## 3.11 Deployment view
 
@@ -1117,9 +1125,11 @@ Notes on the non-obvious choices:
 - **`audio.input.transcription` is not optional for us.** Realtime does not transcribe the user's
   speech unless the session asks it to. Without this key no
   `conversation.item.input_audio_transcription.completed` frame arrives, so `UserTranscript` never
-  crosses the port, `conversation.user_transcribed` is never published, and LISTENING→THINKING never
-  fires — the robot answers aloud while the state machine believes nothing was said. The fixtures
-  all *record* that frame, which is why only a live session could reveal its absence.
+  crosses the port and `conversation.user_transcribed` is never published — the robot answers aloud
+  with **no record of what was said**, so §7.5/§7.6 have nothing to extract a memory from and the
+  episode store keeps only the assistant's half. The fixtures all *record* that frame, which is why
+  only a live session could reveal its absence. (The state machine no longer depends on it: since
+  AVID-158 LISTENING→THINKING is driven by our own `audio.speech_ended` — §3.10.3.)
 - **24 kHz is the API's floor, and our capture is 16 kHz — so the adapter resamples.** Anything
   lower is rejected outright (`integer_below_min_value`: "Expected a value >= 24000"), while
   capture cannot simply be raised: ADR-007's Silero gate accepts **only 8 or 16 kHz**. Both
@@ -1153,7 +1163,7 @@ Because we gate sessions (§6.3), the 60-minute wall is mostly theoretical for u
 Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition that makes this feel like a companion rather than a kiosk. On WebSocket, we own it:
 
 ```
-1. Local VAD fires while state == SPEAKING
+1. Local VAD fires while assistant playback is in flight
 2. Speaker.stop()                    ← immediate; must be on the port (§3.9.1)
 3. Compute audio_end_ms = how much the device ACCEPTED — the sum of Speaker.play()'s
    returns (frames ALSA took ÷ 48 bytes/ms at 24kHz mono 16-bit), NOT what we submitted
@@ -1161,6 +1171,8 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 5. Send response.cancel
 6. Mute inbound deltas for item_id until the next assistant item begins
 ```
+
+**Step 1 says "playback in flight", not "state == SPEAKING", and the difference is not pedantry.** `AudioService` gates the interrupt on its own in-flight playback item, because `RobotState` is a *derived view* that can lag the speaker: the bench caught a reply to an earlier server-side commit beginning 0.9 s **before** our falling edge fired, which leaves the machine in LISTENING with the speaker live. Gated on the state, the interrupt was dead code in exactly that window — and it silently dropped the truncated `audio.playback_finished` that steps 4–6 below are triggered by, so the model was never told (AVID-158). The service that owns the speaker is the one that knows whether it is speaking.
 
 Three traps, all of which will cost you an afternoon each if you meet them cold:
 
@@ -2138,7 +2150,7 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
 | `conversation.turn_started` | `initiator: "user" \| "proactive"` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
-| `conversation.user_transcribed` | `text: str`, `is_approximate: bool` | ConversationService | StateManager, EpisodeRecorder | DROP_NEWEST |
+| `conversation.user_transcribed` | `text: str`, `is_approximate: bool` | ConversationService | EpisodeRecorder | DROP_NEWEST |
 | `conversation.assistant_responded` | `text: str`, `item_id: str` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
 | `conversation.turn_ended` | `duration_ms: int`, `usage: TokenUsage` | ConversationService | EpisodeRecorder, Observability (cost meter, §6.10.6) | DROP_NEWEST |
 | `conversation.session_lost` | `cause: str`, `was_mid_turn: bool` | ConversationService | StateManager, ExpressionService | DROP_NEWEST |
@@ -2467,6 +2479,8 @@ def test_no_undocumented_transitions():
 ```
 
 That second test is the valuable one. §3.4.2 claimed *"ninety percent of the bugs in a system like this are illegal state transitions"* — this is the test that cashes it, and it's exhaustive over the cross product in about 4 ms.
+
+Its companion, `test_every_trigger_drives_at_least_one_row`, holds the other invariant: `Trigger` **is** the §3.10.3 Event column, so a member with no row is not documentation, it is seven guaranteed-illegal pairs padding the test above and a value `StateTransitioned.trigger` can never legally carry. Rows without a *driver* are fine and expected (`behavior.trigger_fired` is M6, the three `timer.*` expiries are unwired) — membership tracks the table, not the call sites. That is why AVID-158 deleted `CONVERSATION_USER_TRANSCRIBED` outright rather than leaving it row-less.
 
 **The policy gate (§10.2).** The single highest-value test file in the project:
 

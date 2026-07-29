@@ -216,9 +216,9 @@ class AiConfig(_Section):
     text_model: str = "gpt-4o-mini-2024-07-18"
     # The model that transcribes the USER's speech. Realtime does not transcribe input unless a
     # session asks it to, and without it no ``conversation.item.input_audio_transcription.completed``
-    # ever arrives — which would strand ConversationService: that frame is what publishes
-    # ``conversation.user_transcribed`` and drives LISTENING→THINKING (§9.1.3). The replay fixtures
-    # record the frame, so only a live session can catch its absence (found at the #106 prep).
+    # ever arrives — so ``conversation.user_transcribed`` is never published (§9.1.3) and the robot
+    # answers aloud with no record of what was said, leaving §7.5/§7.6 nothing to extract. The
+    # replay fixtures record the frame, so only a live session can catch its absence (#106 prep).
     transcription_model: str = "whisper-1"
     max_output_tokens: int = 512
     personality: str = "config/personality/default.toml"

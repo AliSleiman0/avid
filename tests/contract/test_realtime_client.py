@@ -448,9 +448,9 @@ def test_the_session_update_asks_the_api_to_transcribe_the_user() -> None:
     """Realtime does **not** transcribe input audio unless the session asks it to.
 
     Without this key no ``conversation.item.input_audio_transcription.completed`` frame ever
-    arrives, so ``UserTranscript`` never crosses the port, ``conversation.user_transcribed`` is
-    never published, and LISTENING→THINKING never fires: the robot answers out loud while the
-    state machine believes nothing was said. Every ``assets/sessions/`` fixture *records* that
+    arrives, so ``UserTranscript`` never crosses the port and ``conversation.user_transcribed`` is
+    never published: the robot answers out loud with no record of what was said, leaving §7.5/§7.6
+    nothing to extract a memory from. Every ``assets/sessions/`` fixture *records* that
     frame, which is precisely why replay-based CI could not see it missing — it took one live
     session (#106 prep) to find, and this test is what stops it coming back."""
     config = _openai(transcription_model="whisper-1")._session_config()

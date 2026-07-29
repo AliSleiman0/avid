@@ -419,8 +419,9 @@ class OpenAIRealtimeClient:
                     "format": {"type": "audio/pcm", "rate": _WIRE_INPUT_RATE},
                     # Without this the API never transcribes the user and
                     # `conversation.item.input_audio_transcription.completed` never arrives — so
-                    # `UserTranscript` never crosses the port, `conversation.user_transcribed` is
-                    # never published, and LISTENING→THINKING never fires. The turn silently dies.
+                    # `UserTranscript` never crosses the port and `conversation.user_transcribed`
+                    # is never published: the robot answers aloud with no record of what was
+                    # said, so §7.5/§7.6 have nothing to extract a memory from.
                     "transcription": {"model": self._transcription_model},
                     "turn_detection": {
                         **self._turn_detection,
