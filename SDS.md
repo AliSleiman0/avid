@@ -920,6 +920,8 @@ At startup, each adapter reports capabilities. `MotionService` asks: do I have a
 
 "turn end detected" is **our own** `audio.speech_ended` — the local VAD gate's falling edge, `[gate] silence_hold_ms` after the last speech frame — not the model's transcript (§3.10.3). THINKING also has a back-edge to LISTENING on `audio.speech_started`, for the user who pauses and then keeps talking.
 
+DEGRADED's exit is drawn here as a single arrow for legibility, but it returns to **LISTENING**, not to IDLE: the reopen is triggered by the user's own rising edge, so recovery always rejoins a turn already in flight (§3.10.3, AVID-162).
+
 ### 3.10.3 Transition table
 
 Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustively as a pure function. Any transition not in this table raises `IllegalTransition` — loudly, in tests; logged-and-ignored in production.
@@ -943,7 +945,8 @@ Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustivel
 | SPEAKING | `audio.speech_ended` | THINKING | the overlap — the user stopped first |
 | THINKING | `audio.playback_finished` | IDLE | the overlap — the reply drained after |
 | *any* | `conversation.session_lost` | DEGRADED | — |
-| DEGRADED | `system.degraded_exited` | IDLE | — |
+| DEGRADED | `audio.speech_started` / `audio.speech_ended` | DEGRADED | the local machine keeps running |
+| DEGRADED | `system.degraded_exited` | LISTENING | recovery rejoins the turn that triggered it |
 
 The barge-in row is the one that will bite you. The user interrupting the robot mid-sentence is *the* interaction that separates a companion from a kiosk, and it requires `Speaker.stop()` to be genuinely immediate — which is why it's on the port (§3.9.1) rather than being someone's afterthought.
 
@@ -951,7 +954,13 @@ The barge-in row is the one that will bite you. The user interrupting the robot 
 
 The THINKING→LISTENING row is its companion: a user who pauses past `[gate] silence_hold_ms` and then keeps talking was observed twice in the same trace. Without it the correction merely relocates the wedge from LISTENING to THINKING.
 
-**The last three rows are the overlap, and they are an honest compromise rather than a model (AVID-161).** The model answers an earlier commit while the user has already begun their next utterance — measured at t=61.074, 0.9 s before our own falling edge — and for that window *both* are speaking. This machine has one axis and the robot has two mouths in the room, so no assignment of those rows is true; the set above is simply the one that leaves **no reachable illegal transition**, which is the only property worth optimising for here. Note especially that `SPEAKING + audio.speech_ended` goes to **THINKING and not to a SPEAKING self-loop**: the self-loop reads more naturally row-by-row and leaves SPEAKING sticky, so the *next* reply's `audio.playback_started` has no row and the wedge simply moves one step later. That failure — every row defensible alone, the composition dead-ending — is the one both AVID-158 and AVID-161 were, which is why the tests assert these as whole journeys rather than as rows. The real answers are a two-axis state model or AVID-163's echo cancellation, which makes the overlap impossible rather than legal.
+**The three overlap rows are an honest compromise rather than a model (AVID-161).** The model answers an earlier commit while the user has already begun their next utterance — measured at t=61.074, 0.9 s before our own falling edge — and for that window *both* are speaking. This machine has one axis and the robot has two mouths in the room, so no assignment of those rows is true; the set above is simply the one that leaves **no reachable illegal transition**, which is the only property worth optimising for here. Note especially that `SPEAKING + audio.speech_ended` goes to **THINKING and not to a SPEAKING self-loop**: the self-loop reads more naturally row-by-row and leaves SPEAKING sticky, so the *next* reply's `audio.playback_started` has no row and the wedge simply moves one step later. That failure — every row defensible alone, the composition dead-ending — is the one both AVID-158 and AVID-161 were, which is why the tests assert these as whole journeys rather than as rows. The real answers are a two-axis state model or AVID-163's echo cancellation, which makes the overlap impossible rather than legal.
+
+**The two DEGRADED rows say what recovery means mid-turn (AVID-162).** Recovery is *rising-edge-driven*: `ConversationService._exit_degraded` has exactly one caller — its own `audio.speech_started` handler, after `open()` succeeds — because AVID-105 shipped without a background reconnect loop. So recovery never happens except with a turn already in flight, and the old IDLE target was a state the robot was never actually in. The recovery turn then drove `speech_ended`, `playback_started` and `playback_finished` from IDLE, all illegal, and the first turn after the robot had been broken came out **stateless**: no thinking face, no speaking face, and no state move behind a barge-in against that reply.
+
+LISTENING is the only target that closes *both* continuations. A user still talking finds `LISTENING + audio.speech_ended`; a user whom a slow open outran finds `LISTENING + audio.playback_started` — the overlap row above, doing double duty — and that is the *common* case rather than the corner one, since AVID-157 measured `open()` at 1.5–6.7 s against a `silence_hold_ms` of a few hundred. THINKING reads better ("we sent the audio, we are waiting on the model") and dead-ends immediately: it has no `audio.speech_ended` row. The robot stays in DEGRADED for the whole open, which is what keeps LISTENING honest — a failed open publishes no `system.degraded_exited`, the speech edges are absorbed, and the robot goes on saying it is broken, because it is.
+
+The absorbing row covers only the user's **own** two edges, deliberately. Both `audio.playback_*` triggers are driven solely from ConversationService's event pump, which `_on_session_closed` tears down before DEGRADED is reachable, so a row for either would be unreachable — and an unreachable row is a lie in a normative table. Note that `AudioService.interrupt` *does* run while degraded, cutting whatever playback the drop abandoned: it publishes `audio.playback_finished` as a **fact** but drives no trigger at all (§9.1.3), which is why no row is needed. ⚠️ **If a background reconnect is ever added it will recover with no turn in flight, and `system.degraded_exited` will be the wrong trigger for it** — that is a different fact and wants its own row, not a reused one.
 
 ## 3.11 Deployment view
 
