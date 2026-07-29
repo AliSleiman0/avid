@@ -939,6 +939,9 @@ Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustivel
 | THINKING | timeout 10 s | DEGRADED | — |
 | SPEAKING | `audio.playback_finished` | IDLE | — |
 | SPEAKING | `audio.speech_started` | LISTENING | barge-in: stop playback first |
+| LISTENING | `audio.playback_started` | SPEAKING | the overlap — both talking |
+| SPEAKING | `audio.speech_ended` | THINKING | the overlap — the user stopped first |
+| THINKING | `audio.playback_finished` | IDLE | the overlap — the reply drained after |
 | *any* | `conversation.session_lost` | DEGRADED | — |
 | DEGRADED | `system.degraded_exited` | IDLE | — |
 
@@ -947,6 +950,8 @@ The barge-in row is the one that will bite you. The user interrupting the robot 
 **The turn-end edge is *our* falling edge, never the model's transcript — do not undo this.** LISTENING→THINKING hung off `conversation.user_transcribed` until the M5 bench measured what that actually is: a separate, slower transcription pass, arriving *after* the assistant's speech-to-speech audio and sometimes after `conversation.turn_ended` (t=52.482 playback vs t=53.594 transcript, `docs/demos/m5_evidence/trace_2026-07-26_streaming.log`). Because `audio.playback_started` is legal only from THINKING, every reply landed in LISTENING where it is illegal, SPEAKING became unreachable, the barge-in row above was dead code on hardware, and two bench runs scored zero barge-ins. `audio.speech_ended` is local, always fires, and needs no network — which is what §3.10.1's diagram has always called "turn end detected". The trap generalises: **an edge driven by a vendor event inherits that vendor's latency and ordering**, and a recorded fixture cannot reproduce a race the live API loses (§14.3), so replay CI was structurally incapable of catching it. `conversation.user_transcribed` remains a published fact in §9.1.3 — it simply drives nothing.
 
 The THINKING→LISTENING row is its companion: a user who pauses past `[gate] silence_hold_ms` and then keeps talking was observed twice in the same trace. Without it the correction merely relocates the wedge from LISTENING to THINKING.
+
+**The last three rows are the overlap, and they are an honest compromise rather than a model (AVID-161).** The model answers an earlier commit while the user has already begun their next utterance — measured at t=61.074, 0.9 s before our own falling edge — and for that window *both* are speaking. This machine has one axis and the robot has two mouths in the room, so no assignment of those rows is true; the set above is simply the one that leaves **no reachable illegal transition**, which is the only property worth optimising for here. Note especially that `SPEAKING + audio.speech_ended` goes to **THINKING and not to a SPEAKING self-loop**: the self-loop reads more naturally row-by-row and leaves SPEAKING sticky, so the *next* reply's `audio.playback_started` has no row and the wedge simply moves one step later. That failure — every row defensible alone, the composition dead-ending — is the one both AVID-158 and AVID-161 were, which is why the tests assert these as whole journeys rather than as rows. The real answers are a two-axis state model or AVID-163's echo cancellation, which makes the overlap impossible rather than legal.
 
 ## 3.11 Deployment view
 
@@ -1164,7 +1169,8 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 
 ```
 0. …and the frame is LOUDER than the running echo floor by [gate] barge_in_margin_db
-1. Local VAD fires while assistant playback is in flight
+1. Local VAD fires while assistant playback is in flight — at the rising edge, OR on any
+   frame of an utterance the reply started talking over (AVID-161)
 2. Speaker.stop()                    ← immediate; must be on the port (§3.9.1)
 3. Compute audio_end_ms = how much the device ACCEPTED — the sum of Speaker.play()'s
    returns (frames ALSA took ÷ 48 bytes/ms at 24kHz mono 16-bit), NOT what we submitted
@@ -1176,6 +1182,8 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 **Step 0 exists because a VAD cannot tell you *whose* speech it is (AVID-159).** This section used to assume it could. It cannot, and it is not a detector quality problem: the robot's voice coming back through the mic **is** speech, and Silero is right to say so. The only discriminator left is loudness, so a rising edge that happens while the robot is talking counts as the user only if it clears `EchoFloor` — a running estimate of what the mic hears *while the robot is the one speaking* — by `[gate] barge_in_margin_db`.
 
 The floor is adaptive rather than a configured `playback_level × coupling` constant, because while the assistant speaks what the mic hears **is** the echo: tracking it *is* the acoustic-coupling calibration, so speaker volume, mic gain, room and rig geometry all cancel out of the comparison and nothing needs re-measuring when the desk moves. Two rules make it honest — it never adapts on a frame it has judged to be the user (that would raise the bar under the speaker mid-sentence), and it is only ever consulted while the uplink is shut, so **ordinary turn-taking is never tested against the margin at all.**
+
+**Step 1 says "at the rising edge *or* mid-utterance", and that is not a detail (AVID-161).** The reply can begin while the user is *already* talking, and such a user has no rising edge left to be judged on — so a check that only ran at the edge left the escape hatch unreachable in exactly the case that needed it: the robot talks over you, the half-duplex uplink shuts, and your words stop reaching the model until you give up and start again. The margin is therefore re-evaluated on every frame for the duration of an overlap, and the interrupt re-opens the uplink so the rest of the turn gets through.
 
 Three things follow that are worth stating before anyone tunes this:
 
