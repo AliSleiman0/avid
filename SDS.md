@@ -1163,6 +1163,7 @@ Because we gate sessions (§6.3), the 60-minute wall is mostly theoretical for u
 Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition that makes this feel like a companion rather than a kiosk. On WebSocket, we own it:
 
 ```
+0. …and the frame is LOUDER than the running echo floor by [gate] barge_in_margin_db
 1. Local VAD fires while assistant playback is in flight
 2. Speaker.stop()                    ← immediate; must be on the port (§3.9.1)
 3. Compute audio_end_ms = how much the device ACCEPTED — the sum of Speaker.play()'s
@@ -1171,6 +1172,16 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 5. Send response.cancel
 6. Mute inbound deltas for item_id until the next assistant item begins
 ```
+
+**Step 0 exists because a VAD cannot tell you *whose* speech it is (AVID-159).** This section used to assume it could. It cannot, and it is not a detector quality problem: the robot's voice coming back through the mic **is** speech, and Silero is right to say so. The only discriminator left is loudness, so a rising edge that happens while the robot is talking counts as the user only if it clears `EchoFloor` — a running estimate of what the mic hears *while the robot is the one speaking* — by `[gate] barge_in_margin_db`.
+
+The floor is adaptive rather than a configured `playback_level × coupling` constant, because while the assistant speaks what the mic hears **is** the echo: tracking it *is* the acoustic-coupling calibration, so speaker volume, mic gain, room and rig geometry all cancel out of the comparison and nothing needs re-measuring when the desk moves. Two rules make it honest — it never adapts on a frame it has judged to be the user (that would raise the bar under the speaker mid-sentence), and it is only ever consulted while the uplink is shut, so **ordinary turn-taking is never tested against the margin at all.**
+
+Three things follow that are worth stating before anyone tunes this:
+
+- **The margin is a measured number, not a constant.** Every playback episode logs the floor it saw and the closest any rejected edge came to clearing it, so every bench run is a calibration run. §16's AC-3 for the M5 gate records the value and the distance/volume it was measured at.
+- **A very large margin is full half-duplex.** If the levels turn out not to separate, barge-in can be switched off by config alone, with no code change — and AC-3 waived, as M4's was.
+- **This is a bet on a number nobody has measured.** §6.3 records the mic's own noise floor at −21 dBFS and a speech capture at rms −16.1 dBFS; amp→mic coupling was called "weak" at M4 bring-up and never quantified. If the suppressed-edge and genuine-barge-in populations overlap, **no margin can be tuned into working** and the answer is echo cancellation (AVID-163) — subtracting the playback signal we already own from the capture. The hard part there is not the filter but the clocks: the 16 kHz USB mic and the 24 kHz I2S amp are separate ALSA devices with independently drifting clocks, and AEC needs sample-accurate alignment.
 
 **Step 1 says "playback in flight", not "state == SPEAKING", and the difference is not pedantry.** `AudioService` gates the interrupt on its own in-flight playback item, because `RobotState` is a *derived view* that can lag the speaker: the bench caught a reply to an earlier server-side commit beginning 0.9 s **before** our falling edge fired, which leaves the machine in LISTENING with the speaker live. Gated on the state, the interrupt was dead code in exactly that window — and it silently dropped the truncated `audio.playback_finished` that steps 4–6 below are triggered by, so the model was never told (AVID-158). The service that owns the speaker is the one that knows whether it is speaking.
 
@@ -1202,6 +1213,7 @@ IDLE after 30s of no speech: close session. Cost: $0 again.
 - **The trailing silence is streamed too.** The server closes the turn on silence *it* hears, so withholding the hangover frames leaves the turn uncommitted forever. `AudioService` streams through its whole `[gate] silence_hold_ms` window and stops at the falling edge.
 - **Therefore `[gate] silence_hold_ms` >= `[ai.turn_detection] silence_duration_ms`**, asserted in `Config` at load. A shorter local hold cuts the stream before the server has heard enough silence: the robot listens and then never answers, silently. The shipped configs set both to 500 ms, so the two VADs close together.
 - **The mic-up queue is bounded and drops oldest**, ~10 s deep, warning once per overflow episode. Nothing drains it between sessions or while a degraded robot's `open()` keeps failing, and per-frame emission into an unbounded queue leaks captured audio indefinitely (§3.5.2's rule, applied off the bus).
+- **The uplink is half-duplex — nothing is streamed while the robot itself is talking** (AVID-159). "Stream live" was written without this qualifier, and the unqualified version is what shipped the defect: the mic hears the speaker, so the model was fed its own voice, the server's turn detection saw near-continuous audio, and it stopped committing turns altogether — the conversation died with the socket still open while frames kept arriving. `AudioService` shuts the seam from the first playback delta until `[gate] echo_tail_ms` after the reply ends. The tail is not padding: `end_response` means the model finished *sending*, not that the room went quiet, and the DAC is still clocking out up to a playback-buffer depth (§6.2.4). A barge-in gets no tail — `Speaker.stop` closes the handle so ALSA drops the buffer, and the user is mid-utterance. Barge-in itself survives the gate on **loudness**, see §6.2.4.
 
 The M4 loopback (`loopback=True`, the #91 transport gate) is the one path that still buffers the whole clip — an echo needs it. `AudioService._capture` is the only place the two modes diverge.
 
@@ -2382,6 +2394,10 @@ threshold          = 0.5        # Silero speech-probability cutoff (local gate)
 ring_buffer_ms     = 300        # pre-roll replayed at a turn's start
 silence_hold_ms    = 500        # silence run before a turn is declared over (AudioService debounce)
 session_idle_close_s = 30
+barge_in_margin_db = 6.0        # dB over the echo floor a rising edge must clear to be the USER
+                                # while the robot speaks (§6.2.4). PROVISIONAL — the M5 gate's
+                                # AC-3 records the measured value. Very large = full half-duplex.
+echo_tail_ms       = 150        # uplink stays shut this long after a reply ends (the DAC drain)
 
 [cues]                          # degraded-mode WAV cue bank base dir (§3.6.4, AVID-80)
 dir = "assets/cues"             # committed 24 kHz mono clips; CueBank resolves dir/<cue>.wav

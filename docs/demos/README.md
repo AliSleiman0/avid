@@ -192,3 +192,39 @@ the 60-second recorded demo was waived, with the reasons and what it costs recor
 issue. In short: every behaviour the demo would show is measured and banked, but a video would
 have been *independent witness*, and without it the only external confirmation on record is the
 operator's ear. Accepted deliberately, not overlooked.
+
+## M5 — It talks
+
+*Not yet sealed.* The gate is AVID-106; the bench runs so far produced defects, not a seal, and
+their evidence is committed under `m5_evidence/`.
+
+### Reading the echo gate's calibration line (AVID-159, AC-3)
+
+The mic hears the speaker. Until AVID-159 that echo was streamed to the model as user input, and
+the server's turn detection eventually stopped committing turns — the conversation died with the
+socket still open. The uplink is now half-duplex, and barge-in survives on **loudness**: while the
+robot is talking, a rising edge counts as the user only if it is `[gate] barge_in_margin_db` above
+what the mic hears while the robot speaks.
+
+**That margin is not a constant to trust — it is a number this run has to produce.** Every reply
+logs one line:
+
+```
+echo gate: floor -19.4 dBFS, loudest suppressed edge -14.1 dBFS (5 suppressed), margin 6.0 dB
+```
+
+Collect them all, and pair them with the level of any barge-in that *did* work. What matters is
+whether the two populations separate:
+
+- **They separate** → set `barge_in_margin_db` between them with headroom, record the value **and
+  the distance and voice level it was measured at** (AC-3's wording requires both), and re-run.
+- **`suppressed` is 0 on every reply and barge-in works** → the coupling is weaker than the margin
+  and the shipped 6.0 dB is already fine. Record it anyway.
+- **They overlap** → stop. No margin can be tuned into working, and turning the knob will only
+  trade a robot that cuts itself off for one that is deaf while speaking. The honest outcomes are
+  full half-duplex (a very large margin, AC-3 waived as M4's was) or **AVID-163**, acoustic echo
+  cancellation.
+
+The shipped 6.0 dB is deliberately permissive: its failure mode is the robot occasionally
+interrupting itself, which is loud, logged and recoverable. A too-high margin fails *silently* —
+a robot that cannot be interrupted looks exactly like one that simply was not.
