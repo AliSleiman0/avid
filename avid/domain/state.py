@@ -138,7 +138,26 @@ _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     (RobotState.SPEAKING, Trigger.AUDIO_SPEECH_ENDED): RobotState.THINKING,
     # ...and then the overlapping reply drains, with the user already finished.
     (RobotState.THINKING, Trigger.AUDIO_PLAYBACK_FINISHED): RobotState.IDLE,
-    (RobotState.DEGRADED, Trigger.SYSTEM_DEGRADED_EXITED): RobotState.IDLE,
+    # --- recovery rejoins the turn it interrupted (AVID-162) -------------------------------
+    # LISTENING, not IDLE. ``_exit_degraded`` has exactly one caller — ConversationService's
+    # rising-edge handler, after ``open()`` succeeds — because there is no background
+    # reconnect loop (AVID-105 shipped without one). So recovery *always* happens with a turn
+    # in flight, and IDLE was never a state the robot was actually in: the recovery turn then
+    # drove speech_ended, playback_started and playback_finished from IDLE, all illegal, and
+    # the first turn after the robot has been broken came out stateless — no thinking face, no
+    # speaking face, no state move behind a barge-in against that reply.
+    #
+    # LISTENING is the only target that closes *both* continuations. If the user is still
+    # talking, their falling edge finds ``LISTENING + speech_ended``. If a slow open outran
+    # them — AVID-157 measured opens at 1.5-6.7 s against a much shorter silence_hold_ms, so
+    # this is the common case — the reply finds ``LISTENING + playback_started``, the row
+    # AVID-161 added for the overlap, doing double duty here. THINKING reads better ("we sent
+    # the audio, we are waiting on the model") and dead-ends at once: it has no
+    # ``speech_ended`` row.
+    #
+    # If a background reconnect is ever added it recovers with NO turn in flight, and this row
+    # is then wrong for it. That is a new fact and wants its own trigger, not a reused one.
+    (RobotState.DEGRADED, Trigger.SYSTEM_DEGRADED_EXITED): RobotState.LISTENING,
 }
 
 # The "*any* state + conversation.session_lost -> DEGRADED" row (SDS §3.10.3), generated for
@@ -150,8 +169,35 @@ _SESSION_LOST_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     for state in RobotState
 }
 
+# "DEGRADED + the user's own edges -> DEGRADED" (SDS §3.10.3, AVID-162). One idea rather than
+# two rows: **the network machine is dead, the local one is not.** The mic and the VAD gate keep
+# running with no session, so the user goes on starting and finishing utterances throughout —
+# they are talking to a robot that cannot yet answer. Absorbing those edges says the state is
+# unchanged, which is the truth; leaving them out said the same thing via a WARNING apiece,
+# which buried the real illegal transitions in noise. Idempotent, exactly like the session_lost
+# self-loop above.
+#
+# The falling edge is not the theoretical half of this pair. AVID-157 measured ``open()`` at
+# 1.5-6.7 s against a ``silence_hold_ms`` of a few hundred, so a user who finishes speaking
+# before the reopen returns is the *common* case, not the corner one — and if the open fails
+# outright, every edge from then on lands here.
+#
+# The two ``audio.playback_*`` triggers are deliberately NOT in this set: both are driven only
+# from ``ConversationService``'s pump, which ``_on_session_closed`` tears down before DEGRADED
+# is reachable, so a row for either would be unreachable — and an unreachable row is a lie in a
+# normative table. Note ``interrupt`` (which does fire while degraded, cutting whatever the drop
+# abandoned) publishes ``audio.playback_finished`` as a *fact* but drives no trigger at all.
+_DEGRADED_SPEECH_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
+    (RobotState.DEGRADED, trigger): RobotState.DEGRADED
+    for trigger in (Trigger.AUDIO_SPEECH_STARTED, Trigger.AUDIO_SPEECH_ENDED)
+}
+
 TRANSITION_TABLE: Mapping[tuple[RobotState, Trigger], RobotState] = MappingProxyType(
-    {**_EXPLICIT_TRANSITIONS, **_SESSION_LOST_TRANSITIONS}
+    {
+        **_EXPLICIT_TRANSITIONS,
+        **_SESSION_LOST_TRANSITIONS,
+        **_DEGRADED_SPEECH_TRANSITIONS,
+    }
 )
 
 # The finite trigger universe the exhaustive test crosses with RobotState (SDS §14.2).
