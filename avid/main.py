@@ -599,6 +599,8 @@ def _wire_services(
         sample_rate=config.microphone.sample_rate,
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
+        barge_in_margin_db=config.gate.barge_in_margin_db,
+        echo_tail_ms=config.gate.echo_tail_ms,
         loopback=False,
     )
     # The memory service (#122): the sole writer/reader of persistent facts, reached by direct call, so

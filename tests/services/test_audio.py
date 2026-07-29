@@ -45,6 +45,7 @@ from avid.domain import (
     Event,
     RobotState,
     SystemHandlerFailed,
+    rms_dbfs,
 )
 from avid.domain.events import REASON_HANDLER_RAISED
 from avid.services.audio import _MIC_QUEUE_FRAMES, AudioService
@@ -119,6 +120,7 @@ class Rig(NamedTuple):
     speaker: FakeSpeaker
     vad: FakeVoiceActivityDetector
     collector: _Collector
+    clock: FakeClock
 
 
 _ExtraSub = tuple[type[Event], Callable[[Event], Awaitable[None]], str]
@@ -131,6 +133,8 @@ async def _rig(
     initial: RobotState = RobotState.IDLE,
     silence_hold_ms: int = 20,
     ring_buffer_ms: int = 300,
+    barge_in_margin_db: float = 6.0,
+    echo_tail_ms: int = 150,
     loopback: bool = False,
     speaker_factory: Callable[[StateManager], FakeSpeaker] | None = None,
     extra_subs: tuple[_ExtraSub, ...] = (),
@@ -169,6 +173,8 @@ async def _rig(
         sample_rate=_SAMPLE_RATE,
         channels=_CHANNELS,
         silence_hold_ms=silence_hold_ms,
+        barge_in_margin_db=barge_in_margin_db,
+        echo_tail_ms=echo_tail_ms,
         loopback=loopback,
     )
     for cls in _COLLECTED:
@@ -179,7 +185,7 @@ async def _rig(
     await bus.start()
     await service.start()
     try:
-        yield Rig(service, bus, state, mic, spk, vad, collector)
+        yield Rig(service, bus, state, mic, spk, vad, collector, clock)
     finally:
         await service.stop()
         await bus.stop()
@@ -723,3 +729,135 @@ async def test_seam_interrupt_reports_played_ms_and_marks_truncated() -> None:
         assert await rig.service.interrupt() == 0
         await rig.collector.settle()
         assert len(rig.collector.of_type(AudioPlaybackFinished)) == 1
+
+
+# --- AVID-159: the echo gate ---------------------------------------------------------------
+
+
+async def test_captured_frames_do_not_reach_the_uplink_while_the_robot_speaks() -> None:
+    """AVID-159, the regression. The model must never be fed the robot's own voice.
+
+    At the M5 bench the mic heard the speaker 269 ms into every reply and — because #153
+    streams live — forwarded it to the API as user input. The server's turn detection saw
+    near-continuous audio and stopped committing turns altogether: the conversation died with
+    the socket still open, while ``sent`` kept climbing.
+
+    Driven through ``_capture`` rather than the free-running mic loop so the window under test
+    is exact rather than a race: the claim is about the seam, and the seam is this call."""
+    async with _rig(vad_script=[False]) as rig:
+        rig.service._turn_id = uuid4()
+
+        rig.service._capture(b"\x11" * _FRAME_BYTES)  # nothing playing — flows
+        assert rig.service._mic_out.qsize() == 1
+
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        rig.service._capture(b"\x22" * _FRAME_BYTES)  # the robot is talking — dropped
+        rig.service._capture(b"\x33" * _FRAME_BYTES)
+
+        assert rig.service._mic_out.qsize() == 1  # still just the pre-playback frame
+
+
+async def test_the_uplink_stays_shut_for_the_echo_tail_then_reopens() -> None:
+    """``end_response`` means the model has finished *sending*, not that the room has gone
+    quiet: the DAC is still clocking out up to a playback-buffer depth (§6.2.4). Those frames
+    are still the robot, so the uplink holds shut over ``[gate] echo_tail_ms``."""
+    async with _rig(vad_script=[False], echo_tail_ms=150) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.end_response()
+
+        rig.service._capture(
+            b"\x22" * _FRAME_BYTES
+        )  # inside the tail — still the robot
+        assert rig.service._mic_out.qsize() == 0
+
+        await rig.clock.advance(0.2)  # past the tail
+        rig.service._capture(b"\x33" * _FRAME_BYTES)
+        assert rig.service._mic_out.qsize() == 1
+
+
+async def test_a_barge_in_reopens_the_uplink_immediately_with_no_tail() -> None:
+    """No tail after an interrupt, and the distinction matters both ways: ``Speaker.stop``
+    closes the handle so ALSA drops the buffered audio (there is no drain to wait out), and the
+    user is *mid-utterance* — holding the uplink shut here would clip the very words that
+    interrupted."""
+    async with _rig(vad_script=[False]) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.interrupt()
+
+        rig.service._capture(b"\x22" * _FRAME_BYTES)
+        assert (
+            rig.service._mic_out.qsize() == 1
+        )  # open at once, no clock advance needed
+
+
+async def test_a_rising_edge_no_louder_than_the_echo_is_suppressed() -> None:
+    """The robot's own voice is speech, and Silero rightly says so. Loudness is the only
+    discriminator left, and a frame level with the room is our own speaker.
+
+    The mic here emits digital silence, so the floor converges exactly on the frame level and
+    nothing can clear a 6 dB margin — the "this is the echo" case, by construction."""
+    async with _rig(vad_script=[False]) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+
+        assert not rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert rig.service._suppressed_edges == 1
+
+
+async def test_a_rising_edge_that_clears_the_margin_barges_in() -> None:
+    """AC-5 survives the gate: loud enough is the user, and the whole §6.2.4 chain runs."""
+    async with _rig(vad_script=[False], barge_in_margin_db=0.0) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+
+        assert rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert rig.service._suppressed_edges == 0
+
+
+async def test_normal_turn_taking_is_never_tested_against_the_margin() -> None:
+    """The gate's blast radius, pinned: the margin only ever judges a rising edge that happens
+    while the robot is speaking. With a silent speaker every edge is the user's, whatever the
+    margin — so an impossible margin cannot make the robot deaf in ordinary conversation."""
+    async with _rig(vad_script=[False], barge_in_margin_db=999.0) as rig:
+        assert rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert rig.service._suppressed_edges == 0
+
+
+async def test_a_suppressed_edge_neither_mints_a_turn_nor_publishes() -> None:
+    """A suppressed edge is a non-event: no origin minted, no fact published, no interrupt.
+    Driven through the real mic loop, so this is ``_run`` consulting the gate, not the helper
+    in isolation — the default silent frames can never clear the 6 dB margin."""
+    async with _rig(vad_script=[False] * 4 + [True]) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackStarted, 1)
+
+        with pytest.raises(TimeoutError):  # the edge never becomes a turn
+            await asyncio.wait_for(
+                rig.collector.wait_for_type(AudioSpeechStarted, 1), 0.3
+            )
+
+        assert rig.speaker.stops == 0  # the robot did not cut itself off
+        assert rig.service._suppressed_edges > 0
+
+
+async def test_the_echo_gate_reports_its_calibration_on_every_reply(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#106's AC-3 requires the margin to be a *measured* number rather than a hidden constant,
+    so every playback episode prints the floor it saw and the closest any rejected edge came to
+    clearing it. Every bench run is therefore a calibration run, with no separate mode to
+    remember — and if those levels never separate from a genuine barge-in's, that is the signal
+    to stop tuning and take #163 (AEC) instead."""
+    with caplog.at_level(logging.INFO, logger="avid.services.audio"):
+        async with _rig(vad_script=[False]) as rig:
+            rig.service._turn_id = uuid4()
+            await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+            rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+            await rig.service.end_response()
+
+    assert "echo gate: floor" in caplog.text
+    assert "1 suppressed" in caplog.text
+    assert "margin 6.0 dB" in caplog.text

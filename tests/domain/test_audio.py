@@ -1,8 +1,10 @@
-"""Tests for the ``audio.*`` events and the pre-roll ring buffer (#86)."""
+"""Tests for the ``audio.*`` events, the pre-roll ring buffer (#86) and the echo gate's
+level arithmetic (AVID-159)."""
 
 from __future__ import annotations
 
 import dataclasses
+from array import array
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,8 +15,11 @@ from avid.domain import (
     AudioPreRoll,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    EchoFloor,
     Event,
+    rms_dbfs,
 )
+from avid.domain.audio import SILENCE_DBFS
 
 # --- the four events --------------------------------------------------------
 
@@ -161,3 +166,99 @@ def test_bytes_per_ms_scales_buffered_ms() -> None:
     buf.append(b"\x00" * 48)  # exactly 1 ms
     buf.append(b"\x00" * 96)  # 2 ms
     assert buf.buffered_ms == 3
+
+
+# --- rms_dbfs: the level meter the echo gate runs on (AVID-159) -------------
+
+
+def _square(amplitude: int, samples: int = 64) -> bytes:
+    """A square wave alternating +/-*amplitude* — RMS is exactly *amplitude*, by hand."""
+    wave = array("h", [amplitude, -amplitude] * (samples // 2))
+    return wave.tobytes()
+
+
+def test_full_scale_square_wave_is_zero_dbfs() -> None:
+    """0 dBFS is defined against the peak sample magnitude (32768), so a full-scale square
+    wave — whose RMS *is* its amplitude — reads 0."""
+    assert rms_dbfs(_square(32767)) == pytest.approx(0.0, abs=0.01)
+
+
+def test_halving_the_amplitude_costs_six_db() -> None:
+    """The property that makes a dB margin meaningful: level is logarithmic, so each halving
+    is a fixed -6.02 dB step regardless of where it starts."""
+    loud = rms_dbfs(_square(16384))
+    quiet = rms_dbfs(_square(8192))
+    assert loud == pytest.approx(-6.02, abs=0.01)
+    assert loud - quiet == pytest.approx(6.02, abs=0.01)
+
+
+def test_digital_silence_reads_the_floor_not_negative_infinity() -> None:
+    """Finite, so every caller can do ordinary arithmetic on it without special-casing —
+    ``EchoFloor`` blends it, and ``-inf`` would poison the estimate permanently."""
+    assert rms_dbfs(b"\x00" * 64) == SILENCE_DBFS
+    assert rms_dbfs(b"") == SILENCE_DBFS
+
+
+def test_an_odd_trailing_byte_is_ignored_rather_than_raising() -> None:
+    """A half sample is not a level. A truncated frame is the device's business; killing the
+    mic loop over one stray byte is not the right response (``frombytes`` would raise)."""
+    assert rms_dbfs(_square(16384) + b"\x7f") == pytest.approx(-6.02, abs=0.01)
+
+
+# --- EchoFloor: whose speech is this? ---------------------------------------
+
+
+def test_the_first_frame_is_adopted_outright() -> None:
+    """Seeded, not blended: easing up from SILENCE_DBFS would spend a few hundred ms
+    reporting a floor far below anything actually in the room."""
+    floor = EchoFloor()
+    assert floor.dbfs == SILENCE_DBFS
+    floor.observe(-30.0)
+    assert floor.dbfs == -30.0
+
+
+def test_the_floor_converges_on_a_steady_level() -> None:
+    """The robot starts talking and the mic level steps up; the estimate follows it."""
+    floor = EchoFloor()
+    floor.observe(-40.0)  # ambience
+    for _ in range(40):  # ~0.8 s of echo at 20 ms frames
+        floor.observe(-20.0)
+    assert floor.dbfs == pytest.approx(-20.0, abs=0.5)
+
+
+def test_one_loud_frame_cannot_drag_the_floor_over_the_user() -> None:
+    """The attack is deliberately slower than a single frame: a transient must not raise the
+    bar the user has to clear, or one cough makes the robot briefly uninterruptible."""
+    floor = EchoFloor()
+    floor.observe(-40.0)
+    floor.observe(0.0)  # one full-scale frame
+    assert floor.dbfs < -30.0
+
+
+def test_exceeds_is_measured_against_the_floor_not_an_absolute_level() -> None:
+    """The point of the adaptive floor: the same 6 dB margin works at any coupling, so
+    speaker volume, mic gain and room geometry cancel out."""
+    quiet_room = EchoFloor()
+    quiet_room.observe(-50.0)
+    loud_room = EchoFloor()
+    loud_room.observe(-20.0)
+
+    assert quiet_room.exceeds(-44.0, margin_db=6.0)
+    assert not quiet_room.exceeds(-45.0, margin_db=6.0)
+    assert loud_room.exceeds(-14.0, margin_db=6.0)
+    assert not loud_room.exceeds(-15.0, margin_db=6.0)
+
+
+def test_a_very_large_margin_is_full_half_duplex() -> None:
+    """The documented config-only fallback (SDS §6.3): if the bench shows the levels do not
+    separate, a large margin turns barge-in off without a code change."""
+    floor = EchoFloor()
+    floor.observe(-40.0)
+    assert not floor.exceeds(0.0, margin_db=999.0)
+
+
+def test_a_zero_margin_admits_anything_at_or_above_the_floor() -> None:
+    floor = EchoFloor()
+    floor.observe(-30.0)
+    assert floor.exceeds(-30.0, margin_db=0.0)
+    assert not floor.exceeds(-30.1, margin_db=0.0)
