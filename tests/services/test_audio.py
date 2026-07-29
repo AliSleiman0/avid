@@ -477,16 +477,21 @@ async def test_barge_in_is_gated_on_live_playback_not_on_the_state_machine() -> 
     """AVID-158: the interrupt fires whenever assistant audio is in flight, whatever the state
     machine believes.
 
-    The bench measured a reply to an earlier commit beginning 0.9 s *before* our falling edge,
-    which leaves the machine in LISTENING with the speaker live. Gating barge-in on
-    ``state is SPEAKING`` made the interrupt dead code in exactly that case — and silently
-    dropped the truncated ``audio.playback_finished`` the model half of §6.2.4 depends on."""
-    async with _rig(vad_script=[False], initial=RobotState.LISTENING) as rig:
+    The bench measured a reply to an earlier commit beginning 0.9 s *before* our falling edge.
+    Gating barge-in on ``state is SPEAKING`` made the interrupt dead code in exactly that case —
+    and silently dropped the truncated ``audio.playback_finished`` the model half of §6.2.4
+    depends on.
+
+    Driven from IDLE since AVID-161 gave the LISTENING overlap a legal row: the property under
+    test is *"the speaker is live and the machine disagrees"*, so it needs a state the machine
+    still refuses to move out of on ``audio.playback_started``. That the set of such states keeps
+    shrinking is the point of AVID-161; that the guard does not care is the point of this test."""
+    async with _rig(vad_script=[False], initial=RobotState.IDLE) as rig:
         rig.service._turn_id = uuid4()
-        # Playback opens while the machine is in LISTENING: the transition is illegal and
-        # logged-and-ignored, so the state never reaches SPEAKING — but the speaker is live.
+        # Playback opens from IDLE: the transition is illegal and logged-and-ignored, so the
+        # machine never reaches SPEAKING — but the speaker is live either way.
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
-        assert rig.state.state is RobotState.LISTENING
+        assert rig.state.state is RobotState.IDLE
 
         await rig.service._begin_speech()
         await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
@@ -803,7 +808,7 @@ async def test_a_rising_edge_no_louder_than_the_echo_is_suppressed() -> None:
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
 
         assert not rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
-        assert rig.service._suppressed_edges == 1
+        assert rig.service._suppressed_frames == 1
 
 
 async def test_a_rising_edge_that_clears_the_margin_barges_in() -> None:
@@ -813,7 +818,7 @@ async def test_a_rising_edge_that_clears_the_margin_barges_in() -> None:
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
 
         assert rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
-        assert rig.service._suppressed_edges == 0
+        assert rig.service._suppressed_frames == 0
 
 
 async def test_normal_turn_taking_is_never_tested_against_the_margin() -> None:
@@ -822,7 +827,7 @@ async def test_normal_turn_taking_is_never_tested_against_the_margin() -> None:
     margin — so an impossible margin cannot make the robot deaf in ordinary conversation."""
     async with _rig(vad_script=[False], barge_in_margin_db=999.0) as rig:
         assert rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
-        assert rig.service._suppressed_edges == 0
+        assert rig.service._suppressed_frames == 0
 
 
 async def test_a_suppressed_edge_neither_mints_a_turn_nor_publishes() -> None:
@@ -840,7 +845,7 @@ async def test_a_suppressed_edge_neither_mints_a_turn_nor_publishes() -> None:
             )
 
         assert rig.speaker.stops == 0  # the robot did not cut itself off
-        assert rig.service._suppressed_edges > 0
+        assert rig.service._suppressed_frames > 0
 
 
 async def test_the_echo_gate_reports_its_calibration_on_every_reply(
@@ -861,3 +866,47 @@ async def test_the_echo_gate_reports_its_calibration_on_every_reply(
     assert "echo gate: floor" in caplog.text
     assert "1 suppressed" in caplog.text
     assert "margin 6.0 dB" in caplog.text
+
+
+async def test_a_user_already_talking_when_the_reply_starts_can_still_barge_in() -> (
+    None
+):
+    """AVID-161: barge-in must not depend on catching a *rising* edge.
+
+    When the reply starts while the user is already mid-utterance there is no rising edge left
+    to judge them on, so before this the escape hatch was unreachable in exactly the case that
+    needed it: the robot talks over you, the uplink shuts, and your words stop reaching the
+    model until you give up and start again. The margin is now re-evaluated per frame for the
+    duration of the overlap.
+
+    ``barge_in_margin_db=0.0`` makes every frame loud enough — the level arithmetic is proven in
+    the domain tests; what is under test here is that the check runs at all once ``_speaking``
+    is already True."""
+    async with _rig(vad_script=[True], barge_in_margin_db=0.0) as rig:
+        await rig.collector.wait_for_type(
+            AudioSpeechStarted, 1
+        )  # the turn is under way
+        assert rig.service._speaking
+
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
+
+        assert rig.speaker.stops == 1  # cut off without a fresh rising edge
+        finished = rig.collector.of_type(AudioPlaybackFinished)
+        assert [e.truncated for e in finished] == [True]  # the model is told (§6.2.4)
+        assert not rig.service._uplink_shut()  # and the rest of their turn gets through
+
+
+async def test_a_quiet_user_talked_over_does_not_interrupt_the_reply() -> None:
+    """The other side of the same branch: re-evaluating per frame must not turn every overlap
+    into a barge-in, or the robot could never finish a sentence over room noise. With the
+    default margin and level-with-the-floor frames, the reply plays on."""
+    async with _rig(vad_script=[True]) as rig:
+        await rig.collector.wait_for_type(AudioSpeechStarted, 1)
+
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackStarted, 1)
+        await rig.collector.settle()
+
+        assert rig.speaker.stops == 0  # the reply was not cut off
+        assert rig.collector.of_type(AudioPlaybackFinished) == []

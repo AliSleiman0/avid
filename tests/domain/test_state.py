@@ -124,6 +124,77 @@ def test_barge_in_row() -> None:
     )
 
 
+def _walk(start: RobotState, *triggers: Trigger) -> list[RobotState]:
+    """Fold *triggers* through the table from *start*, returning every state visited.
+
+    Raises ``IllegalTransition`` at the first gap, which is the point: these arcs are asserted
+    as *whole journeys*, because AVID-158 and AVID-161 were both cases where each row looked
+    defensible alone and the composition dead-ended."""
+    state = start
+    visited = [state]
+    for trigger in triggers:
+        state = next_state(state, trigger)
+        visited.append(state)
+    return visited
+
+
+def test_the_ordinary_turn_arc_still_composes() -> None:
+    """The regression guard for every table change: IDLE round-trip, untouched."""
+    assert _walk(
+        RobotState.IDLE,
+        Trigger.AUDIO_SPEECH_STARTED,
+        Trigger.AUDIO_SPEECH_ENDED,
+        Trigger.AUDIO_PLAYBACK_STARTED,
+        Trigger.AUDIO_PLAYBACK_FINISHED,
+    ) == [
+        RobotState.IDLE,
+        RobotState.LISTENING,
+        RobotState.THINKING,
+        RobotState.SPEAKING,
+        RobotState.IDLE,
+    ]
+
+
+def test_the_overlap_arc_composes_when_the_user_stops_first() -> None:
+    """AVID-161: the model answers an earlier commit while the user is still talking (measured
+    0.9 s before our falling edge), the user finishes, then the overlapping reply drains.
+
+    Asserted as a journey, not as rows. The point of the THINKING hop is that it *ends* back at
+    IDLE — a SPEAKING self-loop would look just as reasonable row-by-row and strand the machine."""
+    assert _walk(
+        RobotState.LISTENING,  # the user is mid-utterance
+        Trigger.AUDIO_PLAYBACK_STARTED,  # the reply to an EARLIER commit starts
+        Trigger.AUDIO_SPEECH_ENDED,  # the user stops first
+        Trigger.AUDIO_PLAYBACK_FINISHED,  # the reply drains
+    ) == [
+        RobotState.LISTENING,
+        RobotState.SPEAKING,
+        RobotState.THINKING,
+        RobotState.IDLE,
+    ]
+
+
+def test_the_overlap_arc_composes_when_the_user_barges_in() -> None:
+    """The other half: the user is loud enough, ``AudioService`` cuts playback (which drives no
+    transition of its own), they finish, and the *next* reply must still be able to play.
+
+    This is what the SPEAKING self-loop would have broken — after it the machine sits in
+    SPEAKING and the following ``audio.playback_started`` has no row."""
+    assert _walk(
+        RobotState.LISTENING,
+        Trigger.AUDIO_PLAYBACK_STARTED,  # overlap begins; interrupt() drives nothing
+        Trigger.AUDIO_SPEECH_ENDED,  # the user finishes
+        Trigger.AUDIO_PLAYBACK_STARTED,  # the NEXT reply — the row that must exist
+        Trigger.AUDIO_PLAYBACK_FINISHED,
+    ) == [
+        RobotState.LISTENING,
+        RobotState.SPEAKING,
+        RobotState.THINKING,
+        RobotState.SPEAKING,
+        RobotState.IDLE,
+    ]
+
+
 def test_session_lost_degrades_from_any_state() -> None:
     """The "*any* state" row: session_lost -> DEGRADED holds for all seven states,
     including DEGRADED itself (an intentional idempotent self-loop)."""
