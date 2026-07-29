@@ -510,6 +510,10 @@ async def test_open_overlaps_memory_retrieval_with_the_connect(
         return "MEMORY BLOCK"
 
     client = _openai()
+    # Pre-build the TLS context (AVID-157). It is one-time work per adapter, and on a cold run it
+    # costs tens of milliseconds — real, but not what this test measures, and enough to eat the
+    # margin below on a loaded runner. Warming it here keeps the assertion about the *overlap*.
+    client._ssl_context = ssl_module.create_default_context()
     start = time.monotonic()
     await client.open(memory=slow_memory())
     elapsed = time.monotonic() - start
