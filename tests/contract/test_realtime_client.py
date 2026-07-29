@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl as ssl_module
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -491,9 +492,12 @@ async def test_open_overlaps_memory_retrieval_with_the_connect(
     ws = _CapturingWs()
     delay = 0.1
 
+    seen_ssl: list[object] = []
+
     async def fake_connect(
-        url: str, *, additional_headers: object = None
+        url: str, *, additional_headers: object = None, ssl: object = None
     ) -> _CapturingWs:
+        seen_ssl.append(ssl)
         await asyncio.sleep(delay)
         return ws
 
@@ -506,11 +510,19 @@ async def test_open_overlaps_memory_retrieval_with_the_connect(
         return "MEMORY BLOCK"
 
     client = _openai()
+    # Pre-build the TLS context (AVID-157). It is one-time work per adapter, and on a cold run it
+    # costs tens of milliseconds — real, but not what this test measures, and enough to eat the
+    # margin below on a loaded runner. Warming it here keeps the assertion about the *overlap*.
+    client._ssl_context = ssl_module.create_default_context()
     start = time.monotonic()
     await client.open(memory=slow_memory())
     elapsed = time.monotonic() - start
 
     assert elapsed < delay + 0.05  # ~max(0.1, 0.1), not the ~0.2 s sum
+    # AVID-157: the context is built by us and handed over, rather than letting websockets
+    # build a fresh one — and parse the whole system CA bundle — on every connect.
+    assert isinstance(seen_ssl[0], ssl_module.SSLContext)
+    assert client._ssl_context is seen_ssl[0]
     update = ws.sent[0]
     assert update["type"] == "session.update"
     assert "MEMORY BLOCK" in update["session"]["instructions"]  # type: ignore[index]
@@ -561,3 +573,80 @@ async def test_replay_records_tool_output_without_acting_on_it() -> None:
     replay, _clock = _load("two_turn")
     await replay.send_tool_output("call_0", '{"deleted": 1}')
     assert replay.tool_outputs == [("call_0", '{"deleted": 1}')]
+
+
+# --- AVID-157: the session-open phase breakdown, offline ------------------------------------
+
+
+async def test_timed_reports_the_elapsed_time_of_an_await() -> None:
+    """The measurement primitive. Monotonic, never wall clock — an NTP step or the Pi's
+    boot-time clock correction yields negative latencies, and latency is the metric this
+    project is graded on (SDS §9.1.1)."""
+
+    async def _work() -> str:
+        await asyncio.sleep(0.01)
+        return "done"
+
+    result, elapsed_ns = await rt._timed(_work())
+
+    assert result == "done"
+    assert elapsed_ns >= 10 * 1_000_000  # at least the 10 ms it slept
+    assert elapsed_ns < 5_000_000_000  # and not a wall-clock artefact
+
+
+def test_timed_sync_reports_the_elapsed_time_of_a_call() -> None:
+    value, elapsed_ns = rt._timed_sync(lambda: 42)
+    assert value == 42
+    assert elapsed_ns >= 0
+
+
+def test_the_open_report_names_every_phase_and_marks_a_cold_open() -> None:
+    """AVID-157: the line every open logs, so any bench run is also a measurement — the same
+    pattern #159's echo gate uses for its calibration datum."""
+    line = rt._format_open_report(
+        ssl_ns=312_000_000,
+        connect_ns=1_180_000_000,
+        memory_ns=28_000_000,
+        send_ns=4_000_000,
+        total_ns=1_204_000_000,
+        cold=True,
+    )
+
+    assert line == (
+        "realtime open: ssl 312 ms, connect 1180 ms, memory 28 ms, "
+        "send 4 ms, total 1204 ms (cold)"
+    )
+
+
+def test_the_open_report_marks_a_warm_open() -> None:
+    """Cold vs warm is the distinction the whole issue turns on: the bench saw 1494/1922/832 ms
+    across three opens and 6652 ms on a first one. "Once per process" and "once per
+    conversation" are very different conclusions about §6.3's budget."""
+    line = rt._format_open_report(
+        ssl_ns=0,
+        connect_ns=830_000_000,
+        memory_ns=0,
+        send_ns=1_000_000,
+        total_ns=832_000_000,
+        cold=False,
+    )
+
+    assert "(warm)" in line
+    assert "ssl 0 ms" in line  # the context was built on the cold open and reused
+
+
+def test_the_open_report_total_is_not_the_sum_of_its_phases() -> None:
+    """``connect`` and ``memory`` are gathered concurrently — that overlap is the payoff §6.7
+    claims. Anyone reading the line as a sum would conclude the phases do not add up and go
+    looking for missing time that was never spent."""
+    line = rt._format_open_report(
+        ssl_ns=0,
+        connect_ns=150_000_000,
+        memory_ns=30_000_000,
+        send_ns=2_000_000,
+        total_ns=153_000_000,
+        cold=False,
+    )
+
+    assert "connect 150 ms" in line and "memory 30 ms" in line
+    assert "total 153 ms" in line  # not 182
