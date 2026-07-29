@@ -90,7 +90,7 @@ class IllegalTransition(Exception):
         )
 
 
-# The normative transition table (SDS §3.10.3). The 14 explicit rows are written out so a
+# The normative transition table (SDS §3.10.3). The 17 explicit rows are written out so a
 # reviewer can diff them against the table directly; guards are noted but NOT evaluated here
 # (they belong to the caller — see the module docstring).
 _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
@@ -122,6 +122,22 @@ _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     # Barge-in — the row that separates a companion from a kiosk; the caller stops playback
     # first (SDS §3.10.3). Speaker.stop() is on the port precisely so this is immediate.
     (RobotState.SPEAKING, Trigger.AUDIO_SPEECH_STARTED): RobotState.LISTENING,
+    # --- the overlap: both of them talking at once (AVID-161) ------------------------------
+    # This machine has one axis and the robot has two mouths in the room. The model answers an
+    # earlier commit while the user has already begun their next utterance — measured at
+    # t=61.074 in docs/demos/m5_evidence/trace_2026-07-26_streaming.log, 0.9 s before our own
+    # falling edge — and for that window both are speaking. Every assignment below is therefore
+    # a compromise; these three are simply the set that leaves no *reachable* illegal
+    # transition, which is the only property worth optimising for on one axis. The real answer
+    # is two axes, or AVID-163's echo cancellation making the overlap impossible.
+    (RobotState.LISTENING, Trigger.AUDIO_PLAYBACK_STARTED): RobotState.SPEAKING,
+    # The user stops first. THINKING rather than a SPEAKING self-loop, and that is the whole
+    # trick: a self-loop leaves SPEAKING sticky, so the *next* reply's AUDIO_PLAYBACK_STARTED
+    # has no row and the wedge merely moves one step later. THINKING is also true — we are
+    # waiting on the model for what they just said — and the THINKING rows above pick it up.
+    (RobotState.SPEAKING, Trigger.AUDIO_SPEECH_ENDED): RobotState.THINKING,
+    # ...and then the overlapping reply drains, with the user already finished.
+    (RobotState.THINKING, Trigger.AUDIO_PLAYBACK_FINISHED): RobotState.IDLE,
     (RobotState.DEGRADED, Trigger.SYSTEM_DEGRADED_EXITED): RobotState.IDLE,
 }
 

@@ -172,7 +172,7 @@ class AudioService:
         self._barge_in_margin_db = barge_in_margin_db
         self._echo_tail_ns = echo_tail_ms * 1_000_000
         self._uplink_shut_until_ns = 0
-        self._suppressed_edges = 0
+        self._suppressed_frames = 0
         self._loudest_suppressed_dbfs = SILENCE_DBFS
 
         # True = M4 echo (the #91 transport gate); False = the M5 TurnSink seam (the running
@@ -393,6 +393,16 @@ class AudioService:
                         continue  # our own speaker, not the user — see _admits_barge_in
                     await self._begin_speech()  # rising edge — replays the pre-roll
                 else:
+                    # Mid-utterance barge-in (AVID-161). The reply started *while* they were
+                    # already talking, so there is no rising edge left to carry them through
+                    # the check above — and without this the escape hatch is unreachable in
+                    # exactly the case that needs it: the robot talks over you, the uplink is
+                    # shut, and your words stop reaching the model until you give up and start
+                    # again. Judged per frame here, so the interrupt lands as soon as they are
+                    # loud enough, and ``interrupt`` re-opens the uplink for the rest of it.
+                    if self._uplink_shut() and self._admits_barge_in(frame_dbfs):
+                        await self.interrupt()
+                        self._uplink_shut_until_ns = 0  # the rest of the turn is theirs
                     self._capture(chunk.pcm)  # subsequent speech frame
                 self._speech_ms += frame_ms
                 self._silence_run_ms = 0
@@ -444,6 +454,9 @@ class AudioService:
         deliberate: the discriminator is crude, and it should only run where nothing better
         exists.
 
+        Asked at the rising edge, and — since AVID-161 — on every frame of an utterance the
+        robot started talking over, because such a user has no rising edge left to be judged on.
+
         A rejected frame is fed to the floor precisely *because* it is the robot: while the
         assistant speaks, what the mic hears is the echo, so those frames **are** the
         calibration. A frame that clears the margin is judged to be the user and is deliberately
@@ -454,7 +467,7 @@ class AudioService:
         if self._echo_floor.exceeds(frame_dbfs, margin_db=self._barge_in_margin_db):
             return True
         self._echo_floor.observe(frame_dbfs)
-        self._suppressed_edges += 1
+        self._suppressed_frames += 1
         self._loudest_suppressed_dbfs = max(self._loudest_suppressed_dbfs, frame_dbfs)
         return False
 
@@ -463,7 +476,7 @@ class AudioService:
 
         Emitted on **every** playback episode, so every bench run is a calibration run and there
         is no separate mode anyone has to remember to enable. ``floor`` is what the mic heard
-        while the robot spoke; ``loudest suppressed`` is the closest any rejected edge came to
+        while the robot spoke; ``loudest suppressed`` is the closest any rejected frame came to
         clearing the margin.
 
         Read together with a genuine barge-in's level, these say whether the two populations
@@ -472,15 +485,15 @@ class AudioService:
         nobody spends a bench session turning a knob that was never going to help.
         """
         _log.info(
-            "echo gate: floor %.1f dBFS, loudest suppressed edge %.1f dBFS "
+            "echo gate: floor %.1f dBFS, loudest suppressed frame %.1f dBFS "
             "(%d suppressed), margin %.1f dB [correlation_id=%s]",
             self._echo_floor.dbfs,
             self._loudest_suppressed_dbfs,
-            self._suppressed_edges,
+            self._suppressed_frames,
             self._barge_in_margin_db,
             self._playing_corr,
         )
-        self._suppressed_edges = 0
+        self._suppressed_frames = 0
         self._loudest_suppressed_dbfs = SILENCE_DBFS
 
     def _emit(self, pcm: bytes) -> None:
