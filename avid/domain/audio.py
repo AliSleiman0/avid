@@ -1,6 +1,7 @@
-"""The ``audio.*`` events and the pre-roll ring buffer — pure audio-domain primitives (#86).
+"""The ``audio.*`` events, the pre-roll ring buffer, and the echo gate's arithmetic —
+pure audio-domain primitives (#86).
 
-Two kinds of thing, both stdlib-only and used first by ``AudioService`` (#87):
+Three kinds of thing, all stdlib-only and used first by ``AudioService`` (#87):
 
 * **Four events** (SDS §9.1.3, SDS:1975–1982) — the facts the audio loop publishes:
   speech began/ended and playback began/finished. Each is a frozen/slotted/kw-only
@@ -9,6 +10,9 @@ Two kinds of thing, both stdlib-only and used first by ``AudioService`` (#87):
 * **A 300 ms pre-roll ring buffer** (:class:`AudioPreRoll`, SDS §6.3, SDS:1082) — keeps
   the last ~300 ms of captured PCM so that when local VAD fires, the leading phonemes
   it has already missed can be replayed into the freshly-opened session.
+* **A level meter and an adaptive floor** (:func:`rms_dbfs`, :class:`EchoFloor`, SDS §6.2.4,
+  AVID-159) — how the service tells *the user interrupting* from *its own speaker*, which
+  a VAD provably cannot do: the robot's voice is speech too.
 
 Pure by construction (P1): no I/O, no clock, no async, stdlib only. In particular the
 ring buffer speaks in raw ``bytes`` framed by an injected ``bytes_per_ms`` and never
@@ -19,11 +23,27 @@ converts milliseconds to bytes; ALSA specifics stay out of the domain.
 
 from __future__ import annotations
 
+import math
+from array import array
 from collections import deque
 from dataclasses import dataclass
 from typing import ClassVar
 
 from avid.domain.events import Event
+
+# Peak magnitude of a signed 16-bit sample: the 0 dBFS reference. A full-scale *square* wave
+# therefore reads 0 dBFS and a full-scale sine −3.01 dBFS, which is the usual convention.
+_FULL_SCALE = 32768.0
+
+# The floor returned for digital silence, and the clamp on :func:`rms_dbfs`. Finite rather than
+# ``-inf`` so every caller can do ordinary arithmetic on the result without special-casing.
+SILENCE_DBFS = -120.0
+
+# How fast :class:`EchoFloor` tracks the room, as an EMA weight per observed frame. At the
+# shipped 20 ms ``[microphone] chunk_ms`` this reaches ~95% of a step in ~0.4 s — comfortably
+# quicker than the 269 ms the bench measured between playback starting and the echo reaching the
+# mic, and slow enough that no single loud frame can drag the floor up over the user.
+_FLOOR_ATTACK = 0.15
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -144,3 +164,78 @@ class AudioPreRoll:
     def buffered_ms(self) -> int:
         """How much audio is currently held, in milliseconds (floored)."""
         return self._buffered_bytes // self._bytes_per_ms
+
+
+def rms_dbfs(pcm: bytes) -> float:
+    """RMS level of S16_LE *pcm*, in dBFS. Digital silence returns :data:`SILENCE_DBFS`.
+
+    The measurement the echo gate runs on (AVID-159). Loudness is the **only** discriminator
+    available between the user and the robot's own speaker: both are speech, and
+    ``VoiceActivityDetector.is_speech`` answers a deliberate yes/no with no probability crossing
+    the port (SDS §9.3), so the classifier cannot help and the level has to.
+
+    Odd trailing bytes are ignored rather than raising — a half sample is not a level, and a
+    truncated frame is a device's business, not a reason to kill the mic loop. Sample order is
+    native-endian, the same assumption ``adapters/realtime._resample`` already makes; every
+    target here is little-endian, and an energy measure does not justify byte-swap machinery.
+    """
+    samples = array("h")
+    usable = len(pcm) - (len(pcm) % samples.itemsize)
+    samples.frombytes(pcm[:usable])
+    if not samples:
+        return SILENCE_DBFS
+    mean_square = sum(sample * sample for sample in samples) / len(samples)
+    if mean_square <= 0.0:
+        return SILENCE_DBFS
+    return max(SILENCE_DBFS, 20.0 * math.log10(math.sqrt(mean_square) / _FULL_SCALE))
+
+
+class EchoFloor:
+    """A running estimate of how loud the microphone hears the room (SDS §6.2.4, AVID-159).
+
+    While the robot is speaking, what the mic hears **is** the echo — so tracking that level
+    *is* the acoustic-coupling calibration, and speaker volume, mic gain, room and rig geometry
+    all cancel out of the comparison. That is the whole reason this is adaptive rather than a
+    configured ``playback_level x coupling`` constant: the constant would have to be re-measured
+    every time the desk changed, and silently produce a deaf or a self-interrupting robot when
+    nobody remembered to.
+
+    It is deliberately **not** told whether playback is live. The caller feeds it every frame, so
+    it self-seeds on ambient room noise long before the first reply, and decays back to ambience
+    when the robot stops. The caller's only obligation is the one rule this class cannot enforce:
+    **do not feed it frames you have already judged to be the user** (see :meth:`exceeds`), or
+    their voice drags the floor up underneath them and the rest of the utterance is gated out.
+    """
+
+    def __init__(self, *, attack: float = _FLOOR_ATTACK) -> None:
+        self._attack = attack
+        self._dbfs = SILENCE_DBFS
+        self._seeded = False
+
+    @property
+    def dbfs(self) -> float:
+        """The current floor estimate, in dBFS (:data:`SILENCE_DBFS` before the first frame)."""
+        return self._dbfs
+
+    def observe(self, frame_dbfs: float) -> None:
+        """Fold one frame's level into the estimate.
+
+        The first frame is adopted outright rather than blended: starting from
+        :data:`SILENCE_DBFS` and easing toward a real room would spend a few hundred
+        milliseconds reporting a floor far below anything actually present.
+        """
+        if not self._seeded:
+            self._dbfs = frame_dbfs
+            self._seeded = True
+            return
+        self._dbfs += self._attack * (frame_dbfs - self._dbfs)
+
+    def exceeds(self, frame_dbfs: float, *, margin_db: float) -> bool:
+        """Is *frame_dbfs* at least *margin_db* above the floor — i.e. louder than the echo?
+
+        A ``True`` here is the caller's cue to treat the frame as the user and to stop feeding it
+        to :meth:`observe`. A very large *margin_db* makes this permanently ``False``, which is
+        exactly full half-duplex: the documented fallback if the levels turn out not to separate
+        on real hardware, reachable by config alone (SDS §6.3).
+        """
+        return frame_dbfs >= self._dbfs + margin_db

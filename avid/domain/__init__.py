@@ -16,6 +16,8 @@ from avid.domain.audio import (
     AudioPreRoll,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    EchoFloor,
+    rms_dbfs,
 )
 from avid.domain.conversation import (
     ConversationAssistantResponded,
@@ -68,12 +70,14 @@ __all__ = [
     "Affect",
     "AffectChanged",
     "AffectTier",
-    # audio.* events + pre-roll ring buffer (#86)
+    # audio.* events + pre-roll ring buffer (#86) + the echo gate's arithmetic (AVID-159)
     "AudioPlaybackFinished",
     "AudioPlaybackStarted",
     "AudioPreRoll",
     "AudioSpeechEnded",
     "AudioSpeechStarted",
+    "EchoFloor",
+    "rms_dbfs",
     # conversation.* events + TokenUsage value (#99)
     "ConversationAssistantResponded",
     "ConversationSessionLost",
