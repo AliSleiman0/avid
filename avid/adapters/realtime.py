@@ -49,11 +49,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+import ssl
+import time
 import wave
 from array import array
-from collections.abc import AsyncIterator, Awaitable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any, assert_never
+from typing import Any, TypeVar, assert_never
 
 from avid.core.hal import AudioChunk
 from avid.core.ports import Clock, RealtimeClient
@@ -68,9 +71,61 @@ from avid.core.realtime import (
 )
 from avid.domain import TokenUsage
 
+_log = logging.getLogger(__name__)
+
 _MANIFEST = "session.json"
 _SUPPORTED_FORMAT = 1
 _NS_PER_MS = 1_000_000
+
+_T = TypeVar("_T")
+
+
+def _timed_sync(call: Callable[[], _T]) -> tuple[_T, int]:
+    """Run *call* and report how long it took, in nanoseconds. See :func:`_timed`."""
+    started_ns = time.monotonic_ns()
+    result = call()
+    return result, time.monotonic_ns() - started_ns
+
+
+async def _timed(awaitable: Awaitable[_T]) -> tuple[_T, int]:
+    """Await *awaitable* and report how long it took, in nanoseconds.
+
+    ``time.monotonic_ns`` and never a wall clock: an NTP step or the Pi's boot-time clock
+    correction yields negative latencies, which is precisely the metric this project is graded
+    on (SDS §9.1.1)."""
+    started_ns = time.monotonic_ns()
+    result = await awaitable
+    return result, time.monotonic_ns() - started_ns
+
+
+def _format_open_report(
+    *,
+    ssl_ns: int,
+    connect_ns: int,
+    memory_ns: int,
+    send_ns: int,
+    total_ns: int,
+    cold: bool,
+) -> str:
+    """The one-line session-open breakdown (AVID-157).
+
+    **``total`` is not the sum**: ``connect`` and ``memory`` are gathered concurrently, which is
+    the whole point of §6.7's overlap, so ``total`` is roughly ``ssl + max(connect, memory) +
+    send``. A ``memory`` figure approaching ``connect`` means the overlap has stopped being free.
+
+    ``cold`` marks the first open of the process, which is where one-time costs land — the CA
+    bundle parse below, DNS and TLS caches, the lazy ``websockets`` import. The bench measured
+    1494/1922/832 ms across three opens and 6652 ms on a first one; telling those apart is the
+    difference between "once per conversation" and "once per process", and they imply very
+    different things about SDS §6.3's budget."""
+    return (
+        f"realtime open: ssl {ssl_ns / _NS_PER_MS:.0f} ms, "
+        f"connect {connect_ns / _NS_PER_MS:.0f} ms, "
+        f"memory {memory_ns / _NS_PER_MS:.0f} ms, "
+        f"send {send_ns / _NS_PER_MS:.0f} ms, "
+        f"total {total_ns / _NS_PER_MS:.0f} ms ({'cold' if cold else 'warm'})"
+    )
+
 
 # The assistant playback format the Realtime API emits (SDS §6.2.4): PCM16, 24 kHz mono.
 _ASSISTANT_SAMPLE_RATE = 24_000
@@ -385,6 +440,8 @@ class OpenAIRealtimeClient:
         # injected here (like turn_detection) does not cross the port.
         self._tools = tuple(tools)
         self._ws: Any = None  # the websockets connection, untyped (lazy vendor import)
+        # Built once on the first open() and reused for the process's life (AVID-157).
+        self._ssl_context: ssl.SSLContext | None = None
         self._closed = False
         # Set on a truncate() and consumed by the next user transcript: audio/transcript alignment
         # is imprecise at a barge-in boundary, so that transcript's tail is approximate (§6.2.4).
@@ -472,25 +529,61 @@ class OpenAIRealtimeClient:
         block — is awaited **concurrently with the socket connect** (``asyncio.gather``), so the
         ~30 ms local retrieval overlaps the ~150 ms WSS setup and adds no wall-clock latency to
         time-to-session-ready (AC-1). Only the single ``session.update`` that follows depends on the
-        block, and it carries the static prefix + that block as layer 4 (§6.2.2, AC-2)."""
+        block, and it carries the static prefix + that block as layer 4 (§6.2.2, AC-2).
+
+        **Every open reports its phase breakdown** (AVID-157, see :func:`_format_open_report`).
+        The bench measured this call at 1.5–6.7 s against §6.3's ~200 ms budget, and while it is in
+        flight *no audio reaches the API at all* — so the utterance that opens a session is fully
+        buffered behind it, which makes #153's streaming a no-op for that turn. The breakdown is
+        what decides whether that time is ours or the API's, and it is logged on every open rather
+        than behind a flag so any bench run is also a measurement.
+        """
         import websockets  # lazy, adapter-local optional group (AC-2, ADR-008)
+
+        started_ns = time.monotonic_ns()
+        cold = self._ssl_context is None
+        ssl_ns = 0
+        if self._ssl_context is None:
+            # ONCE per adapter, not once per connect (AVID-157). Passing no ``ssl=`` makes
+            # ``websockets`` build a default context itself on every call, and building one parses
+            # the whole system CA bundle — measured at 49.6 ms cold / ~7 ms warm on a fast laptop,
+            # and a Pi is much slower at it. Reusing a context across connections is the documented
+            # pattern; there is no per-connection state in it.
+            self._ssl_context, ssl_ns = _timed_sync(ssl.create_default_context)
 
         # No `OpenAI-Beta: realtime=v1`: that header selects the beta interface, which is disabled
         # server-side and rejects the GA session shape this adapter sends (see _session_config).
         headers = {"Authorization": f"Bearer {self._api_key}"}
         connect = websockets.connect(
-            f"{_REALTIME_URL}?model={self._model}", additional_headers=headers
+            f"{_REALTIME_URL}?model={self._model}",
+            additional_headers=headers,
+            ssl=self._ssl_context,
         )
         if memory is None:
-            self._ws = await connect
-            block = ""
+            self._ws, connect_ns = await _timed(connect)
+            block, memory_ns = "", 0
         else:
             # Overlap the ~150 ms connect with the ~30 ms retrieval — the payoff of the gate (§6.7).
-            self._ws, block = await asyncio.gather(connect, memory)
+            (self._ws, connect_ns), (block, memory_ns) = await asyncio.gather(
+                _timed(connect), _timed(memory)
+            )
         self._closed = False
         self._truncation_pending = False
-        await self._send(
-            {"type": "session.update", "session": self._session_config(block)}
+        _, send_ns = await _timed(
+            self._send(
+                {"type": "session.update", "session": self._session_config(block)}
+            )
+        )
+        _log.info(
+            "%s",
+            _format_open_report(
+                ssl_ns=ssl_ns,
+                connect_ns=connect_ns,
+                memory_ns=memory_ns,
+                send_ns=send_ns,
+                total_ns=time.monotonic_ns() - started_ns,
+                cold=cold,
+            ),
         )
 
     async def aclose(self) -> None:
