@@ -60,6 +60,7 @@ from avid.core.ports import Speaker
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioPlaybackFinished,
+    AudioSpeechEnded,
     AudioSpeechStarted,
     ConversationAssistantResponded,
     ConversationSessionLost,
@@ -69,9 +70,11 @@ from avid.domain import (
     Event,
     Fact,
     RobotState,
+    StateTransitioned,
     SystemDegradedEntered,
     SystemHandlerFailed,
     TokenUsage,
+    Trigger,
 )
 from avid.services import AudioService, ConversationService, CueBank
 
@@ -104,6 +107,8 @@ _COLLECTED: tuple[type[Event], ...] = (
     SystemDegradedEntered,
     AudioPlaybackFinished,
     AudioSpeechStarted,
+    AudioSpeechEnded,
+    StateTransitioned,
     SystemHandlerFailed,
 )
 
@@ -315,7 +320,14 @@ async def _drive_session(
             # Phase 1 (real time): the mic streams frames, the VAD gate closes the utterance and
             # AudioService mints the origin. Phase 2 (virtual time): the replay pays out its
             # recorded timeline. See _Collector.wait_for_type.
+            #
+            # Both edges are waited for, not just the rising one: the mic paces frames on **real**
+            # time while ``_advance_until`` drives the replay on **virtual** time, so without this
+            # nothing orders the falling edge before the reply's first delta — and since AVID-158
+            # the falling edge is what carries the machine LISTENING → THINKING, where
+            # ``audio.playback_started`` is legal.
             await collector.wait_for_type(AudioSpeechStarted, 1)
+            await collector.wait_for_type(AudioSpeechEnded, 1)
             await collector.settle()
             await _advance_until(clock, lambda: until(collector))
             await collector.settle()
@@ -376,14 +388,34 @@ async def test_m5_gate_a_turn_replays_end_to_end_on_one_correlation_id() -> None
     assert speaker.played, "no assistant PCM reached the speaker"
     assert collector.of_type(SystemHandlerFailed) == []
 
-    # #153, at the stack level: the model was given audio *during* the user's turn. This whole
-    # arc runs before the falling edge — phase 2 advances virtual time, so the mic never emits
-    # another real frame and ``audio.speech_ended`` does not fire here at all. Under the
-    # buffering this replaced, nothing crossed the seam until that falling edge, so ``sent``
-    # would be empty and the fixture would be answering audio the model never received. The
-    # first chunk is §6.3's ring-buffer replay, which is one frame at this rising edge.
+    # #153, at the stack level: the model was given audio *during* the user's turn, frame by
+    # frame. Under the buffering this replaced, nothing crossed the seam until the falling edge,
+    # so the fixture would be answering audio the model had not received. The **first** chunk is
+    # §6.3's ring-buffer replay, handed over at the rising edge — before the turn was over.
     assert client.sent, "no mic audio reached the model before the turn closed"
     assert len(client.sent[0].pcm) == _FRAME_BYTES
+
+    # AVID-158: the turn arc, and **what drove each edge**. Asserting only the shape would prove
+    # nothing here — this fixture's timeline puts ``user_transcript`` before the first audio
+    # delta, so the pre-fix code reaches THINKING too, just via the transcript. That ordering is
+    # exactly why replay CI was structurally incapable of catching the defect: a recorded session
+    # cannot reproduce a race the live API loses. Pinning the *trigger* is what makes this a
+    # regression test rather than a restatement of the fixture.
+    moves = [
+        (e.from_, e.trigger, e.to)
+        for e in collector.of_type(StateTransitioned)
+        if isinstance(e, StateTransitioned)
+    ]
+    assert (
+        RobotState.LISTENING,
+        Trigger.AUDIO_SPEECH_ENDED,
+        RobotState.THINKING,
+    ) in moves, "the turn-end edge was not driven by AudioService's own falling edge"
+    assert (
+        RobotState.THINKING,
+        Trigger.AUDIO_PLAYBACK_STARTED,
+        RobotState.SPEAKING,
+    ) in moves, "SPEAKING was never reached — the AVID-158 wedge"
 
 
 # --- AC-3: barge-in ------------------------------------------------------------------------
