@@ -242,7 +242,15 @@ class _ScriptedVad(FakeVoiceActivityDetector):
         super().__init__(script=_SCRIPT)
 
     def utter(self) -> None:
-        """Queue one more utterance — three speech frames, then enough silence to close it."""
+        """Queue one more utterance — three speech frames, then enough silence to close it.
+
+        Written **relative to the frames already judged**, not appended to the end of the list.
+        The fake indexes its script by ``calls``, which runs on past the end while the mic keeps
+        streaming silence, so a plain ``extend`` lands *behind* the read cursor and is never
+        reached: the utterance silently never happens. That is exactly the timing dependence
+        this class exists to remove — and it is leg-dependent, so it passed on 3.13 and hung on
+        3.11 until the pad went in."""
+        self._script.extend([False] * (self.calls - len(self._script)))
         self._script.extend(_SCRIPT)
 
 
