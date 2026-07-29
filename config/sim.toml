@@ -39,6 +39,11 @@ threshold            = 0.5       # Silero speech-probability cutoff
 ring_buffer_ms       = 300       # pre-roll replayed at a turn's start
 silence_hold_ms      = 500       # silence run before a turn is declared over (debounce)
 session_idle_close_s = 30
+# The echo gate (§6.2.4). The uplink is shut while the robot speaks; a rising edge inside that
+# window is the USER only if it clears the running echo floor by this margin. PROVISIONAL —
+# #106 AC-3 records the measured value. Very large = full half-duplex (barge-in off).
+barge_in_margin_db   = 6.0
+echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
 
 [cues]                          # degraded-mode WAV cue bank (AVID-80); consumed by M5's ConversationService
 dir = "assets/cues"             # committed 24 kHz mono clips (#88)

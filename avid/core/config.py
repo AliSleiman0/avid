@@ -246,6 +246,24 @@ class GateConfig(_Section):
     ring_buffer_ms: int = 300
     silence_hold_ms: int = 500
     session_idle_close_s: int = 30
+    # The echo gate (AVID-159, §6.2.4). While the assistant is speaking the mic hears the robot,
+    # so the uplink is shut and a rising edge only counts as the *user* if it clears the running
+    # echo floor by this margin. A very large value is full half-duplex — barge-in off, no code
+    # change — which is the documented fallback if the levels do not separate on hardware.
+    #
+    # PROVISIONAL. The echo-to-speech separation on this rig has never been measured: §6.3
+    # records the mic's own noise floor at -21 dBFS and a speech capture at rms -16.1 dBFS, and
+    # M4 called amp->mic coupling "weak" without quantifying it. 6.0 errs toward staying
+    # interruptible — too low and the robot occasionally cuts itself off, which is loud, logged
+    # and recoverable; too high and it goes silently deaf while speaking, which looks exactly
+    # like working. #106 AC-3 records the measured value.
+    barge_in_margin_db: float = Field(default=6.0, ge=0.0)
+    # How long the uplink stays shut after a reply ends *normally*: the DAC is still draining up
+    # to a playback-buffer depth (~107 ms at 24 kHz, §6.2.4) after ``end_response`` clears the
+    # in-flight item, and those frames are still the robot. Not applied after a barge-in —
+    # ``Speaker.stop`` closes the handle so ALSA drops the buffer outright, and the user is
+    # mid-utterance, so re-opening the uplink late would clip the very words that interrupted.
+    echo_tail_ms: int = Field(default=150, ge=0)
     # §6.7-path-1 memory injection (#126): the cap on the top-facts fetch at session open. Retrieval
     # is local (~30 ms) and overlaps the connect, but a hung store must not delay time-to-session-ready
     # — on timeout the session opens without memory (AC-6). Generous vs the ~30 ms norm, a safety net.

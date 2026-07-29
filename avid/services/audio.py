@@ -49,6 +49,16 @@ where the design has one — our ``silence_hold_ms`` hold, the blob upload, then
 the same silence *inside* the blob — and cost M5 its O1 objective: P50 1350 ms measured against a
 800 ms budget, with a floor of 1004 ms. :meth:`_capture` is the one place the two modes diverge.
 
+**Streamed live, except while the robot itself is talking** (AVID-159, §6.2.4). The uplink is
+half-duplex: nothing crosses the seam from the moment a reply starts playing until
+``[gate] echo_tail_ms`` after it ends, because the mic hears the speaker and streaming that echo up
+made the model hear *itself* — the server's turn detection saw near-continuous audio and stopped
+committing turns, killing the conversation with the socket still open. Barge-in survives the gate on
+**loudness**: a rising edge inside that window is the user only if it clears
+:class:`~avid.domain.EchoFloor` by ``[gate] barge_in_margin_db``. It has to be loudness, because the
+robot's voice is speech too and the VAD is right to say so. The margin is consulted *only* inside
+that window, so ordinary turn-taking is untouched by it.
+
 Purity of the hot path (P8, AC-6): :meth:`~avid.core.ports.VoiceActivityDetector.is_speech`
 is synchronous and sub-ms by contract (SDS §9.3), so it is called **inline** — no
 executor, no loop hop. The blocking device reads/writes live in the adapter threads
@@ -80,8 +90,11 @@ from avid.domain import (
     AudioPreRoll,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    EchoFloor,
     Trigger,
+    rms_dbfs,
 )
+from avid.domain.audio import SILENCE_DBFS
 
 _log = logging.getLogger(__name__)
 
@@ -124,6 +137,8 @@ class AudioService:
         sample_rate: int,
         channels: int,
         silence_hold_ms: int,
+        barge_in_margin_db: float = 6.0,
+        echo_tail_ms: int = 150,
         loopback: bool = False,
     ) -> None:
         self._bus = bus
@@ -144,6 +159,21 @@ class AudioService:
         # How long a run of silence must last before a turn is declared over — the
         # debounce that stops per-frame flapping (AC-2). Server-VAD's silence_duration_ms.
         self._silence_hold_ms = silence_hold_ms
+
+        # The echo gate (AVID-159, §6.2.4). ``_echo_floor`` tracks what the mic hears — ambience
+        # normally, the robot's own voice while it speaks — so the margin is measured against the
+        # room rather than an absolute level, and the acoustic coupling cancels out.
+        # ``_uplink_shut_until_ns`` is the tail after a *normal* reply, during which the DAC is
+        # still draining. The suppression counters are per playback episode and exist to be
+        # logged: a margin so high the robot is deaf while speaking is otherwise indistinguishable
+        # from one that works (§3.5.2 — loud drops are a tuning signal, silent ones are a
+        # debugging catastrophe), and #106's AC-3 needs the number that log line carries.
+        self._echo_floor = EchoFloor()
+        self._barge_in_margin_db = barge_in_margin_db
+        self._echo_tail_ns = echo_tail_ms * 1_000_000
+        self._uplink_shut_until_ns = 0
+        self._suppressed_edges = 0
+        self._loudest_suppressed_dbfs = SILENCE_DBFS
 
         # True = M4 echo (the #91 transport gate); False = the M5 TurnSink seam (the running
         # robot). Named ``_loopback_mode`` so it does not shadow the :meth:`_loopback` method.
@@ -281,6 +311,10 @@ class AudioService:
             Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=self._playback_corr()
         )
         self._clear_playback()
+        # The reply is over as far as the model is concerned, but not as far as the room is: the
+        # DAC is still clocking out up to a playback-buffer depth of it (§6.2.4). Hold the uplink
+        # shut over that tail, or its last ~100 ms goes to the model as user audio (AVID-159).
+        self._uplink_shut_until_ns = self._clock.monotonic_ns() + self._echo_tail_ns
 
     async def interrupt(self) -> int:
         """Barge-in: cut playback immediately and report the ms the speaker **accepted**
@@ -324,7 +358,11 @@ class AudioService:
         return self._playing_corr
 
     def _clear_playback(self) -> None:
-        """Reset the playback lifecycle for the next response."""
+        """Reset the playback lifecycle for the next response.
+
+        The single point where a playback episode ends — both a normal ``end_response`` and a
+        barge-in ``interrupt`` land here — so it is where the echo gate reports what it saw."""
+        self._report_echo_gate()
         self._playing_item = None
         self._playing_ms = 0
         self._playing_corr = None
@@ -336,6 +374,11 @@ class AudioService:
 
         Runs until :meth:`stop` cancels it. ``is_speech`` is inline (sync, sub-ms — P8);
         the pre-roll is fed on every frame so a turn can replay the phonemes it missed.
+
+        Two questions per frame, and they are different questions (AVID-159): the VAD answers
+        *is this speech*, and — only when the robot is the one talking — the level answers
+        *whose*. Silero already rejects transients (§6.3: 0 false opens in 3000 frames of knocks,
+        claps and doors), so the margin never has to; it only separates two genuine voices.
         """
         async for chunk in self._mic.stream():
             speech = self._vad.is_speech(chunk)
@@ -343,8 +386,11 @@ class AudioService:
             frame_ms = pcm_duration_ms(
                 chunk.pcm, sample_rate=chunk.sample_rate, channels=chunk.channels
             )
+            frame_dbfs = rms_dbfs(chunk.pcm)
             if speech:
                 if not self._speaking:
+                    if not self._admits_barge_in(frame_dbfs):
+                        continue  # our own speaker, not the user — see _admits_barge_in
                     await self._begin_speech()  # rising edge — replays the pre-roll
                 else:
                     self._capture(chunk.pcm)  # subsequent speech frame
@@ -360,7 +406,11 @@ class AudioService:
                 self._silence_run_ms += frame_ms
                 if self._silence_run_ms >= self._silence_hold_ms:
                     await self._end_speech()
-            # else: idle silence — the pre-roll rolls, nothing is published.
+            else:
+                # Idle silence — the pre-roll rolls and nothing is published, but this is the
+                # room's own level and it is what the echo floor is for. Not observed during a
+                # turn (the branches above): the user's voice would drag the floor up under them.
+                self._echo_floor.observe(frame_dbfs)
 
     def _capture(self, pcm: bytes) -> None:
         """Route one captured frame — the **only** place the two modes diverge (#153).
@@ -373,6 +423,66 @@ class AudioService:
         else:
             self._emit(pcm)
 
+    def _uplink_shut(self) -> bool:
+        """Is the robot's own voice reaching the mic right now (AVID-159, §6.3)?
+
+        True while a response is playing, and for ``[gate] echo_tail_ms`` after one ends
+        *normally* — ``end_response`` returns as soon as the last delta is handed over, but the
+        DAC is still clocking out up to a playback-buffer depth of it (§6.2.4). A barge-in sets
+        no tail: ``Speaker.stop`` closes the handle so ALSA drops the buffer, and the user is
+        mid-utterance, so a tail there would clip the very words that interrupted.
+        """
+        if self._playing_item is not None:
+            return True
+        return self._clock.monotonic_ns() < self._uplink_shut_until_ns
+
+    def _admits_barge_in(self, frame_dbfs: float) -> bool:
+        """Is this rising edge the **user**, or our own speaker (AVID-159, SDS §6.2.4)?
+
+        Only ever asked while :meth:`_uplink_shut` — so **normal turn-taking is never tested
+        against the margin at all** and is bit-for-bit unaffected by this gate. That bound is
+        deliberate: the discriminator is crude, and it should only run where nothing better
+        exists.
+
+        A rejected frame is fed to the floor precisely *because* it is the robot: while the
+        assistant speaks, what the mic hears is the echo, so those frames **are** the
+        calibration. A frame that clears the margin is judged to be the user and is deliberately
+        **not** observed — folding it in would raise the bar under the speaker mid-sentence.
+        """
+        if not self._uplink_shut():
+            return True  # the robot is silent; every edge is the user's
+        if self._echo_floor.exceeds(frame_dbfs, margin_db=self._barge_in_margin_db):
+            return True
+        self._echo_floor.observe(frame_dbfs)
+        self._suppressed_edges += 1
+        self._loudest_suppressed_dbfs = max(self._loudest_suppressed_dbfs, frame_dbfs)
+        return False
+
+    def _report_echo_gate(self) -> None:
+        """One line per reply: the calibration datum #106's AC-3 requires (AVID-159).
+
+        Emitted on **every** playback episode, so every bench run is a calibration run and there
+        is no separate mode anyone has to remember to enable. ``floor`` is what the mic heard
+        while the robot spoke; ``loudest suppressed`` is the closest any rejected edge came to
+        clearing the margin.
+
+        Read together with a genuine barge-in's level, these say whether the two populations
+        separate at all. **If they do not, no margin can be tuned into working** and the honest
+        answers are #163 (echo cancellation) or full half-duplex — the point of printing it is so
+        nobody spends a bench session turning a knob that was never going to help.
+        """
+        _log.info(
+            "echo gate: floor %.1f dBFS, loudest suppressed edge %.1f dBFS "
+            "(%d suppressed), margin %.1f dB [correlation_id=%s]",
+            self._echo_floor.dbfs,
+            self._loudest_suppressed_dbfs,
+            self._suppressed_edges,
+            self._barge_in_margin_db,
+            self._playing_corr,
+        )
+        self._suppressed_edges = 0
+        self._loudest_suppressed_dbfs = SILENCE_DBFS
+
     def _emit(self, pcm: bytes) -> None:
         """Hand one captured frame up the ``TurnSink`` queue immediately (§6.3, §9.1.4).
 
@@ -382,8 +492,14 @@ class AudioService:
         going nowhere (a failed open, a degraded robot), and the policy is **drop-oldest**: the
         freshest audio is the audio worth keeping, and the bus's own rule applies — silent drops
         are a debugging catastrophe, loud drops are a tuning signal (§3.5.2). Warned once per
-        overflow episode, not once per frame."""
-        if not pcm:
+        overflow episode, not once per frame.
+
+        **The uplink is half-duplex** (AVID-159, §6.3). Nothing crosses the seam while the robot
+        is the one making noise: streaming the echo up made the model hear itself, and the
+        server's turn detection then saw near-continuous audio and stopped committing turns
+        altogether — the conversation died with the socket still open. Dropped here rather than
+        at the capture, so the M4 loopback (which never goes through this path) is untouched."""
+        if self._uplink_shut() or not pcm:
             return
         chunk = AudioChunk(
             pcm=pcm, sample_rate=self._sample_rate, channels=self._channels
@@ -428,7 +544,6 @@ class AudioService:
         self._speech_ms = 0
         self._silence_run_ms = 0
         ring_buffer_ms = len(pre) // self._bytes_per_ms
-        self._capture(pre)  # §6.3: replay the ring buffer, then stream live
 
         # Gated on the speaker THIS service owns, not on the state machine's view of it
         # (AVID-158). ``_playing_item`` is the authoritative "assistant audio is in flight" fact;
@@ -437,8 +552,18 @@ class AudioService:
         # 0.9 s before our falling edge fired. Gating on ``state is SPEAKING`` also silently
         # dropped the in-flight playback's ``audio.playback_finished``, breaking the four-fact
         # turn arc (§9.1.3) for exactly the responses a barge-in cut short.
+        #
+        # **Before the capture, not after** (AVID-159). This edge has already been judged to be
+        # the user, so the uplink is theirs from here: cutting playback clears ``_playing_item``
+        # and dropping the echo tail re-opens the seam, both of which must happen while there is
+        # still a pre-roll to replay. The other order silently swallows the leading phonemes of
+        # the very barge-in the margin just admitted — the exact loss §6.3's ring buffer exists
+        # to prevent, reintroduced by its own gate.
         if self._playing_item is not None:
             await self.interrupt()  # stops the speaker, finalizes the old playback
+        self._uplink_shut_until_ns = 0
+
+        self._capture(pre)  # §6.3: replay the ring buffer, then stream live
 
         await self._bus.publish(
             AudioSpeechStarted(
