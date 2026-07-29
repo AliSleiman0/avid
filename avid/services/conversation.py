@@ -307,10 +307,14 @@ class ConversationService:
         ``_muted_item`` is set **synchronously, before the awaits**: it is step 6, and the pump
         (a separate coroutine, advancing only at await points) must see it set before it can
         process any post-truncation delta for this item — otherwise the cancelled sentence
-        resumes for ~200 ms (§6.2.4 trap 1). The truncate/cancel are quick ``RealtimeClient``
-        calls; a stray fact with no open session is harmless (the replay records it; a barge-in
-        only ever fires with a session live)."""
-        if not event.truncated:
+        resumes for ~200 ms (§6.2.4 trap 1).
+
+        A truncated fact with **no session open** is dropped. Since AVID-158 the interrupt is
+        gated on whether the speaker is live rather than on ``RobotState``, so a response that a
+        lost session left un-finalized is now truncated on the next rising edge — and there is
+        no longer a client to tell. There is nothing to truncate on a session the model has
+        already forgotten, and a fresh cold session must not inherit the mute either."""
+        if not event.truncated or not self._session_open:
             return
         self._muted_item = event.item_id  # step 6 — arm the drop before any await
         await self._client.truncate(event.item_id, event.played_ms)  # step 4

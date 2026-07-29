@@ -20,8 +20,12 @@ events** (PCM does not belong on an at-most-once bus) — which is why this serv
 ``conversation.*`` subscriber (:meth:`subscriptions` returns ``()``); the §3.6.1 inventory row
 was corrected accordingly. On the playback side it drives the ``THINKING → SPEAKING`` edge
 (:meth:`play`) and the ``SPEAKING → IDLE`` edge (:meth:`end_response`); on the capture side it
-still owns the ``audio.speech_started`` turn origin and the barge-in ``SPEAKING → LISTENING``
-move (:meth:`_begin_speech`).
+owns the ``audio.speech_started`` turn origin with its ``→ LISTENING`` move including barge-in
+(:meth:`_begin_speech`) and, since AVID-158, the ``LISTENING → THINKING`` turn-end edge
+(:meth:`_end_speech`). **The whole turn arc is therefore driven from this service's own local
+facts** — no vendor event, no network round-trip, nothing that can arrive late or not at all.
+That is the point: the edge used to hang off ``conversation.user_transcribed``, which is a
+separate transcription pass and lands *after* the assistant is already speaking.
 
 **The M4 loopback survives behind a flag, and it is the one path that still buffers.** Before
 ``ConversationService`` existed, a completed utterance was echoed straight back to the speaker
@@ -29,7 +33,10 @@ move (:meth:`_begin_speech`).
 #91 on-Pi *transport* gate (``docs/demos/audio_pi.py``), where there is no AI client and the echo
 is the whole downstream path — an echo needs the whole clip, so that mode accumulates
 ``_utterance`` and plays it at the falling edge. The loopback publishes the playback facts but
-deliberately does **not** drive the state arc (nothing reaches THINKING without a real turn).
+deliberately drives **no** transition of its own, so at M4 the machine sits in THINKING while
+the echo plays and is carried out of it by the next turn's rising edge (AVID-158). That is a
+mode-independent consequence of the falling edge, not a special case: :meth:`_capture` remains
+the one place the two modes are allowed to diverge.
 
 **With ``loopback=False`` (the running robot) capture is streamed, not buffered** (#153, §6.3).
 The gate's own words are *"replay the 300 ms pre-speech ring buffer → stream live"*: the drained
@@ -73,7 +80,6 @@ from avid.domain import (
     AudioPreRoll,
     AudioSpeechEnded,
     AudioSpeechStarted,
-    RobotState,
     Trigger,
 )
 
@@ -410,11 +416,10 @@ class AudioService:
         seam's stream depending on the mode. It already contains the frame that fired this edge
         (``_run`` appends before judging), so that frame is never emitted twice.
 
-        Barge-in (AC-5): if the robot is mid-utterance (``SPEAKING``), cut playback
-        **before** the transition, so ``SPEAKING → LISTENING`` lands on a silent speaker —
-        :meth:`interrupt` is instant and also emits the truncated ``audio.playback_finished``
-        fact for the interrupted response. Off the SPEAKING path, clear any stale playback (a
-        response left un-finalized by a lost session gets no ``end_response``).
+        Barge-in (AC-5): if assistant audio is in flight, cut playback **before** the
+        transition, so ``→ LISTENING`` lands on a silent speaker — :meth:`interrupt` is instant
+        and also emits the truncated ``audio.playback_finished`` fact for the interrupted
+        response (which is what tells ``ConversationService`` to truncate the model, §6.2.4).
         """
         self._speaking = True
         self._turn_id = uuid4()
@@ -425,12 +430,15 @@ class AudioService:
         ring_buffer_ms = len(pre) // self._bytes_per_ms
         self._capture(pre)  # §6.3: replay the ring buffer, then stream live
 
-        if self._state.state is RobotState.SPEAKING:
-            await (
-                self.interrupt()
-            )  # barge-in: stops the speaker, finalizes the old playback
-        else:
-            self._clear_playback()  # drop any playback the previous turn never finished
+        # Gated on the speaker THIS service owns, not on the state machine's view of it
+        # (AVID-158). ``_playing_item`` is the authoritative "assistant audio is in flight" fact;
+        # ``RobotState`` is a derived view that lags it whenever the model's audio overlaps the
+        # user's speech — measured in the bench trace, where a reply to an earlier commit began
+        # 0.9 s before our falling edge fired. Gating on ``state is SPEAKING`` also silently
+        # dropped the in-flight playback's ``audio.playback_finished``, breaking the four-fact
+        # turn arc (§9.1.3) for exactly the responses a barge-in cut short.
+        if self._playing_item is not None:
+            await self.interrupt()  # stops the speaker, finalizes the old playback
 
         await self._bus.publish(
             AudioSpeechStarted(
@@ -451,7 +459,7 @@ class AudioService:
 
     async def _end_speech(self) -> None:
         """Falling edge (debounced): the user's turn is over. Publish ``audio.speech_ended``,
-        then echo the clip (loopback) or simply stop capturing (seam).
+        drive ``LISTENING → THINKING``, then echo the clip (loopback) or stop capturing (seam).
 
         ``duration_ms`` is the speech length — the sum of the *speech* frames, excluding the
         trailing silence hangover that triggered the end. In seam mode there is **nothing to hand
@@ -459,6 +467,10 @@ class AudioService:
         was captured, so this only resets the **capture** state while ``_turn_id`` is kept alive —
         the assistant playback that follows is the same turn (SDS §3.12.2). In loopback mode the
         buffered clip is echoed and the whole turn (id included) is reset.
+
+        The transition is a **direct awaited call**, like the three other edges this service
+        drives: losing a state change is a correctness bug and the bus is at-most-once, so it
+        cannot ride ``audio.speech_ended``'s own subscriber queue (SDS §9.1.4, AVID-158).
         """
         turn_id = self._turn_id
         assert turn_id is not None  # set on the rising edge that reached here
@@ -468,6 +480,9 @@ class AudioService:
                 duration_ms=self._speech_ms,
             )
         )
+        # Into THINKING: the turn ends when *our* gate says the user stopped, never when the
+        # model's transcript arrives (AVID-158 — see the table in ``domain/state.py``).
+        await self._state.transition(Trigger.AUDIO_SPEECH_ENDED, correlation_id=turn_id)
         if self._loopback_mode:
             await self._loopback(turn_id)
             self._reset_turn()
@@ -485,12 +500,14 @@ class AudioService:
         exists to catch (AVID-91). ``truncated`` is always ``False`` at M4 (no barge-in
         truncation path yet).
 
-        Deliberately does **not** drive the state machine: the ``THINKING → SPEAKING →
-        IDLE`` arc is a real conversation turn's, and there is no ConversationService at M4
-        to reach THINKING — so the robot stays in LISTENING while the echo plays, and
-        barge-in against genuine SPEAKING playback is exercised by a SPEAKING-initialised
-        unit test rather than reached through the loopback. In M5 this whole method is
-        replaced by the Realtime response stream.
+        Deliberately does **not** drive the state machine: the ``SPEAKING → IDLE`` half of the
+        arc belongs to a real conversation turn, and there is no ConversationService at M4 to
+        supply one. Since AVID-158 the falling edge has already carried the machine to THINKING
+        by the time this runs, so the robot sits in **THINKING** while the echo plays and the
+        next turn's rising edge carries it back to LISTENING — the loopback is self-recovering
+        across turns for the first time, where it used to dead-end. Barge-in against genuine
+        playback is still exercised by a unit test rather than reached through the loopback. In
+        M5 this whole method is replaced by the Realtime response stream.
         """
         self._playback_seq += 1
         item_id = f"loopback-{self._playback_seq}"
