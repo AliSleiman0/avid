@@ -69,6 +69,48 @@ def test_no_undocumented_transitions() -> None:
 # --- rows worth spotlighting individually -----------------------------------
 
 
+def test_the_turn_end_row_is_our_own_falling_edge() -> None:
+    """LISTENING + ``audio.speech_ended`` -> THINKING (AVID-158) — the edge §3.10.1's diagram
+    has always labelled "turn end detected". It is emphatically **not**
+    ``conversation.user_transcribed``: that is the model's separate transcription pass, and on
+    hardware it arrives after the assistant's audio has already started."""
+    assert (
+        next_state(RobotState.LISTENING, Trigger.AUDIO_SPEECH_ENDED)
+        == RobotState.THINKING
+    )
+
+
+def test_a_resumed_utterance_returns_to_listening_from_thinking() -> None:
+    """THINKING + speech_started -> LISTENING (AVID-158): the user starts a fresh burst before
+    the reply begins. Without this row the corrected turn-end edge would merely relocate the
+    wedge from LISTENING to THINKING."""
+    assert (
+        next_state(RobotState.THINKING, Trigger.AUDIO_SPEECH_STARTED)
+        == RobotState.LISTENING
+    )
+
+
+def test_speech_started_is_legal_from_every_state_a_turn_can_begin_in() -> None:
+    """The invariant ``AudioService._begin_speech``'s comment claims: one trigger covers every
+    legal source of a rising edge — IDLE and SLEEPING (a turn opens), SPEAKING (barge-in) and,
+    since AVID-158, THINKING (the user resumes before the reply).
+
+    LISTENING is **absent on purpose**: the rising and falling edges strictly alternate
+    (``_run`` calls ``_begin_speech`` only when ``not self._speaking``, and only
+    ``_end_speech`` clears that), so a second rising edge from LISTENING is unreachable. It
+    appeared five times in the AVID-158 bench trace *only* because the falling edge did not
+    leave LISTENING. An unreachable self-loop would be a lie in the normative table."""
+    for opens in (RobotState.IDLE, RobotState.SLEEPING):
+        assert next_state(opens, Trigger.AUDIO_SPEECH_STARTED) == RobotState.LISTENING
+    for interrupts in (RobotState.SPEAKING, RobotState.THINKING):
+        assert (
+            next_state(interrupts, Trigger.AUDIO_SPEECH_STARTED) == RobotState.LISTENING
+        )
+    for refuses in (RobotState.BOOTING, RobotState.LISTENING, RobotState.DEGRADED):
+        with pytest.raises(IllegalTransition):
+            next_state(refuses, Trigger.AUDIO_SPEECH_STARTED)
+
+
 def test_barge_in_row() -> None:
     """SPEAKING + speech_started -> LISTENING — the row that separates a companion from a
     kiosk (SDS §3.10.3). Distinct from SPEAKING + playback_finished -> IDLE."""
@@ -132,6 +174,43 @@ def test_robotstate_has_exactly_the_seven_documented_members() -> None:
         "SLEEPING",
         "DEGRADED",
     }
+
+
+def test_trigger_has_exactly_the_documented_event_column() -> None:
+    """``Trigger`` *is* the §3.10.3 "Event" column, so its membership is pinned here the same
+    way ``RobotState``'s is above.
+
+    This is the assertion that holds AVID-158's deletion: ``CONVERSATION_USER_TRANSCRIBED`` is
+    gone from the column. The *event* is still published and still catalogued in §9.1.3 — it
+    just no longer drives the machine, because it arrives too late to."""
+    assert {t.name for t in Trigger} == {
+        "SYSTEM_STARTED",
+        "AUDIO_SPEECH_STARTED",
+        "AUDIO_SPEECH_ENDED",
+        "BEHAVIOR_TRIGGER_FIRED",
+        "PRESENCE_LOST_TIMEOUT",
+        "VISION_PRESENCE_GAINED",
+        "LISTEN_TIMEOUT",
+        "AUDIO_PLAYBACK_STARTED",
+        "THINK_TIMEOUT",
+        "AUDIO_PLAYBACK_FINISHED",
+        "CONVERSATION_SESSION_LOST",
+        "SYSTEM_DEGRADED_EXITED",
+    }
+
+
+def test_every_trigger_drives_at_least_one_row() -> None:
+    """No orphan members. A trigger with no row is not an Event-column entry at all — it is
+    seven guaranteed-illegal pairs padding ``test_no_undocumented_transitions`` and a value
+    ``StateTransitioned.trigger`` can never legally carry.
+
+    Rows without a *driver* are fine and expected (``BEHAVIOR_TRIGGER_FIRED`` is M6, the three
+    ``timer.*`` expiries are unwired): membership tracks the table, not the call sites. This is
+    the invariant that made AVID-158 delete a member rather than leave it row-less."""
+    driven = {trigger for _, trigger in TRANSITION_TABLE}
+    assert driven == set(EVENT_TYPES), (
+        f"triggers with no row: {sorted(t.name for t in set(EVENT_TYPES) - driven)}"
+    )
 
 
 # --- the state.transitioned event (AVID-69) ---------------------------------

@@ -354,16 +354,41 @@ async def test_a_mute_speaker_reports_zero_played_ms(
 
 async def test_speech_start_drives_idle_to_listening_without_barge_in() -> None:
     """From IDLE, a speech-start moves the machine to LISTENING and never touches the
-    speaker's stop() — barge-in is only for interrupting active playback (AC-5 negative)."""
-    async with _rig(
-        vad_script=[True, True, False, False], initial=RobotState.IDLE
-    ) as rig:
+    speaker's stop() — barge-in is only for interrupting active playback (AC-5 negative).
+
+    ``[True]`` holds forever (the fake repeats its last verdict), so no falling edge can fire
+    and carry the machine on to THINKING while this asserts on LISTENING (AVID-158)."""
+    async with _rig(vad_script=[True], initial=RobotState.IDLE) as rig:
         await rig.collector.wait_for_type(AudioSpeechStarted, 1)
         assert rig.state.state is RobotState.LISTENING
         assert rig.speaker.stops == 0
 
 
 # --- AC-2: debounce, and distinct turns ----------------------------------------------------
+
+
+async def test_a_turn_reaches_speaking_with_no_transcript_at_all() -> None:
+    """AVID-158, the regression. The machine must reach SPEAKING from this service's **own**
+    audio edges alone — rising edge, falling edge, first assistant delta — with no
+    ``conversation.*`` event anywhere in the path.
+
+    Before the fix the falling edge left the machine in LISTENING, where
+    ``audio.playback_started`` is illegal, so SPEAKING was unreachable on hardware and
+    ``_begin_speech``'s barge-in guard was dead code. The edge hung off
+    ``conversation.user_transcribed`` — a separate transcription pass that the bench measured
+    arriving 1.1 s *after* the assistant had started speaking
+    (``docs/demos/m5_evidence/trace_2026-07-26_streaming.log``)."""
+    script = [False, False, True, True, True, False, False]
+    async with _rig(vad_script=script, initial=RobotState.IDLE) as rig:
+        await rig.collector.wait_for_type(AudioSpeechStarted, 1)
+        await rig.collector.wait_for_type(AudioSpeechEnded, 1)
+        assert rig.state.state is RobotState.THINKING  # the corrected turn-end edge
+
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.collector.wait_for_type(AudioPlaybackStarted, 1)
+        assert rig.state.state is RobotState.SPEAKING  # the wedge, gone
+
+        assert rig.collector.of_type(SystemHandlerFailed) == []
 
 
 async def test_a_single_silent_frame_does_not_end_the_turn() -> None:
@@ -420,18 +445,51 @@ async def test_barge_in_stops_the_speaker_before_transitioning_out_of_speaking()
 ):
     """AC-5: while SPEAKING, a speech-start cuts playback immediately and *then* the
     SPEAKING -> LISTENING transition lands. The spy proves the ordering: stop() saw
-    SPEAKING, i.e. it ran before the machine moved."""
+    SPEAKING, i.e. it ran before the machine moved.
+
+    SPEAKING is now reached the way hardware reaches it — THINKING plus a first assistant delta
+    (AVID-158) — instead of being injected as ``initial``, and the rising edge is driven
+    explicitly so the assertions do not race the free-running mic loop's own falling edge."""
     async with _rig(
-        vad_script=[True, True, False, False],
-        initial=RobotState.SPEAKING,
+        vad_script=[False],  # the gate fires no edge of its own
+        initial=RobotState.THINKING,
         speaker_factory=lambda state: _StateSpySpeaker(state=state),
     ) as rig:
-        await rig.collector.wait_for_type(AudioSpeechStarted, 1)
+        rig.service._turn_id = uuid4()  # the turn AudioService would have minted
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        assert rig.state.state is RobotState.SPEAKING
+
+        await rig.service._begin_speech()  # the rising edge the VAD gate fires
 
         assert rig.state.state is RobotState.LISTENING
         assert rig.speaker.stops == 1
         assert isinstance(rig.speaker, _StateSpySpeaker)
         assert rig.speaker.state_at_stop == [RobotState.SPEAKING]
+
+
+async def test_barge_in_is_gated_on_live_playback_not_on_the_state_machine() -> None:
+    """AVID-158: the interrupt fires whenever assistant audio is in flight, whatever the state
+    machine believes.
+
+    The bench measured a reply to an earlier commit beginning 0.9 s *before* our falling edge,
+    which leaves the machine in LISTENING with the speaker live. Gating barge-in on
+    ``state is SPEAKING`` made the interrupt dead code in exactly that case — and silently
+    dropped the truncated ``audio.playback_finished`` the model half of §6.2.4 depends on."""
+    async with _rig(vad_script=[False], initial=RobotState.LISTENING) as rig:
+        rig.service._turn_id = uuid4()
+        # Playback opens while the machine is in LISTENING: the transition is illegal and
+        # logged-and-ignored, so the state never reaches SPEAKING — but the speaker is live.
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        assert rig.state.state is RobotState.LISTENING
+
+        await rig.service._begin_speech()
+        await rig.collector.wait_for_type(AudioPlaybackFinished, 1)
+
+        assert rig.speaker.stops == 1
+        finished = rig.collector.of_type(AudioPlaybackFinished)
+        assert [e.truncated for e in finished] == [
+            True
+        ]  # the model half's §6.2.4 input
 
 
 # --- AC-7: a raising subscriber never kills the audio loop ----------------------------------

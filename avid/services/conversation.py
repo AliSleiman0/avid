@@ -20,11 +20,12 @@ It owns three seams, none of which it imports the other side of:
   Assistant PCM goes down via :meth:`~avid.core.ports.TurnSink.play` and mic PCM comes up via
   :meth:`~avid.core.ports.TurnSink.mic` — a **direct call, never a bus event** (§9.1.4), because
   audio does not belong on an at-most-once bus.
-* **State** — it drives the injected ``StateManager`` by **direct call** for exactly three
-  edges (SDS §3.10.3): ``CONVERSATION_USER_TRANSCRIBED`` (LISTENING→THINKING),
-  ``CONVERSATION_SESSION_LOST`` (any→DEGRADED) and ``SYSTEM_DEGRADED_EXITED`` (DEGRADED→IDLE).
-  The LISTENING entry and the THINKING→SPEAKING→IDLE playback arc are **AudioService's**
-  (``audio.speech_started`` / ``audio.playback_*``), not this service's.
+* **State** — it drives the injected ``StateManager`` by **direct call** for exactly two
+  edges (SDS §3.10.3), both of them *session lifecycle*: ``CONVERSATION_SESSION_LOST``
+  (any→DEGRADED) and ``SYSTEM_DEGRADED_EXITED`` (DEGRADED→IDLE). The **whole turn arc** —
+  LISTENING, THINKING, SPEAKING, IDLE — is **AudioService's**, driven from its own
+  ``audio.*`` facts. LISTENING→THINKING was this service's until AVID-158 measured the
+  transcript that drove it arriving *after* the assistant's audio.
 
 **Barge-in is split across the two services (#104, SDS §6.2.4).** AudioService owns the *local*
 half — local VAD cuts the speaker instantly (``interrupt()``), measures what actually played,
@@ -282,16 +283,27 @@ class ConversationService:
             self._arm_idle()
 
     async def _on_speech_ended(self, event: AudioSpeechEnded) -> None:
-        """Re-arm the idle-close timer if a session is live (AC-2).
+        """Re-arm the idle-close timer (AC-2) and start the §6.9 thinking cue.
 
         Order-tolerant by design: the bus is FIFO *per subscriber*, not across (#72), so this
         can arrive before its ``audio.speech_started`` — in which case there is no session yet
         and there is simply nothing to do. The transcript itself arrives on the event stream,
         never from here.
+
+        The cue is armed **here**, at the falling edge, because that is the moment the wait
+        actually begins — §6.9's whole job is to cover the gap to first audio. It used to be
+        armed when the transcript landed, which the bench showed is 1.1 s *into* the assistant
+        already speaking, and once after ``conversation.turn_ended``: since ``CueBank`` plays
+        straight to the ``Speaker`` rather than through the ``TurnSink``, the filler was talking
+        over the reply it was supposed to cover (AVID-158). It stays best-effort — a cue is
+        perceived quality, never a correctness obligation, which is exactly why it may ride the
+        bus while the state transition beside it may not.
         """
         async with self._lock:
-            if self._session_open:
-                self._arm_idle()
+            if not self._session_open:
+                return
+            self._arm_idle()
+        self._start_thinking_cue()
 
     async def _on_playback_finished(self, event: AudioPlaybackFinished) -> None:
         """The barge-in feed (#104, SDS §6.2.4 steps 4–6): tell the model the user cut it off.
@@ -306,10 +318,14 @@ class ConversationService:
         ``_muted_item`` is set **synchronously, before the awaits**: it is step 6, and the pump
         (a separate coroutine, advancing only at await points) must see it set before it can
         process any post-truncation delta for this item — otherwise the cancelled sentence
-        resumes for ~200 ms (§6.2.4 trap 1). The truncate/cancel are quick ``RealtimeClient``
-        calls; a stray fact with no open session is harmless (the replay records it; a barge-in
-        only ever fires with a session live)."""
-        if not event.truncated:
+        resumes for ~200 ms (§6.2.4 trap 1).
+
+        A truncated fact with **no session open** is dropped. Since AVID-158 the interrupt is
+        gated on whether the speaker is live rather than on ``RobotState``, so a response that a
+        lost session left un-finalized is now truncated on the next rising edge — and there is
+        no longer a client to tell. There is nothing to truncate on a session the model has
+        already forgotten, and a fresh cold session must not inherit the mute either."""
+        if not event.truncated or not self._session_open:
             return
         self._muted_item = event.item_id  # step 6 — arm the drop before any await
         await self._client.truncate(event.item_id, event.played_ms)  # step 4
@@ -343,14 +359,18 @@ class ConversationService:
     async def _on_user_transcript(self, ev: UserTranscript) -> None:
         """A user utterance was transcribed: a turn begins (SDS §9.1.3).
 
-        Opens the turn (``conversation.turn_started``), publishes
-        ``conversation.user_transcribed``, drives LISTENING→THINKING, and kicks a best-effort
-        thinking cue to cover the ~600 ms until first audio (SDS §6.9). ``is_approximate`` is
-        propagated straight through — a barge-in truncation makes the tail unreliable (§6.2.4).
+        Opens the turn (``conversation.turn_started``) and publishes
+        ``conversation.user_transcribed``. ``is_approximate`` is propagated straight through —
+        a barge-in truncation makes the tail unreliable (§6.2.4).
+
+        **Publishes facts; drives nothing** (AVID-158). This used to drive LISTENING→THINKING,
+        but the transcript is a separate, slower transcription pass: on hardware it lands after
+        the assistant's speech-to-speech audio, and sometimes after ``conversation.turn_ended``.
+        The machine follows ``audio.speech_ended`` instead — AudioService's own falling edge,
+        which is local, always fires, and is what §3.10.1 has always called "turn end detected".
         """
         self._turn_active = True
         self._turn_started_ns = self._clock.monotonic_ns()
-        self._first_audio = False
         self._turn_approximate = (
             ev.is_approximate
         )  # gates remember_fact this turn (#125)
@@ -360,10 +380,6 @@ class ConversationService:
                 **self._env(), text=ev.text, is_approximate=ev.is_approximate
             )
         )
-        await self._state.transition(
-            Trigger.CONVERSATION_USER_TRANSCRIBED, correlation_id=self._corr()
-        )
-        self._start_thinking_cue()
 
     async def _on_assistant_transcript(self, ev: AssistantTranscript) -> None:
         """The assistant reply's transcript (``conversation.assistant_responded``). Text only —
@@ -564,7 +580,11 @@ class ConversationService:
         await self._client.aclose()
 
     def _start_thinking_cue(self) -> None:
-        """Kick the best-effort thinking cue for this turn (cancelled when first audio lands)."""
+        """Kick the best-effort thinking cue for this turn (cancelled when first audio lands).
+
+        Arming it also re-arms the ``_first_audio`` latch that cancels it, so the wait this cue
+        covers has exactly one place where it begins (AVID-158)."""
+        self._first_audio = False
         self._cancel_task(self._thinking_task)
         self._thinking_task = self._play_cue(Cue.THINKING_ONE_SEC)
 

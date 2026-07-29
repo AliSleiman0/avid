@@ -169,9 +169,7 @@ async def test_concurrent_transitions_serialize_into_a_coherent_chain() -> None:
         await asyncio.gather(
             mgr.transition(Trigger.SYSTEM_STARTED, correlation_id=uuid4()),
             mgr.transition(Trigger.AUDIO_SPEECH_STARTED, correlation_id=uuid4()),
-            mgr.transition(
-                Trigger.CONVERSATION_USER_TRANSCRIBED, correlation_id=uuid4()
-            ),
+            mgr.transition(Trigger.AUDIO_SPEECH_ENDED, correlation_id=uuid4()),
         )
         await asyncio.wait_for(arrived.wait(), timeout=1.0)
 
