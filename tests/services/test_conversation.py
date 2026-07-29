@@ -731,7 +731,9 @@ async def test_the_user_transcript_publishes_a_fact_but_drives_no_transition() -
             rig, lambda: bool(rig.collector.of_type(ConversationUserTranscribed))
         )
 
-        assert rig.collector.of_type(ConversationUserTranscribed)  # still a published fact
+        assert rig.collector.of_type(
+            ConversationUserTranscribed
+        )  # still a published fact
         assert rig.collector.of_type(StateTransitioned) == []  # and it moved nothing
         assert rig.state.state is RobotState.THINKING
 
@@ -1041,6 +1043,57 @@ async def test_speech_ended_with_a_live_session_rearms_the_idle_timer() -> None:
         await rig.collector.settle()
         # The session stayed open across the pause; the idle timer is simply re-armed.
         assert rig.client.opened and not rig.client.closed
+
+
+async def test_the_thinking_cue_is_armed_at_the_falling_edge_not_at_the_transcript() -> (
+    None
+):
+    """§6.9 / AVID-158: the filler covers ``speech_ended`` → first audio, so it is armed on the
+    falling edge.
+
+    Armed on the transcript instead, the bench measured it firing 1.1 s *after* the assistant
+    had started speaking (t=52.482 playback vs t=53.594 transcript) and once after
+    ``conversation.turn_ended`` — and ``CueBank`` plays straight to the ``Speaker``, not through
+    the ``TurnSink``, so it was talking over the reply it exists to cover."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(
+        clock=clock, timeline=()
+    )  # no transcript ever arrives
+    async with _rig(client=client) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+        assert not rig.speaker.files_played  # nothing yet — the user is still talking
+
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await _advance_until(
+            rig,
+            lambda: any(
+                p.name == "thinking_one_sec.wav" for p in rig.speaker.files_played
+            ),
+        )
+
+
+async def test_the_first_assistant_delta_cancels_a_pending_thinking_cue() -> None:
+    """The cue is best-effort filler, so the reply cuts it off: the first delta of the turn
+    clears the latch and cancels the task, whatever else is in flight (§6.9)."""
+    clock = FakeClock()
+    async with _rig(client=_replay("two_turn", clock=clock)) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await _advance_until(rig, lambda: bool(rig.sink.played))
+
+        assert rig.service._first_audio is True
+        assert rig.service._thinking_task is None
 
 
 async def test_stop_is_idempotent_and_closes_the_session() -> None:

@@ -283,16 +283,27 @@ class ConversationService:
             self._arm_idle()
 
     async def _on_speech_ended(self, event: AudioSpeechEnded) -> None:
-        """Re-arm the idle-close timer if a session is live (AC-2).
+        """Re-arm the idle-close timer (AC-2) and start the §6.9 thinking cue.
 
         Order-tolerant by design: the bus is FIFO *per subscriber*, not across (#72), so this
         can arrive before its ``audio.speech_started`` — in which case there is no session yet
         and there is simply nothing to do. The transcript itself arrives on the event stream,
         never from here.
+
+        The cue is armed **here**, at the falling edge, because that is the moment the wait
+        actually begins — §6.9's whole job is to cover the gap to first audio. It used to be
+        armed when the transcript landed, which the bench showed is 1.1 s *into* the assistant
+        already speaking, and once after ``conversation.turn_ended``: since ``CueBank`` plays
+        straight to the ``Speaker`` rather than through the ``TurnSink``, the filler was talking
+        over the reply it was supposed to cover (AVID-158). It stays best-effort — a cue is
+        perceived quality, never a correctness obligation, which is exactly why it may ride the
+        bus while the state transition beside it may not.
         """
         async with self._lock:
-            if self._session_open:
-                self._arm_idle()
+            if not self._session_open:
+                return
+            self._arm_idle()
+        self._start_thinking_cue()
 
     async def _on_playback_finished(self, event: AudioPlaybackFinished) -> None:
         """The barge-in feed (#104, SDS §6.2.4 steps 4–6): tell the model the user cut it off.
@@ -360,7 +371,6 @@ class ConversationService:
         """
         self._turn_active = True
         self._turn_started_ns = self._clock.monotonic_ns()
-        self._first_audio = False
         self._turn_approximate = (
             ev.is_approximate
         )  # gates remember_fact this turn (#125)
@@ -370,7 +380,6 @@ class ConversationService:
                 **self._env(), text=ev.text, is_approximate=ev.is_approximate
             )
         )
-        self._start_thinking_cue()
 
     async def _on_assistant_transcript(self, ev: AssistantTranscript) -> None:
         """The assistant reply's transcript (``conversation.assistant_responded``). Text only —
@@ -571,7 +580,11 @@ class ConversationService:
         await self._client.aclose()
 
     def _start_thinking_cue(self) -> None:
-        """Kick the best-effort thinking cue for this turn (cancelled when first audio lands)."""
+        """Kick the best-effort thinking cue for this turn (cancelled when first audio lands).
+
+        Arming it also re-arms the ``_first_audio`` latch that cancels it, so the wait this cue
+        covers has exactly one place where it begins (AVID-158)."""
+        self._first_audio = False
         self._cancel_task(self._thinking_task)
         self._thinking_task = self._play_cue(Cue.THINKING_ONE_SEC)
 
