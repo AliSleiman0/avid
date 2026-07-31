@@ -292,6 +292,9 @@ async def _drive_session(
     until: Callable[[_Collector], bool],
     then: Callable[[_Collector], bool] | None = None,
     barge_in_margin_db: float = 6.0,
+    # Above the 100 virtual seconds `_advance_until` can drain, so the §6.9 deadline can only
+    # fire in the test that asks for it by passing a small value (AVID-171).
+    think_timeout_s: float = 300.0,
 ) -> tuple[_Collector, FakeSpeaker, ReplayRealtimeClient, StateManager]:
     """Run one replayed session through the real AudioService→ConversationService stack.
 
@@ -347,6 +350,7 @@ async def _drive_session(
         memory=_EmptyMemory(),
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
+        think_timeout_s=think_timeout_s,
     )
 
     collector = _Collector()
@@ -510,6 +514,7 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         memory=_EmptyMemory(),
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
+        think_timeout_s=300.0,
     )
     collector = _Collector()
     for sub in conversation.subscriptions():
@@ -645,6 +650,62 @@ async def test_m5_gate_the_recovery_turn_drives_a_whole_legal_arc(
 
     assert "ignored illegal transition" not in caplog.text, (
         "the recovery turn attempted a transition the §3.10.3 table has no rule for"
+    )
+
+
+async def test_m5_gate_a_silent_model_degrades_on_the_think_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-171 / §6.9: the wedge measured at the bench, and the proof its exit is legal.
+
+    The ``no_reply`` fixture opens a session and answers nothing — the shape of the 2026-08-01
+    fault, where a 60 ms noise blip bought a live socket the model never spoke on and the robot
+    sat in THINKING for **54 seconds**. §6.9 has always specified the escape hatch and nothing
+    drove it; the row ``(THINKING, THINK_TIMEOUT) -> DEGRADED`` existed and was unreachable.
+
+    Asserted at full stack rather than in ``test_conversation.py`` for the usual reason: the
+    deadline is armed off ``audio.speech_ended``, and only the real ``AudioService`` driving a
+    real VAD timeline produces that edge the way hardware does. The caplog assertion is the one
+    that generalises — an armed timer firing in a state with no row would otherwise show up as
+    a WARNING nobody reads, which is precisely how AVID-158/161/162 hid.
+
+    ``conversation.session_lost`` must **not** appear: nothing dropped. That distinction is not
+    cosmetic — ``conversation_pi.py`` counts that event to grade #106's AC-6, so publishing it
+    on a self-inflicted teardown would make a pulled cable and a quiet model indistinguishable
+    in the one artifact that grades recovery."""
+    with caplog.at_level(logging.WARNING, logger=_STATE_LOGGER):
+        collector, speaker, client, state = await _drive_session(
+            "no_reply",
+            until=lambda c: len(c.of_type(SystemDegradedEntered)) >= 1,
+            think_timeout_s=2.0,
+        )
+
+    assert state.state is RobotState.DEGRADED, "the robot never left THINKING"
+    assert collector.of_type(ConversationSessionLost) == [], (
+        "nothing dropped — we gave up on a socket that was still open"
+    )
+    # The teardown is load-bearing, not tidiness: DEGRADED has no row for either audio.playback_*
+    # trigger, and domain/state.py justifies that by every path here killing the pump first.
+    assert client.closed, (
+        "the session survived the degrade, so a late delta could reach DEGRADED"
+    )
+    assert any(p.name == "something_wrong.wav" for p in speaker.files_played), (
+        "the robot degraded silently — §6.9's whole point is that it says something"
+    )
+
+    moves = [
+        (e.from_, e.trigger, e.to)
+        for e in collector.of_type(StateTransitioned)
+        if isinstance(e, StateTransitioned)
+    ]
+    assert (
+        RobotState.THINKING,
+        Trigger.THINK_TIMEOUT,
+        RobotState.DEGRADED,
+    ) in moves, "the think timeout did not drive the row it exists for"
+
+    assert "ignored illegal transition" not in caplog.text, (
+        "the think timeout fired in a state the §3.10.3 table has no rule for"
     )
 
 

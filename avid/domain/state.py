@@ -52,9 +52,13 @@ class Trigger(Enum):
     exhaustive test — stay a closed, pure set.
 
     Membership tracks the **table**, not the call sites: several rows have no driver yet
-    (``BEHAVIOR_TRIGGER_FIRED`` is M6, the three ``timer.*`` expiries are unwired), and that is
-    fine — but a member with *no row* is not an Event-column entry at all, just seven
-    guaranteed-illegal pairs and a false claim in :class:`StateTransitioned`'s payload type.
+    (``BEHAVIOR_TRIGGER_FIRED`` is M6; ``PRESENCE_LOST_TIMEOUT`` and ``LISTEN_TIMEOUT`` are still
+    unwired), and that is fine — but a member with *no row* is not an Event-column entry at all,
+    just seven guaranteed-illegal pairs and a false claim in :class:`StateTransitioned`'s payload
+    type. ``THINK_TIMEOUT`` was in that unwired set until AVID-171: the row existed and nothing
+    could reach it, and the bench paid for the difference — a 60 ms noise blip opened a session the
+    model never answered and the robot sat in THINKING for **54 seconds** with no row out. It is
+    driven by ``ConversationService`` now (SDS §6.9).
     ``test_every_trigger_drives_at_least_one_row`` holds that line; it is why AVID-158 deleted
     ``CONVERSATION_USER_TRANSCRIBED`` outright rather than leaving it row-less. That fact is
     still published (``avid/domain/conversation.py``) — it simply drives nothing.
@@ -183,9 +187,14 @@ _SESSION_LOST_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
 # outright, every edge from then on lands here.
 #
 # The two ``audio.playback_*`` triggers are deliberately NOT in this set: both are driven only
-# from ``ConversationService``'s pump, which ``_on_session_closed`` tears down before DEGRADED
-# is reachable, so a row for either would be unreachable — and an unreachable row is a lie in a
-# normative table. Note ``interrupt`` (which does fire while degraded, cutting whatever the drop
+# from ``ConversationService``'s pump, and **every** path into DEGRADED tears that pump down
+# before DEGRADED is reachable — ``_on_session_closed`` when the socket drops, and the §6.9
+# think timeout (AVID-171) when the model never produces a first token. Both go through the same
+# ``_degrade`` helper for exactly this reason: a path that degraded while leaving the pump alive
+# would let a late first delta drive ``audio.playback_started`` from DEGRADED, where there is no
+# row — and it would strand recovery too, since ``_exit_degraded`` only fires on a reopen. So a
+# row for either trigger would be unreachable — and an unreachable row is a lie in a normative
+# table. Note ``interrupt`` (which does fire while degraded, cutting whatever the drop
 # abandoned) publishes ``audio.playback_finished`` as a *fact* but drives no trigger at all.
 _DEGRADED_SPEECH_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     (RobotState.DEGRADED, trigger): RobotState.DEGRADED

@@ -244,6 +244,7 @@ async def main() -> int:
         memory=_NoMemory(),
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
+        think_timeout_s=config.gate.think_timeout_s,
     )
 
     for sub in conversation.subscriptions():

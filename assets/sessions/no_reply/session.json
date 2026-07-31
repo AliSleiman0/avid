@@ -1,0 +1,5 @@
+{
+  "format": 1,
+  "_comment": "AVID-171: the session that opens and answers nothing. No user_transcript, no assistant audio, no turn_done -- the model simply never speaks. Recorded from the shape of the 2026-08-01 bench fault, where a 60 ms noise blip opened a live session that produced no first token and parked the robot in THINKING for 54 seconds. Deliberately has no WAVs: the fixture's whole content is its emptiness, which is what makes the SDS 6.9 deadline the only thing that can end the turn.",
+  "events": []
+}

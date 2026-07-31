@@ -268,6 +268,13 @@ class GateConfig(_Section):
     # is local (~30 ms) and overlaps the connect, but a hung store must not delay time-to-session-ready
     # — on timeout the session opens without memory (AC-6). Generous vs the ~30 ms norm, a safety net.
     memory_inject_timeout_s: float = 1.0
+    # §6.9's "slow first token (>10 s) -> DEGRADED" (AVID-171). The wait from the local VAD's
+    # falling edge to the model's first audio delta. Measured on hardware: a 60 ms noise blip
+    # opened a session the model never answered and the robot sat in THINKING for **54 seconds** —
+    # ``session_idle_close_s`` below did fire and closed the socket, but an idle close drives no
+    # transition, so the machine never moved and nothing could reach it. This is the knob that
+    # moves it. MUST stay below ``session_idle_close_s`` — see ``_think_timeout_precedes_the_idle_close``.
+    think_timeout_s: float = Field(default=10.0, gt=0.0)
 
 
 class RealtimeConfig(_Section):
@@ -443,6 +450,23 @@ class Config(_Section):
                 f"({self.ai.turn_detection.silence_duration_ms}): the mic stream stops at the "
                 f"local hold, so a shorter one starves the server VAD and the turn never "
                 f"commits (SDS §6.3)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _think_timeout_precedes_the_idle_close(self) -> Config:
+        # Two timers watch the same silence and only one of them drives a transition. The idle
+        # close tears the session down — cancelling the think timer on its way out — but publishes
+        # no trigger, so the machine stays exactly where it was. Set the think timeout at or past
+        # the idle close and it can never fire: the robot wedges in THINKING with a closed socket,
+        # which is verbatim the 54-second freeze AVID-171 was filed for. Loud at load, like the
+        # VAD inequality above — the alternative is a knob that silently does nothing.
+        if self.gate.think_timeout_s >= self.gate.session_idle_close_s:
+            raise ValueError(
+                f"gate.think_timeout_s ({self.gate.think_timeout_s}) must be < "
+                f"gate.session_idle_close_s ({self.gate.session_idle_close_s}): the idle close "
+                f"cancels the think timer and drives no transition, so a think timeout at or "
+                f"past it never fires and the robot wedges in THINKING (SDS §6.9)."
             )
         return self
 
