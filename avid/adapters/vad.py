@@ -177,6 +177,10 @@ class SileroVad:
             # It went unnoticed through the sealed M4 gate because nothing else wanted the CPU
             # there — the loopback had no websocket, no playback stream and no resampling to
             # compete with. M5 put real work on the other cores and the starvation surfaced.
+            #
+            # The MiniLM embedder needs the same treatment with a DIFFERENT thread count —
+            # see avid/adapters/embedder.py (#168). Any new ONNX session needs this block, and
+            # needs its own measurement rather than a copy of either value.
             options = onnxruntime.SessionOptions()
             options.intra_op_num_threads = 1
             options.inter_op_num_threads = 1

@@ -229,6 +229,39 @@ class LocalMiniLmEmbedder:
             import onnxruntime
             from tokenizers import Tokenizer
 
-            self._session = onnxruntime.InferenceSession(str(self._model_path))
+            # Bounded, non-spinning — the same treatment as the Silero session in
+            # avid/adapters/vad.py, for the same reason: ONNX Runtime defaults to one intra-op
+            # thread PER CORE, and those threads spin-wait between inferences rather than sleep.
+            #
+            # The thread count here is NOT vad.py's. That difference is the point, and it is
+            # measured (#168, on the Pi, n=20 embeds, 4 cores):
+            #
+            #     intra_op   median/embed   cores busy
+            #     default        124.0 ms      3.92     <- as shipped; no headroom left
+            #     1              340.5 ms      1.00     <- vad.py's value
+            #     2              192.1 ms      1.93     <- chosen
+            #     4              191.2 ms      2.78     <- no faster than 2, costs 0.85 more
+            #
+            # Silero is a 32 ms window where parallelism buys nothing, so one thread is free.
+            # MiniLM is a 90 MB transformer where it is not: one thread costs 2.8x the latency.
+            # Two threads buy half the single-threaded latency for half the shipped core count,
+            # leaving two cores for the audio loop and for the websocket that ConversationService
+            # runs concurrently with this (`open()` is a gather of connect + memory). Against
+            # `memory_inject_timeout_s` = 1.0 s, 192 ms leaves roughly 5x headroom.
+            #
+            # P8 note: embed() is already off-loop via asyncio.to_thread, and the loop stalled
+            # anyway — starved of a core rather than blocked on a call. A structurally correct
+            # adapter can still violate P8 by monopolising the CPU.
+            options = onnxruntime.SessionOptions()
+            options.intra_op_num_threads = 2
+            options.inter_op_num_threads = 1
+            options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+            # Kept off even though the sweep shows it costs little while embedding back to back:
+            # the cost of spinning is paid BETWEEN calls, i.e. while the robot is idle, which is
+            # exactly what a busy-loop benchmark cannot see.
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            self._session = onnxruntime.InferenceSession(
+                str(self._model_path), sess_options=options
+            )
             self._tokenizer = Tokenizer.from_file(str(self._tokenizer_path))
         return np
