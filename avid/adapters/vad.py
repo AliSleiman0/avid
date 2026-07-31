@@ -178,9 +178,10 @@ class SileroVad:
             # there — the loopback had no websocket, no playback stream and no resampling to
             # compete with. M5 put real work on the other cores and the starvation surfaced.
             #
-            # The MiniLM embedder needs the same treatment with a DIFFERENT thread count —
-            # see avid/adapters/embedder.py (#168). Any new ONNX session needs this block, and
-            # needs its own measurement rather than a copy of either value.
+            # The MiniLM embedder needs a NARROWER version of this — spinning off, but the
+            # thread cap would cost it 2.7x latency for no measured benefit (#168). Any new ONNX
+            # session wants its own measurement, not a copy of either adapter's numbers: what
+            # generalises is "do not let the pool spin", not "pin it to one thread".
             options = onnxruntime.SessionOptions()
             options.intra_op_num_threads = 1
             options.inter_op_num_threads = 1

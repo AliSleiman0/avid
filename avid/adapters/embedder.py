@@ -229,36 +229,33 @@ class LocalMiniLmEmbedder:
             import onnxruntime
             from tokenizers import Tokenizer
 
-            # Bounded, non-spinning — the same treatment as the Silero session in
-            # avid/adapters/vad.py, for the same reason: ONNX Runtime defaults to one intra-op
-            # thread PER CORE, and those threads spin-wait between inferences rather than sleep.
+            # Stop the intra-op pool spin-waiting between inferences — and ONLY that. This is a
+            # narrower change than the Silero one in avid/adapters/vad.py, and the difference is
+            # the point: the two models fail differently, so they get different settings.
             #
-            # The thread count here is NOT vad.py's. That difference is the point, and it is
-            # measured (#168, on the Pi, n=20 embeds, 4 cores):
+            # Measured on the Pi at #168 (4 cores, 90 MB model):
             #
-            #     intra_op   median/embed   cores busy
-            #     default        124.0 ms      3.92     <- as shipped; no headroom left
-            #     1              340.5 ms      1.00     <- vad.py's value
-            #     2              192.1 ms      1.93     <- chosen
-            #     4              191.2 ms      2.78     <- no faster than 2, costs 0.85 more
+            #     intra_op            median/embed   idle CPU   max loop lateness
+            #     default (4, spin)       123 ms     0.03 cores      6.1 ms
+            #     1 nospin                338 ms     0.00 cores      1.5 ms
+            #     2 nospin                192 ms     0.00 cores      4.0 ms
+            #     4 nospin (chosen)       124 ms     0.00 cores      4.6 ms
             #
-            # Silero is a 32 ms window where parallelism buys nothing, so one thread is free.
-            # MiniLM is a 90 MB transformer where it is not: one thread costs 2.8x the latency.
-            # Two threads buy half the single-threaded latency for half the shipped core count,
-            # leaving two cores for the audio loop and for the websocket that ConversationService
-            # runs concurrently with this (`open()` is a gather of connect + memory). Against
-            # `memory_inject_timeout_s` = 1.0 s, 192 ms leaves roughly 5x headroom.
+            # The thread count is left at the default. Silero is a 32 ms window where parallelism
+            # buys nothing, so pinning it to one thread was free; MiniLM is a transformer where
+            # one thread costs 2.7x the latency and buys nothing back. Crucially, embedding does
+            # NOT starve the loop at any thread count — embed() is off-loop via asyncio.to_thread
+            # and ONNX releases the GIL, so a heartbeat coroutine stays within 6 ms of schedule
+            # against P8's 50 ms bar even while all four cores are busy. Capping threads here
+            # would trade real latency for a starvation problem that measurement says is absent.
             #
-            # P8 note: embed() is already off-loop via asyncio.to_thread, and the loop stalled
-            # anyway — starved of a core rather than blocked on a call. A structurally correct
-            # adapter can still violate P8 by monopolising the CPU.
+            # What IS worth fixing is the idle burn: with spinning on, the pool keeps 0.03 cores
+            # warm after the last embed, and the robot is idle most of its life. That is the same
+            # class of bug as Silero's (which burned 3 cores), just three orders smaller — and
+            # switching it off costs nothing measurable.
             options = onnxruntime.SessionOptions()
-            options.intra_op_num_threads = 2
             options.inter_op_num_threads = 1
             options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
-            # Kept off even though the sweep shows it costs little while embedding back to back:
-            # the cost of spinning is paid BETWEEN calls, i.e. while the robot is idle, which is
-            # exactly what a busy-loop benchmark cannot see.
             options.add_session_config_entry("session.intra_op.allow_spinning", "0")
             self._session = onnxruntime.InferenceSession(
                 str(self._model_path), sess_options=options
