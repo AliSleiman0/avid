@@ -51,7 +51,7 @@ def _dot(a: Sequence[float], b: Sequence[float]) -> float:
 # --- shared contract: every Embedder adapter must satisfy it ----------------
 
 
-@pytest.fixture(params=FAKE_REAL_PARAMS)
+@pytest.fixture(params=FAKE_REAL_PARAMS, scope="session")
 def make_embedder(request: pytest.FixtureRequest) -> Callable[[], Embedder]:
     """A factory for the current param's adapter, so a test can build a *fresh* instance of the same
     type (the cross-instance determinism proof needs two). The ``"real"`` case skips off the Pi; on
@@ -70,8 +70,13 @@ def make_embedder(request: pytest.FixtureRequest) -> Callable[[], Embedder]:
     return build
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def embedder(make_embedder: Callable[[], Embedder]) -> Embedder:
+    """Session-scoped on purpose: :class:`LocalMiniLmEmbedder` builds a 90 MB ONNX session on its
+    first ``embed()``, measured at ~565 ms on the Pi, and a function-scoped fixture paid that once
+    per test. Both adapters are stateless past that cached session, so sharing one instance across
+    the module is safe — and the tests that specifically need a *second* instance build their own
+    through ``make_embedder`` rather than relying on this fixture's scope (#168)."""
     return make_embedder()
 
 
