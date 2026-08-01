@@ -321,9 +321,24 @@ class ConversationService:
             if not self._session_open:
                 return
             self._arm_idle()
-            # The §6.9 deadline starts at the same instant as the cue below, and for the same
-            # reason: this is the moment the wait for a first token actually begins (AVID-171).
-            self._arm_think_timeout()
+            # `_first_audio` is the turn's own latch: set by the first assistant delta, cleared
+            # at the previous falling edge by `_start_thinking_cue`. True here means the reply
+            # to *this* utterance is already playing.
+            already_replying = self._first_audio
+            if not already_replying:
+                # The §6.9 deadline starts at the same instant as the cue below, and for the
+                # same reason: this is the moment the wait for a first token actually begins
+                # (AVID-171).
+                self._arm_think_timeout()
+        if already_replying:
+            # The reply beat our falling edge — routine since AVID-176 gave the local hold a
+            # 400 ms margin over the server VAD, because the server commits on its own clock
+            # while we are still streaming. There is nothing left to cover: arming the §6.9 cue
+            # here would play "one sec" *over* a reply already coming out of the speaker, which
+            # is the AVID-158 defect (``CueBank`` plays straight to the ``Speaker``, not through
+            # the ``TurnSink``) and also breaks ``AlsaSpeaker``'s one-play-in-flight invariant.
+            # The deadline is skipped for the same reason: the first token has already arrived.
+            return
         self._start_thinking_cue()
 
     async def _on_playback_finished(self, event: AudioPlaybackFinished) -> None:

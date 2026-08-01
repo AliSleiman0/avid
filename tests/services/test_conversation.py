@@ -1061,6 +1061,46 @@ async def test_speech_ended_with_a_live_session_rearms_the_idle_timer() -> None:
         assert rig.client.opened and not rig.client.closed
 
 
+async def test_no_thinking_cue_when_the_reply_is_already_playing() -> None:
+    """AVID-176: with a VAD margin the reply routinely beats our falling edge.
+
+    The server commits on its own clock — ``[ai.turn_detection] silence_duration_ms`` after the
+    user's last speech frame — **while we are still streaming**, so with the shipped 400 ms margin
+    the first delta usually arrives ~400 ms before ``audio.speech_ended``. Arming the §6.9 cue at
+    that falling edge would play *"one sec"* straight over a reply already coming out of the
+    speaker: ``CueBank`` plays to the ``Speaker`` directly rather than through the ``TurnSink``
+    (the AVID-158 defect), and two concurrent plays also break ``AlsaSpeaker``'s documented
+    one-play-in-flight invariant.
+
+    The §6.9 deadline is skipped on the same edge and for the same reason — the first token it
+    exists to wait for has already arrived."""
+    clock = FakeClock()
+    async with _rig(
+        client=_replay("two_turn", clock=clock), think_timeout_s=1.0
+    ) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+        # The reply lands before the user's falling edge — the common case with a margin.
+        await _advance_until(rig, lambda: bool(rig.sink.played))
+        assert rig.service._first_audio is True
+
+        cues_before = list(rig.speaker.files_played)
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await rig.collector.settle()
+
+        assert rig.speaker.files_played == cues_before, (
+            "the thinking cue was armed over a reply that was already playing"
+        )
+        assert rig.service._think_task is None, (
+            "the §6.9 deadline was armed for a first token that had already arrived"
+        )
+
+
 async def test_the_thinking_cue_is_armed_at_the_falling_edge_not_at_the_transcript() -> (
     None
 ):

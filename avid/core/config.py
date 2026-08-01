@@ -229,6 +229,17 @@ class AiConfig(_Section):
     turn_detection: TurnDetectionConfig = TurnDetectionConfig()
 
 
+# The minimum silence, in ms, by which the local hold must clear the server VAD (AVID-176).
+# The two are coupled because AudioService stops streaming exactly at the local hold: without a
+# gap the server is still counting when the audio ends, and the turn is never committed.
+#
+# ⚠️ Only two values have been measured on hardware: **0 ms is fatal** (2 replies in 13 turns at
+# 500/500, 1 in 8 at 900/900) and **400 ms works** (10 replies in 14 turns at 900/500). 200 is a
+# floor chosen *below* the shipped margin so a future bench can tune the hold without a code
+# change — it is not itself a finding, and nothing between 0 and 200 has been tried.
+_MIN_VAD_MARGIN_MS = 200
+
+
 class GateConfig(_Section):
     """The local attention gate (SDS §6.3 / ADR-007).
 
@@ -244,7 +255,11 @@ class GateConfig(_Section):
     vad_model: str = "silero_v5"
     threshold: float = 0.5
     ring_buffer_ms: int = 300
-    silence_hold_ms: int = 500
+    # 900, not the server VAD's 500: see _MIN_VAD_MARGIN_MS. The default matters more than most
+    # here — deploy/PI_OPERATIONS.md's rule is that a key missing from /etc/robot/config.toml
+    # falls back to the schema default *silently*, and 500 is the measured-fatal value, so a
+    # dropped key must not land the robot on it invisibly.
+    silence_hold_ms: int = 900
     session_idle_close_s: int = 30
     # The echo gate (AVID-159, §6.2.4). While the assistant is speaking the mic hears the robot,
     # so the uplink is shut and a rising edge only counts as the *user* if it clears the running
@@ -443,13 +458,27 @@ class Config(_Section):
         # So a local hold shorter than the server's cuts the stream before the server has heard
         # enough, and the turn is never committed: a robot that listens and then simply never
         # answers. Loud at load, like api.bind — this failure is invisible until the bench.
-        if self.gate.silence_hold_ms < self.ai.turn_detection.silence_duration_ms:
+        #
+        # ⚠️ **Equal is not enough, and that is the subtle half** (AVID-176). At equal values the
+        # server receives its threshold at the *instant* the stream stops, which is a race it
+        # usually loses — so a margin is required, not merely "not shorter". Measured 2026-08-01:
+        #   500 / 500  ->  2 transcripts, 2 replies in 13 turns
+        #   900 / 900  ->  1 transcript,  1 reply  in 8 turns
+        #   900 / 500  ->  8 transcripts, 10 replies in 14 turns
+        # Equal being fatal in BOTH directions is what identifies this as a race rather than a
+        # value being too short, and it is why the SDS used to claim equal was the shipped case.
+        margin_ms = (
+            self.gate.silence_hold_ms - self.ai.turn_detection.silence_duration_ms
+        )
+        if margin_ms < _MIN_VAD_MARGIN_MS:
             raise ValueError(
-                f"gate.silence_hold_ms ({self.gate.silence_hold_ms}) must be >= "
+                f"gate.silence_hold_ms ({self.gate.silence_hold_ms}) must clear "
                 f"ai.turn_detection.silence_duration_ms "
-                f"({self.ai.turn_detection.silence_duration_ms}): the mic stream stops at the "
-                f"local hold, so a shorter one starves the server VAD and the turn never "
-                f"commits (SDS §6.3)."
+                f"({self.ai.turn_detection.silence_duration_ms}) by at least "
+                f"{_MIN_VAD_MARGIN_MS} ms (got {margin_ms} ms): the mic stream stops at the local "
+                f"hold, so without a margin the server VAD is still counting when the audio ends "
+                f"and the turn never commits — the robot listens and then never answers "
+                f"(SDS §6.3)."
             )
         return self
 
