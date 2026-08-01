@@ -321,10 +321,21 @@ class ConversationService:
             if not self._session_open:
                 return
             self._arm_idle()
-            # `_first_audio` is the turn's own latch: set by the first assistant delta, cleared
-            # at the previous falling edge by `_start_thinking_cue`. True here means the reply
-            # to *this* utterance is already playing.
+            # `_first_audio` is the turn's own latch: set by the first assistant delta, and
+            # cleared HERE — at *every* falling edge, before any early return — because this is
+            # the instant one turn's wait for a first token ends and the next one's begins.
+            #
+            # ⚠️ The reset used to live in `_start_thinking_cue`, which the `already_replying`
+            # branch below returns *before* reaching. So the first time a reply beat a falling
+            # edge the latch stuck True for the rest of the session, and since AVID-176 gave the
+            # local hold a 400 ms margin that is the NORMAL case on turn one. Every later turn
+            # then read `already_replying` as True and armed neither the cue nor the §6.9
+            # deadline. Measured on the #106 seal run: the robot waited 41 s through a network
+            # outage in silence with the deadline set to 10 s, and AC-6 failed. Read the latch
+            # and reset it in the same breath; a latch cleared on only one of two paths is not a
+            # latch.
             already_replying = self._first_audio
+            self._first_audio = False
             if not already_replying:
                 # The §6.9 deadline starts at the same instant as the cue below, and for the
                 # same reason: this is the moment the wait for a first token actually begins
@@ -707,9 +718,10 @@ class ConversationService:
     def _start_thinking_cue(self) -> None:
         """Kick the best-effort thinking cue for this turn (cancelled when first audio lands).
 
-        Arming it also re-arms the ``_first_audio`` latch that cancels it, so the wait this cue
-        covers has exactly one place where it begins (AVID-158)."""
-        self._first_audio = False
+        The ``_first_audio`` latch that cancels this cue is re-armed by the caller, at the
+        falling edge, on **every** path — not here. It lived here until AVID-186, which is
+        precisely why it stopped being re-armed once the caller grew a path that skips the cue.
+        """
         self._cancel_task(self._thinking_task)
         self._thinking_task = self._play_cue(Cue.THINKING_ONE_SEC)
 

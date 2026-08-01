@@ -842,16 +842,49 @@ def test_every_criterion_reports_before_any_verdict_is_decided(
     measured. Every check now records its own outcome and the exit code is decided at the end,
     so one failure costs one line, not the report."""
     demo = _load_conversation_pi()
-    slow = demo._Turn(latency_ms=9_000.0, played_ms=2000, elapsed_ms=2000.0)
+    mute = demo._Turn(latency_ms=400.0, played_ms=0, elapsed_ms=2000.0)
     arc = demo._Recovery(lost=1, entered=1, exited=1, downtime_s=3.0)
 
     assert (
-        _verdict(demo, [slow], recovery=arc) == 1
-    )  # the slow turn still fails the run
+        _verdict(demo, [mute], recovery=arc) == 1
+    )  # the mute turn still fails the run
     out = capsys.readouterr().out
-    assert "P50" in out  # the criterion that failed said so
+    assert "played no audio" in out  # the criterion that failed said so
     assert "AC-6 session_lost 1" in out  # ...and the one that PASSED was still reported
-    assert "FAILED: O1-p50" in out  # one verdict, at the end, naming what failed
+    assert (
+        "FAILED: playback-silent" in out
+    )  # one verdict, at the end, naming what failed
+
+
+def test_a_run_that_induced_an_outage_does_not_claim_an_O1_or_O7_result() -> None:
+    """A recovery run CUTS THE NETWORK on purpose, so its latencies measure the outage.
+
+    The 2026-08-01 seal run scored a 41 s turn -- the reply to an utterance spoken mid-cut --
+    and reported it as an O1 failure. It was not one; it was the test working. Same refusal as
+    the ``replay`` case, same reason: a number produced under a stimulus the harness itself
+    induced does not measure the thing the number names.
+
+    This is STRICTER than grading both in one pass, not looser -- the recovery run may no longer
+    be cited as AC-4 evidence at all, so AC-4 needs its own run. What must still bite is AC-6:
+    withholding O1 must not withhold the recovery verdict."""
+    demo = _load_conversation_pi()
+    glacial = demo._Turn(latency_ms=41_000.0, played_ms=2000, elapsed_ms=2000.0)
+    arc = demo._Recovery(lost=1, entered=1, exited=1, downtime_s=3.0)
+
+    assert (
+        _verdict(demo, [glacial], recovery=arc) == 0
+    )  # the outage is not a latency failure
+    assert (
+        _verdict(demo, [glacial], recovery=None) == 1
+    )  # ...but an ordinary run still fails
+    assert (
+        _verdict(
+            demo,
+            [glacial],
+            recovery=demo._Recovery(lost=1, entered=1, exited=0, downtime_s=3.0),
+        )
+        == 1  # AC-6 still bites through the withholding
+    )
 
 
 def test_recovery_is_only_gated_when_asked_and_then_both_halves_must_happen() -> None:

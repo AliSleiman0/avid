@@ -41,7 +41,12 @@ from avid.adapters.vad import FakeVoiceActivityDetector
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import AudioChunk
-from avid.core.realtime import ToolCallRequested, TurnDone, UserTranscript
+from avid.core.realtime import (
+    AssistantAudioChunk,
+    ToolCallRequested,
+    TurnDone,
+    UserTranscript,
+)
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioPlaybackFinished,
@@ -1155,6 +1160,59 @@ async def test_the_first_assistant_delta_cancels_a_pending_thinking_cue() -> Non
 
 
 # --- the §6.9 first-token deadline (AVID-171) ----------------------------------------------
+
+
+async def test_a_reply_that_beats_one_falling_edge_does_not_disarm_every_later_turn() -> (
+    None
+):
+    """The ``_first_audio`` latch is re-armed at **every** falling edge, not only the ones that
+    reach the thinking cue (AVID-186).
+
+    The regression this pins cost the #106 seal run. The reset lived in ``_start_thinking_cue``,
+    which the "a reply is already playing" branch returns *before* reaching — so the first time a
+    reply beat a falling edge the latch stuck ``True`` for the rest of the session. Since AVID-176
+    gave the local hold a deliberate 400 ms margin over the server VAD, a reply beating the
+    falling edge is the NORMAL case, usually on turn one. Every later turn then read
+    ``already_replying`` as ``True`` and armed neither the cue nor the §6.9 deadline: on the bench
+    the robot waited **41 s** through a network outage in silence with the deadline set to 10 s.
+
+    So the assertion is deliberately about the *second* turn. Asserting on the first proves
+    nothing — the first turn armed its deadline correctly even with the bug."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())  # answers nothing, ever
+    async with _rig(client=client, think_timeout_s=10.0) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+
+        # Turn one's reply beats its own falling edge: a delta lands BEFORE speech_ended.
+        await rig.service._on_assistant_audio(
+            AssistantAudioChunk(
+                chunk=AudioChunk(pcm=b"\x00\x00", sample_rate=24000, channels=1),
+                item_id="item_first",
+            )
+        )
+        assert rig.service._first_audio is True
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await rig.collector.settle()
+        # Correct: this turn's token already arrived, so no deadline and no "one sec" over it.
+        assert rig.service._think_task is None
+
+        # Turn two waits on a model that says nothing — the arc AVID-171 exists for.
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await rig.collector.settle()
+        assert rig.service._think_task is not None, (
+            "the latch stuck: one early reply disarmed the §6.9 deadline for the whole session"
+        )
 
 
 async def _arm_the_deadline(rig: Rig) -> None:
