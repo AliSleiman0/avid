@@ -486,6 +486,12 @@ class OpenAIRealtimeClient:
         # which one it rejected; ``_error_count`` numbers inbound complaints so a storm reads as one.
         self._sent_seq = 0
         self._error_count = 0
+        # The response the model is currently generating, or None (AVID-178). Tracked here rather
+        # than in the service because ``response.created``/``response.done`` are vendor shapes
+        # (CLAUDE.md §3) — and because ConversationService._turn_active only LOOKS like the same
+        # state: AVID-158 established it is set on the user transcript, which arrives after the
+        # assistant's audio and sometimes after the turn has ended.
+        self._active_response: str | None = None
 
     def __repr__(self) -> str:
         """Key-free repr (AC-6): the secret must never reach a log line via ``repr``."""
@@ -611,6 +617,7 @@ class OpenAIRealtimeClient:
         self._truncation_pending = False
         self._sent_seq = 0
         self._error_count = 0
+        self._active_response = None
         _, send_ns = await _timed(
             self._send(
                 {"type": "session.update", "session": self._session_config(block)}
@@ -678,6 +685,7 @@ class OpenAIRealtimeClient:
                 if msg.get("type") == "error":
                     self._note_error(msg)
                     continue  # a complaint, not a close — SDS §6.2.5
+                self._track_response(msg)
                 try:
                     event = _translate(msg)
                 except Exception:  # noqa: BLE001 - a surprising frame must not kill the pump
@@ -704,6 +712,19 @@ class OpenAIRealtimeClient:
                     "realtime socket closed: code=%r reason=%r", exc.code, exc.reason
                 )
                 yield SessionClosed(cause="network")
+
+    def _track_response(self, msg: dict[str, Any]) -> None:
+        """Follow the response lifecycle so :meth:`cancel` knows whether anything is in flight.
+
+        Kept out of :func:`_translate`, which is pure and stateless by contract — this is state,
+        and it belongs on the client. ``response.done`` covers a *cancelled* response too, so the
+        flag clears on every terminal path rather than only the happy one."""
+        kind = msg.get("type")
+        if kind == "response.created":
+            response = msg.get("response") or {}
+            self._active_response = str(response.get("id", "")) or "active"
+        elif kind == "response.done":
+            self._active_response = None
 
     def _note_error(self, msg: dict[str, Any]) -> None:
         """Log one ``error`` server frame. **Never** ends the session (AVID-178, SDS §6.2.5).
@@ -741,7 +762,32 @@ class OpenAIRealtimeClient:
         )
 
     async def cancel(self) -> None:
-        """Barge-in step 5 (§6.2.4): cancel the in-flight response (``response.cancel``)."""
+        """Barge-in step 5 (§6.2.4): cancel the in-flight response — **if there is one**.
+
+        Sending ``response.cancel`` with nothing in flight is an error, measured against the live
+        API (AVID-178)::
+
+            code    'response_cancel_not_active'
+            message 'Cancellation failed: no active response found'
+
+        and it is the *common* case, not a corner one: **generation finishes long before playback
+        does.** By the time a user interrupts a reply they are still hearing, the model stopped
+        generating seconds ago. The same probe confirmed ``conversation.item.truncate`` is accepted
+        with our device-derived ``audio_end_ms``, so step 4 is untouched — only step 5 needed a
+        guard.
+
+        ⚠️ **If this guard is wrong the failure is silent.** No cancel is sent, the user hears
+        nothing amiss (step 6's mute drops the in-flight deltas anyway), and the model goes on
+        believing it said the whole reply — §6.2.4 trap 2, poisoning the conversation context and
+        billing output tokens for audio nobody heard. That is why the skip is *logged*: a bench run
+        is graded on "every barge-in shows a sent cancel **or** a logged skip", never on the mere
+        absence of errors.
+        """
+        if self._active_response is None:
+            _log.debug(
+                "no active response to cancel — skipping response.cancel (§6.2.4 step 5)"
+            )
+            return
         await self._send({"type": "response.cancel"})
 
     async def send_tool_output(self, call_id: str, output: str) -> None:

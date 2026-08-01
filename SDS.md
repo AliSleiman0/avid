@@ -1185,13 +1185,19 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 3. Compute audio_end_ms = how much the device ACCEPTED — the sum of Speaker.play()'s
    returns (frames ALSA took ÷ 48 bytes/ms at 24kHz mono 16-bit), NOT what we submitted
 4. Send conversation.item.truncate(item_id, content_index, audio_end_ms)
-5. Send response.cancel
+5. Send response.cancel -- ONLY IF a response is still in flight (see below)
 6. Mute inbound deltas for item_id until the next assistant item begins
 ```
 
 **Step 0 exists because a VAD cannot tell you *whose* speech it is (AVID-159).** This section used to assume it could. It cannot, and it is not a detector quality problem: the robot's voice coming back through the mic **is** speech, and Silero is right to say so. The only discriminator left is loudness, so a rising edge that happens while the robot is talking counts as the user only if it clears `EchoFloor` — a running estimate of what the mic hears *while the robot is the one speaking* — by `[gate] barge_in_margin_db`.
 
 The floor is adaptive rather than a configured `playback_level × coupling` constant, because while the assistant speaks what the mic hears **is** the echo: tracking it *is* the acoustic-coupling calibration, so speaker volume, mic gain, room and rig geometry all cancel out of the comparison and nothing needs re-measuring when the desk moves. Two rules make it honest — it never adapts on a frame it has judged to be the user (that would raise the bar under the speaker mid-sentence), and it is only ever consulted while the uplink is shut, so **ordinary turn-taking is never tested against the margin at all.**
+
+**Step 5 is conditional, and the condition is the common case (AVID-178).** `response.cancel` with nothing in flight is an error — measured against the live API as `response_cancel_not_active`, *"Cancellation failed: no active response found"* — and **generation finishes long before playback does**, so by the time a user interrupts a reply they are still *hearing*, the model stopped generating seconds ago. Sending it unconditionally made every barge-in draw an error frame, which the adapter then misread as a session close (§6.2.5): ten sessions in eighty seconds of bench. The client therefore tracks `response.created`/`response.done` and skips step 5 when there is nothing to cancel.
+
+⚠️ **Step 4 is deliberately *not* guarded the same way.** The same probe confirmed the API accepts `conversation.item.truncate` with our device-derived `audio_end_ms`; only step 5 was ever rejected. Guarding both would have been the tempting symmetric change and would have broken the half of barge-in that worked.
+
+⚠️ **A wrong guard here fails silently.** If the tracking is broken no cancel is sent, the user hears nothing amiss — step 6's mute drops the in-flight deltas regardless — and the model goes on believing it said the whole reply, poisoning the context (trap 2 above) and billing output tokens for audio nobody heard. The skip is therefore logged, and a bench run is graded on *"every barge-in shows a sent cancel **or** a logged skip"*, never on the absence of errors alone.
 
 **Step 1 says "at the rising edge *or* mid-utterance", and that is not a detail (AVID-161).** The reply can begin while the user is *already* talking, and such a user has no rising edge left to be judged on — so a check that only ran at the edge left the escape hatch unreachable in exactly the case that needed it: the robot talks over you, the half-duplex uplink shuts, and your words stop reaching the model until you give up and start again. The margin is therefore re-evaluated on every frame for the duration of an overlap, and the interrupt re-opens the uplink so the rest of the turn gets through.
 

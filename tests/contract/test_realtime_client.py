@@ -664,6 +664,9 @@ async def test_client_events_carry_a_traceable_event_id() -> None:
     ws = _CapturingWs()
     client = _openai()
     client._ws = ws  # type: ignore[assignment]
+    # A response is in flight, so step 5 actually goes out — the tracking itself is proven by
+    # test_cancel_is_sent_while_a_response_is_generating, which drives it through real frames.
+    client._active_response = "resp_1"
 
     await client.truncate("item_0", 660)
     await client.cancel()
@@ -674,6 +677,92 @@ async def test_client_events_carry_a_traceable_event_id() -> None:
     ]
     assert ws.sent[0]["event_id"] == "avid_1_conversation_item_truncate"
     assert ws.sent[1]["event_id"] == "avid_2_response_cancel"
+
+
+async def test_cancel_is_skipped_when_no_response_is_in_flight(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-178 Stage 2, measured against the live API rather than guessed::
+
+        code    'response_cancel_not_active'
+        message 'Cancellation failed: no active response found'
+
+    And it is the *common* case: generation finishes long before playback does, so by the time a
+    user interrupts a reply they are still hearing, the model stopped generating seconds ago.
+
+    ⚠️ The skip is **logged**, and that is not decoration. If this guard is ever wrong the failure
+    is silent — no cancel goes out, the user hears nothing amiss (step 6's mute drops the deltas
+    anyway), and the model believes it said the whole reply, poisoning context and billing output
+    tokens for audio nobody heard. A bench run is graded on *"a sent cancel or a logged skip"*."""
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+
+    with caplog.at_level(logging.DEBUG, logger="avid.adapters.realtime"):
+        await client.cancel()
+
+    assert ws.sent == [], "cancelled a response that was never in flight"
+    assert "no active response to cancel" in caplog.text
+
+
+async def test_cancel_is_sent_while_a_response_is_generating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other edge, and the one that catches the silent failure: a *live* response is cancelled.
+
+    Driven through ``_events`` with real vendor frames rather than by setting the private flag, so
+    the test proves the tracking as well as the guard."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [{"type": "response.created", "response": {"id": "resp_1"}}]
+    )
+    await _drain_events(client)
+
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == ["response.cancel"]
+
+
+async def test_a_finished_response_is_no_longer_cancellable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``response.done`` clears the flag — including for a response that was *itself* cancelled,
+    which is why the terminal frame is tracked rather than the happy path only."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.done", "response": {"id": "resp_1"}},
+        ]
+    )
+    await _drain_events(client)
+
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert ws.sent == []
+
+
+async def test_truncate_is_always_sent_because_the_api_accepts_it() -> None:
+    """Step 4 is deliberately **not** guarded. The probe confirmed the live API accepts
+    ``conversation.item.truncate`` with our device-derived ``audio_end_ms`` — only step 5 was
+    rejected — and §6.2.4 calls that accepted figure "the deliberate choice, not an oversight".
+
+    Guarding truncate as well would have been the tempting symmetric change and would have broken
+    the one part of barge-in that was working."""
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+
+    await client.truncate("item_0", 660)
+
+    assert [p["type"] for p in ws.sent] == ["conversation.item.truncate"]
+    assert ws.sent[0]["audio_end_ms"] == 660
 
 
 def test_tools_are_declared_in_the_session_update_prefix() -> None:
