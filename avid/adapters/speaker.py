@@ -193,6 +193,11 @@ class FakeSpeaker:
         self.playing = False
         self.stops += 1
         self._flush()
+        # A real loop yield, like play()'s — and for the same P6 reason. AlsaSpeaker.stop hops a
+        # thread (to_thread), so on hardware a barge-in genuinely suspends and other tasks run
+        # inside it. Without this the fake made barge-in *atomic* with respect to the pump, so
+        # AVID-174's interleaving was not expressible in CI at all and the crash reached the Pi.
+        await asyncio.sleep(0)
 
     def _flush(self) -> None:
         """Write the utterance's buffered chunks to ``out_dir/utterance-{n}.wav`` and clear it.
