@@ -131,6 +131,10 @@ _P50_TARGET_MS = 800.0
 _P95_TARGET_MS = 1500.0
 _P50_BUDGET_MS = 1600.0
 _P95_BUDGET_MS = 2700.0
+# Below this many paired samples, nearest-rank P95 IS the maximum (rank ceil(0.95n) = n for
+# n < 20), so the run reports the worst turn under a percentile's name. 20 is the smallest n whose
+# top 5% holds a whole sample. See the warning in _report_conversation.
+_MIN_P95_SAMPLES = 20
 # PMP §5.2 (O7) — the monthly spend the cost meter projects against. The meter owns the rate
 # table and the §6.10.3 usage model; this is only the line it is compared to.
 _O7_MONTHLY_BUDGET_USD = 25.0
@@ -449,6 +453,24 @@ def _report_conversation(
         f"max {max(samples):.0f} ms / count {len(samples)}"
         f"   (graded against P50 {p50_budget_ms:.0f} / P95 {p95_budget_ms:.0f})"
     )
+    # ⚠️ Name the number honestly when the sample is too small to contain one. Nearest-rank P95
+    # over n samples picks rank ceil(0.95n), which for n < 20 is the LAST one — the worst turn,
+    # not a 95th percentile. Grading that against a P95 budget is therefore STRICTER than PMP asks:
+    # a real P95 tolerates 1 turn in 20 above the line, "worst turn" tolerates none. The 2026-08-01
+    # AC-3 run failed exactly this way — one 5532 ms turn out of six, reported as "P95 5532".
+    #
+    # It still fails. Weakening it to fit would be the carve-out this file exists to refuse; what
+    # is fixed here is the LABEL, because a stricter test wearing a percentile's name misleads in
+    # both directions — it can fail a robot that meets the criterion, and it can pass one on a
+    # sample too small to have measured anything.
+    if len(samples) < _MIN_P95_SAMPLES:
+        print(
+            f"    ⚠️ n={len(samples)}: this 'P95' is the WORST TURN, not a 95th percentile "
+            f"(nearest rank over n<{_MIN_P95_SAMPLES}).\n"
+            f"    Grading it is stricter than PMP §5.2 asks — a true P95 tolerates 1 turn in 20 "
+            f"above the line.\n"
+            f"    Re-run with --turns {_MIN_P95_SAMPLES}+ to establish a real P95."
+        )
     # The design target, printed beside the ceiling on every run — see the constants for why.
     if (p50_budget_ms, p95_budget_ms) != (_P50_TARGET_MS, _P95_TARGET_MS):
         print(
