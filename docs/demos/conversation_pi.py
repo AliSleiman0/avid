@@ -363,6 +363,7 @@ def _report_conversation(
     budget_usd: float = _O7_MONTHLY_BUDGET_USD,
     check_playback: bool,
     live: bool,
+    server_vad_ms: float = 0.0,
     barge_ins: int = 0,
     recovery: _Recovery | None = None,
 ) -> int:
@@ -436,6 +437,19 @@ def _report_conversation(
         f"max {max(samples):.0f} ms / count {len(samples)}"
         f"   (budget P50 {p50_budget_ms:.0f} / P95 {p95_budget_ms:.0f})"
     )
+    # Make the number SEPARABLE, because the budget it is graded against itemises the same
+    # split. SDS §2.8.1 allots 400 ms to "model turn detection + first token", and
+    # [ai.turn_detection] silence_duration_ms is that turn detection -- a CONFIGURED constant
+    # sitting inside every sample, not a property of our code. Printing O1 alone invites the two
+    # possible failures to be read as one: a robot that is slow because the pipeline is slow, and
+    # a robot that is slow because it was told to wait. Only the first is a defect here.
+    if server_vad_ms:
+        print(
+            f"    of which {server_vad_ms:.0f} ms is the configured server-VAD commit delay "
+            f"([ai.turn_detection] silence_duration_ms);\n"
+            f"    P50 net of it {p50 - server_vad_ms:.0f} ms against §2.8.1's 400 ms "
+            f"turn-detection + first-token line"
+        )
     print(
         f"O7  projected ${projected_monthly_usd:.2f}/month vs ${budget_usd:.0f} budget, "
         f"cached-input {cached_ratio * 100:.1f}%"
@@ -672,6 +686,7 @@ async def _run_conversation(
         # legitimate bench configuration and must still be checked. FakeSpeaker.play returns
         # instantly, so elapsed-vs-played would false-fail there.
         check_playback=config.adapters.speaker != "fake",
+        server_vad_ms=float(config.ai.turn_detection.silence_duration_ms),
         live=live,
         barge_ins=collector.barge_ins,
         recovery=collector.recovery if require_recovery else None,
