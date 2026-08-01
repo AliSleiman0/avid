@@ -6,289 +6,138 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-07-30 · `main = 3f764aa` · tree CLEAN · gh `AliSleiman0`.
-
-**⭐ BOTH LAPTOP QUEUES ARE EMPTY. Everything that remains needs hardware or the API key.**
-
-M5's three bench defects are fixed and merged — **#158** (`b78d242`), **#159** (`6d9f1d4`), **#161**
-(`b0dc0fb`) — plus **#157**'s instrumentation (`79eadd2`) and **#162** (`3f764aa`). M7 is **13 of
-15**: everything except its gate and one Pi spike. The **only** laptop-doable build item left
-repo-wide is **#21** (author SDS §13 Security & Privacy, M11, `size:XS`).
-
-So the next session is a **bench day**, and it can retire *both* remaining milestones' gates plus a
-spike in one sitting: **#106** (M5), **#129** (M7), **#127** (SPK-3), and #157's measurement.
-
-⚠️ **The Pi is powered off and 7 merges behind.** Re-checked at this session's close: no DNS for
-`AVID`, TCP/22 closed. It was also unreachable on 07-26, so treat it as off rather than flaky — the
-session starts by turning it on and re-verifying against the repo.
-
-The evidence the four M5 defects were diagnosed from — and the file to re-read before the gate:
-[`docs/demos/m5_evidence/trace_2026-07-26_streaming.log`](demos/m5_evidence/trace_2026-07-26_streaming.log)
-(one line per bus event, with state, mic-queue depth and frames-sent-to-API), produced by
-[`docs/demos/m5_evidence/trace_turns.py`](demos/m5_evidence/trace_turns.py). It also lived on the
-Pi at `/tmp/trace_turns.py` with a wrapper at `/tmp/run_trace.sh` — **`/tmp` does not survive a
-reboot, re-copy from the repo.**
-
----
+**As of:** 2026-08-02 · `main = 23b4670` · tag **`v0.M5.0` pushed** · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**0. Power the Pi on and re-verify it before measuring anything.** It is 7 merges behind and was
-last touched 2026-07-26. `deploy/PI_OPERATIONS.md` is the procedure; the rule it exists to teach is
-that **the machine is not the repo**, and missing config keys fall back to schema defaults, so drift
-yields *silently wrong results* rather than errors. Two `[gate]` keys are new since the Pi last ran
-(`barge_in_margin_db`, `echo_tail_ms`) and both have defaults — a stale `/etc/robot/config.toml`
-will use 6.0/150 **silently** and the file will not show what actually ran.
+**M5 is sealed. The next thing that matters is [#194](https://github.com/AliSleiman0/avid/issues/194).**
 
-**1. Finish #157 — the instrumentation shipped, the conclusion did not.** ⚠️ It is **Blocked** on
-the board, not done; do not close it on the strength of PR #166. Reading the code already settles
-two things — do not re-derive them:
+Read [`enhancement-single-turn-authority.md`](enhancement-single-turn-authority.md) **first** — the
+whole diagnosis is written down, with the evidence. Do not re-derive it.
 
-- `open()` is `asyncio.gather(connect, memory)` then `_send(session.update)`. `_compose_memory_block`
-  hard-bounds the memory leg at `memory_inject_timeout_s` = **1.0 s**, `MemoryService.top_facts` is
-  `fetch_live()` + a pure function, and `fetch_live` runs off-loop. **So every open above ~1 s is
-  `websockets.connect`, by construction** — the 6652/6377 ms figures are definitionally that call.
-- `open()` returns when `session.update` is **sent, not acknowledged**, so the measured figure
-  already excludes server-side session bootstrap.
+> **Two VADs disagree about whose turn it is.** Local Silero at `[gate] silence_hold_ms` = 900 ms,
+> the server at `[ai.turn_detection] silence_duration_ms` = 500 ms. **A 500–900 ms pause is
+> ordinary speech** — a breath, a mid-sentence think — so the server commits and answers a
+> *fragment* while the local gate still considers the utterance open. The robot talks over people.
 
-⚠️ **The laptop has no `OPENAI_API_KEY`** (checked 2026-07-29). The key-free half already runs:
+It is **not** a config edit: `RealtimeClient` has `open`/`aclose`/`send_audio`/`events`/`truncate`/
+`cancel`/`send_tool_output` and **no commit**, so it is a new port method across three adapters, a
+call site in `ConversationService._on_speech_ended`, config handling and contract tests. ~1 day.
+Nothing in `domain/` moves.
 
-```
-uv sync --frozen --extra openai                                            # websockets: NOT in the default venv
-uv run --frozen python tools/probe_realtime_open.py --iterations 5          # no key needed
-uv run --frozen python tools/probe_realtime_open.py --iterations 5 --live   # needs the key
-```
+⚠️ **It projects ~990 ms and the target is 800 ms.** Do it for turn-taking and *predictability*,
+not to reach the budget. Anyone selling it as a route to 800 ms has not read the doc.
 
-Laptop baseline: dns 59.0 cold / 0.4 warm · ssl_ctx 13.4 / 6.1 · tcp 3.3 / 24.1 · tls 97.3 / 62.9 ·
-**TOTAL 172.9 cold / 93.8 warm ms** — corroborating the ~150 ms already on the issue. Run the same
-two commands **on the Pi** and the laptop-vs-Pi comparison is the AC-4 settlement:
+**Then, in order:** #170 (the thinking cue has no 600 ms timer, so the robot says "one sec" on
+every turn — this is a *felt* defect and cheap), #188 (a failed reconnect escapes as an unhandled
+`OSError`, once per utterance, and the first open of a process is one of them), #189 (playback
+edges land in IDLE after a reconnect — an illegal transition, the #158/#161/#162 family), #157
+(session open costs 1.5–6.7 s against §6.3's 200 ms budget).
 
-| time is in… | then | AC-4 |
-|---|---|---|
-| `SSLContext` creation | already fixed in #166; re-measure | **stands** — it was ours |
-| the upgrade, **both** hosts | the API's handshake; §6.3's 200 ms is wrong | **moves** |
-| the upgrade, **Pi only** | Pi-specific; a defect worth chasing | **stands** |
-| cold only, warm ~830 ms | once per *process*, not per conversation | **moves**, differently |
-
-That last row is live: `1494 / 1922 / 832` across three opens vs `6652` on a first one looks exactly
-like one-time cost plus warm steady state. The shipped log line marks cold vs warm so one run tells.
-
-**2. The M5 gate (#106) — a measurement run, not just a seal run.** See the calibration protocol
-below. Its AC wordings were pre-settled; do not re-open them mid-session.
-
-**3. Batch the M7 gate (#129) and SPK-3 (#127) onto the same bench day.** Both need the Pi and
-#129 needs the live key, so they cost almost nothing extra once the bench is up. ⚠️ **#127 is a
-time-boxed spike (0.5 IED): report the number and stop.** ⚠️ #129's real leg needs
-`tools/fetch_minilm.py` run on the Pi — that is the same missing model behind the 6 M7 failures in
-the full Pi suite.
-
-**4. The only laptop work left is #21** (SDS §13 Security & Privacy). #163 (AEC) is laptop-*startable*
-but its own DoD demands Pi-measured echo return loss, and it says so itself: budget a clock-drift
-spike before committing, because if drift cannot be bounded on this hardware then #159's margin is
-the permanent answer and that is worth knowing early.
-
-### ⭐ The bench run must calibrate `[gate] barge_in_margin_db`
-
-**6.0 dB is a guess and the code says so.** The echo-to-speech separation on this rig has never been
-measured: §6.3 records the mic's own noise floor at **−21 dBFS** and a speech capture at
-**rms −16.1 dBFS**, and M4 called amp→mic coupling "weak" without ever quantifying it.
-
-Every reply now logs one line, so **every bench run is a calibration run** with no separate mode:
-
-```
-echo gate: floor -19.4 dBFS, loudest suppressed frame -14.1 dBFS (5 suppressed), margin 6.0 dB
-```
-
-Collect them and pair with the level of any barge-in that *did* work. Three outcomes, written up in
-[`docs/demos/README.md`](demos/README.md):
-
-- **they separate** → set the margin between them with headroom, record it **with the distance and
-  voice level it was measured at** (AC-3's wording requires both), re-run;
-- **`suppressed` is 0 everywhere and barge-in works** → coupling is weaker than the margin; 6.0 is
-  fine, record it anyway;
-- **they overlap** → **stop.** No margin can be tuned into working; the knob only trades a robot
-  that interrupts itself for one that is deaf while speaking. Exits: full half-duplex (a very large
-  margin — config only, no code change, AC-3 waived as M4's was) or **#163** (AEC).
-
-### ⭐ #106's AC wordings were settled IN ADVANCE (comment on #106, 2026-07-29)
-
-The lesson four previous ACs paid for. Do not re-open these mid-session:
-
-- **AC-3** → "speaking at conversational volume at ~50 cm interrupts the reply", **with the dB
-  margin measured and recorded**. Calibration is part of the gate, not a hidden constant.
-- **AC-4** → reworded only *after* #157 is measured. If the unexplained time is ours rather than
-  the API's, that is a defect and the budget stands.
-
-⚠️ **#129's ACs have NOT had this treatment.** Read them cold before the bench day and settle
-anything unsatisfiable on the issue first — four ACs have already been renegotiated mid-run, and
-#129 was written when M7 was 0/15, before any of the design it describes existed.
-
----
+All six are on **M6**. M7's gate (#129) and #127 still stand ahead of M9 (epic #198).
 
 ## Current state
 
-- **Every open issue repo-wide**, so this list is the whole picture: **#106** (M5 gate — Pi + key),
-  **#129** (M7 gate — Pi + key), **#127** (SPK-3 spike — Pi), **#157** (Blocked on the key), **#163**
-  (AEC — wants a Pi drift spike first), **#114** + **#98** (epics), **#21** (SDS §13 docs, M11).
-  ⚠️ **Verify this with `gh issue list --state open` before planning** — see the tracker gotcha below.
-- **M5 "It talks" (milestone #6): laptop-complete bar #157's measurement.** #99–#105, #153, #158,
-  #159, #161 merged. Open: #106 (the gate), #157, #98 (epic).
-- **M7 "It remembers" (milestone #8): 13 of 15**, epic #114. **#115–#128 are all closed** — the
-  laptop half of the milestone is *done*, including #125 (tool dispatch, `d145d93`) and #126
-  (pre-session injection). Only **#129** (gate) and **#127** (spike) remain, both hardware.
-- **Sealed on hardware: M0, M1, M2, M3, M4.** Two Pi gates left in the project: **#106** and **#129**.
-- **The five real HALs are hardware-present and the camera real leg is contract-proven** — servo
-  (PCA9685 ch0+ch13), speaker (MAX98357A), display (ILI9486 `/dev/fb0`), mic (USB PnP), camera
-  (ov5647 CSI, 11/11 contract legs, RGB888 640×480, no code change).
-- ⚠️ **The Pi is unreachable** — no DNS for `AVID`, TCP/22 closed, checked 2026-07-30 and also down
-  on 07-26. On `6a560bf`, **7 merges behind**. Treat as powered off, not flaky.
-- ⚠️ **The Pi is not the repo.** `/etc/robot/config.toml` and the systemd unit are copies and both
-  have rotted before. Missing keys fall back to schema *defaults*, so drift yields **silently wrong
-  results** — the M4 gate would have measured the `fake` VAD while capturing from the amp. Diff both
-  against the repo before the gate. See [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md).
-- ⚠️ **Two new `[gate]` keys must reach the Pi**: `barge_in_margin_db` and `echo_tail_ms`. They have
-  schema defaults, so a stale `/etc/robot/config.toml` **silently** uses 6.0/150 — a fine starting
-  point, but the file then cannot be trusted to show what actually ran.
-- ⚠️ **Machine drift deliberately left in place:** `/etc/robot/config.toml` has
-  `session_idle_close_s = 30 → 300` (backup `.bak-153`); **`config/pi.toml` was NOT changed.** The
-  fold-in decision is still open.
-- ⚠️ **6 failures in the full Pi suite are M7, not audio** — `tests/contract/test_embedder.py`'s
-  real leg needs `tools/fetch_minilm.py` run on the Pi.
+**M5 sealed** as `v0.M5.0` @ `23b4670`, milestone closed 19/0, epic #98 closed. **Sealed with two
+gaps recorded rather than closed** — say this plainly, it is in the tag message, the journal, the
+demos README and PMP §5.2:
+
+- **O1's P95 is NOT met.** P50 1530 ms passes M5's *provisional* ceiling (1600/2700 ms). The
+  800/1500 design **target is unchanged** and the harness prints it on every run beside the line it
+  grades, so it cannot quietly become whatever was last measured. Pooled flagship runs (n=10) show
+  **1 turn in 10 above 2700 ms** where a P95 allows 1 in 20. Cause is #194.
+- **AC-7's 60-second recorded demo was deferred.**
+
+A 20-turn run to establish a real P95 was **considered and deliberately skipped**: it would measure
+the variance of an already-diagnosed, deferred defect, and the pooled exceedance rate says it would
+fail anyway. If you want the number, `--turns 20` is the command — but know what it buys.
+
+**The robot on the bench works.** Six-turn conversations, barge-in that cuts the speaker without
+losing the session, degrade-and-recover across a real socket drop, **O7 at $8–11/month** against $25.
 
 ## What just shipped (this session)
 
-- **#158 — the turn-end edge (PR #160, `b78d242`).** `LISTENING → THINKING` now driven by our own
-  `audio.speech_ended`, not the model's transcript (a separate, slower pass landing *after* the
-  assistant's audio and sometimes after `turn_ended`). Added `(THINKING, audio.speech_started) →
-  LISTENING`; **deleted `Trigger.CONVERSATION_USER_TRANSCRIBED`** (the event still publishes). Also
-  re-gated barge-in from `state is SPEAKING` to `_playing_item is not None`, and moved the §6.9
-  thinking cue to the falling edge — it had been arming 1.1 s *into* the assistant already speaking,
-  and `CueBank` plays straight to the `Speaker`, so the filler talked over the reply it covered.
-  **Trace replay: 11 illegal transitions → 4.** Repaired a lost `async def` header in
-  `test_conversation.py` that had been running an AC-5 block as the tail of the memory-timeout test.
-- **#159 — the echo (PR #164, `6d9f1d4`).** The uplink is **half-duplex**: nothing crosses the seam
-  from the first playback delta until `[gate] echo_tail_ms` after the reply ends. Barge-in survives
-  on **loudness** — new `EchoFloor` + `rms_dbfs` in the domain. The floor is **adaptive rather than
-  `playback_level × coupling`**, because while the robot speaks what the mic hears *is* the echo, so
-  tracking it *is* the coupling calibration and volume/gain/room cancel out. `_begin_speech` now
-  interrupts **before** capturing the pre-roll, or the gate swallows the leading phonemes of the
-  barge-in it just admitted.
-- **#161 — the overlap (PR #165, `b0dc0fb`).** **Three** table rows, not the two the issue proposed:
-  `(LISTENING, playback_started) → SPEAKING`, `(SPEAKING, speech_ended) → **THINKING**`,
-  `(THINKING, playback_finished) → IDLE`. The `SPEAKING` self-loop the issue suggested reads better
-  row-by-row and leaves SPEAKING **sticky**, so the next reply's `playback_started` has no row and
-  the wedge only moves one step later. Also fixed the half #159 introduced: **barge-in no longer
-  requires a rising edge**, so a user already talking when the reply starts can still interrupt —
-  before this the robot talked over them and stopped hearing them until they gave up and restarted.
-- **#157 — instrumented, not concluded (PR #166, `79eadd2`).** TLS context built once per adapter
-  instead of once per connect (`websockets.connect` had no `ssl=`, so it parsed the CA bundle every
-  time — 49.6 ms cold locally, and a Pi is far slower). Every open now logs
-  `ssl / connect / memory / send / total` and marks **cold vs warm**, permanently rather than behind
-  a flag, so any bench run is also a measurement. New key-free probe `tools/probe_realtime_open.py`
-  runs on laptop *and* Pi and separates Pi cost from API cost without spending anything.
-  ⚠️ **Left OPEN and Blocked** — the number that decides AC-4 has not been taken.
-- **#162 — the DEGRADED recovery arc (PR #167, `3f764aa`).** Recovery is **rising-edge-driven**:
-  `_exit_degraded` has exactly one caller — ConvSvc's own `audio.speech_started` handler, after
-  `open()` succeeds — because #105 shipped without a background reconnect loop. So recovery *always*
-  lands with a turn in flight, and IDLE was a state the robot was never actually in; the whole
-  recovery turn then drove illegal transitions and came out **stateless**. Now
-  `(DEGRADED, system.degraded_exited) → **LISTENING**`, the only target that closes both
-  continuations — the second via `LISTENING + playback_started`, **#161's overlap row doing double
-  duty**. DEGRADED also absorbs the user's own two speech edges as self-loops (the network machine is
-  dead, the local one is not). Full reasoning is in **SDS §3.10.3**; read it there.
-  - ⚠️ The two `audio.playback_*` triggers are deliberately **not** absorbed. The plan called for all
-    four `audio.*`, on the assumption that `interrupt()` drives `playback_finished` in DEGRADED — it
-    does not, it publishes the *fact* and drives no trigger at all. Both playback triggers come only
-    from ConvSvc's pump, which `_on_session_closed` tears down before DEGRADED is reachable, so those
-    two rows would have been **unreachable**.
-- **New issue filed:** **#163** (AEC — removes the margin and un-mutes the uplink; the hard part is
-  not the filter but two ALSA devices with independently drifting clocks).
+**Model:** swapped to the **flagship** `gpt-realtime-2025-08-28` for a **latency** reason (SDS
+§6.10.5 amended — it previously only contemplated a *quality* escalation). `tools/probe_first_token.py`
+measured four snapshots, six trials each, no hardware, in ~2 minutes:
 
+| model | min | median | max |
+|---|---|---|---|
+| `gpt-realtime-mini-2025-12-15` | 430 | **530** | 710 ms |
+| **`gpt-realtime-2025-08-28`** | 214 | **328** | 424 ms |
+| `gpt-realtime-2.1` | 306 | 416 | 572 ms |
+| `gpt-realtime-2.1-mini` | 292 | 464 | **2039** ms |
 
-### Previously (M2/M3 seals)
+I predicted the flagship would be slower. It is not, and amending the budget without running this
+would have amended it around an avoidable 200 ms.
 
-- **M2 sealed — `v0.M2.0` (`a83cc36`)**, plus `c7eeb1a` (the numpy cap + four stale runbook steps).
-  20 hardware contract legs, zero skips, under `PYTHONASYNCIODEBUG=1`.
-- **M3 sealed — `v0.M3.0` (`0f704e3`)**, one docs-only commit. All eight affects on the real
-  ILI9486 via `FramebufferDisplay`; **min 7.8 / median 9.6 / max 11.2 ms** vs a 150 ms budget.
-  Evidence committed as **pixel-exact framebuffer readbacks** — captured by streaming `/dev/fb0` to
-  a laptop browser over an SSH tunnel (~45 fps, server bound to `127.0.0.1` on the Pi), so the tour
-  was watched live *and* captured at once, saving a frame per content-hash change. Pi DoD: 742
-  passed / 10 skipped / 1 failed, ruff + `lint-imports` 4/4 + `mypy --strict` clean, coverage
-  **99.83%**. Also corrected `docs/demos/README.md`, which claimed **`v0.M4.0` was tagged** — it
-  never existed and #91 is still open.
-- **M4 prep** — Silero v5.1.2 installed and signature-verified (`test_vad.py` now 9/9, red through
-  both prior seals); `/etc/robot/config.toml` and the systemd unit un-drifted; software chain
-  measured at **0.43 ms**; AC-2's file-based scorer validated (false-open **0.2%**).
-- **New `deploy/PI_OPERATIONS.md`** — the accumulated Pi failure modes, written so the next session
-  doesn't re-pay for them.
-- ⚠️ **Debt created, not yet fixed:** `uv.lock` is stale against `pyproject.toml`'s numpy cap (the
-  lock still resolves numpy 2.x). CI is green *only* because it uses the lock; `uv lock` collapses
-  numpy to 1.26.4 project-wide and **breaks the 3.13 leg** (no cp313 wheels for 1.26.4). Fix is a
-  marker-conditional cap (`<2` only for `python_version < '3.12'`), relock, verify both legs. Its
-  own change, its own CI run.
-- **#124 (PR #139, squash `f4a2bdb`)** — the **`RealtimeClient` tool-call widening** (§6.6, ADR-004), the
-  transport half of "the model gets tools". Neutral **`ToolCallRequested {call_id, name, arguments}`** added
-  to the `RealtimeEvent` union (all three exhaustive `match`/if-chain sites handle it — `_pump`, capturing
-  `_record`, replay `_build_event` — mypy `assert_never` proves exhaustiveness). **`send_tool_output(call_id,
-  output)`** on the port + all three adapters: `OpenAIRealtimeClient` sends `conversation.item.create`
-  (function_call_output) **then** `response.create` (**AC-3, the §6.6 step-5 trap** — without the second the
-  model silently sits); `ReplayRealtimeClient` records it on an off-port `.tool_outputs` trace; `Capturing`
-  delegates. `_translate` maps `response.output_item.done` (item type `function_call`) off the **finalize
-  frame** — stateless, the streaming arg-`delta` acks ignored like transcript deltas (AC-5). A **`tools=()`
-  ctor param** on `OpenAIRealtimeClient` rides `session.update` (the cached prefix, §6.2.2) — empty until
-  #125 supplies schemas, so **main is untouched**. Committed **`assets/sessions/tool_call/`** fixture (+
-  `tool_call_requested` record); the capture round-trip test parametrizes over it (AC-6).
-  - **`ConversationService._pump` gained a log-and-ignore `ToolCallRequested` case** — a *declared seam*
-    (like the M6 `behavior.trigger_fired` origin), publishing no fact, that **#125 fills with dispatch**.
-    **No new subscription, no `MemoryService`, no `main` change** → the exact-set `test_main.py` assertions
-    were untouched (that collision belongs to #125 — this corrects the prior baton).
-  - **SDS synced in-PR** (port change = SDS change, DoD): §3.9.1 port block (+`send_tool_output`) + the
-    `RealtimeEvent` union prose (+`ToolCallRequested`); §14.3 fixture doc ("Four fixtures ship").
-  - **Gates:** ruff + format clean, mypy --strict numpy-free clean (48 files), lint-imports 4/4, **667
-    passed / 37 skipped on 3.11 + 3.13** under `PYTHONASYNCIODEBUG=1`, coverage **99.83%**. All CI green
-    first run. (Local Windows-3.11 full-suite P8 flake on `test_barge_in_full_chain` — 0.06–0.08 s — is
-    **pre-existing**: worse on clean `main`, unrelated to the tool-call path, passes in isolation and on CI.)
-- **#121 (PR #138, squash `d0de6bc`)** — the **real OpenAI `TextModel` adapter** (`OpenAiTextModel`,
-  `avid/adapters/text_model.py`), filling the last §7.8 branch #122 left as a pragma. **Vendor-sealed**
-  (CLAUDE.md §3, R-10): `openai` imported **lazily inside** `judge_supersession` so the module loads
-  without the extra; the client is built once on first call; **key-free `__repr__`** (AC-6), key injected
-  already-unwrapped. The two network-free pieces live at module scope and are unit-tested offline with
-  canned strings (like `realtime._translate`): `_build_messages` (system judge prompt + numbered `id: text`
-  candidates + the new fact, JSON-forced, `temperature=0`) and `_parse_superseded` (parse the reply,
-  coerce to ints, **intersect with the candidate ids** — a hallucinated id is dropped, order-stable — and
-  `ValueError` on a malformed/wrong-shaped reply). That intersection is the structural enforcement of §7.8
-  "confabulation is a bug".
-  - **AC-9 graceful degradation in `MemoryService._resolve_supersession`** (not the adapter): the judge
-    call is wrapped in `try/except`, logs `"supersession judge failed [<corr>]"` with the turn's
-    correlation id, and returns `()` (store **without** supersession, never lose the write). `store_fact`
-    reordered to compute `corr` before the resolve so it can be threaded in. The adapter *raises* on a
-    genuine failure / unparseable reply; the service catches — the port stays turn-agnostic.
-  - **config:** `AiConfig.text_model = "gpt-4o-mini-2024-07-18"` (pinned §7.8 snapshot, §6.10). **main:**
-    the `_build_text_model` `"openai"` branch is now real (`RuntimeError` if no key, else construct) —
-    covered like `_build_realtime`, not a pragma. **exports:** `OpenAiTextModel` in the adapters package.
-  - **No port / pyproject / mypy-override / §7.8-write-path change** (the `openai` extra + `openai.*→Any`
-    override already existed).
-  - **Contract test** (`tests/contract/test_text_model.py`, new): port-shape block over the `fake` (live)
-    + `openai` (network-gated) legs, a live coffee→tea case, and the offline `_parse_superseded` /
-    `_build_messages` translation tail.
-  - **Gates:** ruff + format clean, mypy --strict numpy-free clean (48 files), lint-imports 4/4, **655
-    passed / 37 skipped on 3.11 + 3.13** under `PYTHONASYNCIODEBUG=1`, coverage **99.8%** (main 100%;
-    services/memory 99% — one pre-existing defensive branch). **AC-7:** observed supersession-write latency
-    **~1.8 ms median** against `FakeTextModel`. recall@5 = 0.54 unchanged (read path untouched). All CI
-    checks green first run.
-- **#122 (PR #137, squash `429292c`)** — **`MemoryService`** (`avid/services/memory.py`), the §9.1.4
-  direct-call surface: `store_fact`/`retrieve`/`top_facts`/`forget`, each durable-before-return then
-  publishing `memory.*`; `subscriptions()` empty; `start()` = §8.5 boot rebuild. **`store_fact` = full
-  §7.8** (embed → `Retriever.similar` → `TextModel.judge_supersession` → `mark_superseded` + drop from
-  index → `repo.add` → publish). Promoted `HybridRetriever` to a **`Retriever` Protocol** and stood up the
-  **`TextModel` port + `FakeTextModel`** (both forced by P1); moved `pack_embedding` → `core/embedding.py`.
-- **#120 (PR #136, squash `fa1e9bb`)** — the M7 **read path**: `HybridRetriever` (FTS5 ∪ cosine over the
-  §8.5 write-through numpy index → #116 `rank_candidates` → `memory.recall_completed`) +
-  `FactRepository.keyword_search`; recall@5 = 0.54. **#118** — `Embedder` + `FakeEmbedder`. **#117** —
-  SQLite schema v1 + `FactRepository`. **#116/#115/#130** — domain scoring / eval set / P8 carve-out.
+**Three real robot bugs, all fixed and proven by neutering:**
+
+- **#186** (`08707d0`) — `_first_audio` was reset only inside `_start_thinking_cue()`, which #171's
+  guard returns *before* reaching. One early reply latched it `True` for the whole session, so the
+  §6.9 deadline armed on no later turn. The robot sat mute through **41 s** of network outage with
+  a 10 s timeout configured. #176's deliberate VAD margin made that the normal case on turn one.
+- **#182** (`e7c50b9`) — the Realtime socket was read *inside* the async generator, i.e. at playback
+  speed, so `response.done` went unread for the length of a reply and every barge-in cancelled a
+  response the server had already finished. An owned reader task now drains at wire speed.
+  ⚠️ The issue's original premise (overlapping responses) was **wrong** — `tools/probe_overlap.py`
+  proved a second `response.create` is always rejected.
+- **#180-family harness fixes** — see below; they are not incidental.
+
+**Five defects in the MEASURING, not the robot** — the day's real lesson, now codified in
+CLAUDE.md §7.1:
+
+- `cut_api.sh` installed a **blackhole route**, which does not close an established TCP connection.
+  60 s "outage", `session_lost 0`, and the reply arrived 41 s later on the same socket. Now
+  `nft ... reject with tcp reset`. **This Pi has no iptables binary at all.**
+- The reporter returned on its first failure, hiding a **passing AC-6** behind an unrelated O1 check.
+- The summary printed `abs(elapsed − played)` while `_diverged` grades one-sided — "27% divergence"
+  on a run that passed.
+- The bargein banner quoted `6.0 dB` when the config had been `3.0` since morning. It now reads the
+  live value from the config file.
+- A **"P95" over 5 samples is the maximum**, not a percentile. Threshold untouched, label fixed.
+
+## Previously
+
+Earlier seals are not re-summarised here — `docs/journal.md` carries one honest line per milestone
+(M0, M2, M3, M5) and `git log --oneline v0.M4.0..v0.M5.0` carries the rest. ⚠️ **M1 and M4 have
+tags but no journal entry**; nobody should invent one after the fact, but the gap is real.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **`config/pi.toml` IN THE REPO CANNOT RUN THE ROBOT.** It still ships M1-vintage all-fake
+  adapters (`microphone`/`speaker`/`vad` = `"fake"`, `realtime = "replay"`). Every HAL bring-up
+  flipped `/etc/robot/config.toml` on the machine and never the committed template. I copied the
+  repo file over the machine's this session and had to restore from a backup — ***the machine is
+  not the repo* applies in BOTH directions**, and `PI_OPERATIONS.md` only warns about one. Verify
+  with `load_config` after any config move, never by eye.
+- ⚠️ **A barge-in margin is only valid at the noise floor it was measured at.**
+  `barge_in_margin_db = 3.0` was calibrated against a −40 dBFS floor. That same evening the room
+  rose ~20 dB (a bare mic recording read −17.7 dBFS RMS with **nobody speaking**) and the robot
+  stopped detecting speech entirely — no session, no reply, no error, and nothing wrong in the
+  code. **Suspect the room before the robot when it goes quiet**, and record the floor beside the
+  margin in any evidence.
+- ⚠️ **A "P95" over fewer than 20 samples is the maximum.** Nearest rank picks `ceil(0.95n)`, which
+  is `n` for every `n < 20`. Grading it against a P95 budget is *stricter* than the criterion — a
+  real P95 tolerates 1 in 20 above the line, a maximum tolerates none. Fix the label, never the
+  threshold.
+- ⚠️ **A blackhole route does not close a TCP connection.** The kernel reports the unreachable route
+  as a *soft* error; TCP retransmits for minutes and resumes when the route returns. Any "survives a
+  network drop" test built on `ip route add blackhole` tests nothing. Use
+  `nft ... reject with tcp reset`, scoped by destination so SSH survives — **and verify the cut
+  actually blocks** (`curl` during the window) before trusting a run built on it.
+- ⚠️ **The issue's stated cause can be wrong, including one you wrote an hour earlier.** #182 was
+  filed as "two responses overlap"; `tools/probe_overlap.py` asked the API and proved a second
+  `response.create` is *always* rejected. The real cause was an async generator reading the socket
+  at playback speed. **Ten minutes with a probe beats an afternoon of inference** — and the probes
+  (`probe_overlap`, `probe_first_token`, `probe_barge_in_frames`) need no mic, no speaker and no
+  human, so there is no excuse.
+- ⚠️ **A single-turn test cannot catch a latch that sticks on turn two.** Every #171 test drove one
+  turn, where the first turn arms correctly even with #186's bug present. **If state persists across
+  turns, the assertion belongs on the second one.**
+- ⚠️ **`git checkout -- <path>` after a neuter destroys the fix along with the neuter.** It happened
+  again this session, on the same file, minutes after the commit. Re-apply from the Edit history, or
+  neuter with an edit you can reverse by hand.
 
 - ⚠️ **THE BATON CAN BE WRONG. VERIFY ISSUE STATE BEFORE PLANNING.** A whole planning cycle went
   into #125 on the strength of a memory file saying "M7 8/15, #125 next" — #125 had merged four days
@@ -525,5 +374,8 @@ anything unsatisfiable on the issue first — four ACs have already been renegot
   if an interface/event/schema changed. The 3.11 leg swaps `.venv`
   (`uv run --python 3.11 pytest`) — restore with `uv sync`, confirm `python -V` = 3.13.
 - **`docs/handoff.md` is normally updated on its own, not inside a feature PR's diff.**
+- **Settle contested AC wordings BEFORE the run, on the issue, in writing.** M5 did this for AC-4
+  and it is the only reason the amended O1 ceiling reads as a decision rather than a rationalisation.
+  A criterion renegotiated *after* seeing the number it failed is not a criterion.
 - Board IDs, dev-env commands, and deeper per-issue detail live in the memory batons
   ([[avid-next-session-handoff]], [[avid-issue-tracker-state]], [[avid-project-board-ids]]).
