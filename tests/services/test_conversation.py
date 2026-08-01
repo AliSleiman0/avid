@@ -941,6 +941,8 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         sample_rate=16000,
         channels=1,
         silence_hold_ms=200,
+        barge_in_margin_db=6.0,
+        echo_tail_ms=150,
         loopback=False,
     )
     cues = CueBank(speaker=speaker, asset_dir=_CUES)

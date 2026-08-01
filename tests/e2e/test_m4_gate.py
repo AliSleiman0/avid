@@ -129,6 +129,11 @@ async def _drive_one_turn(speaker: Speaker) -> _Collector:
         sample_rate=_SAMPLE_RATE,
         channels=_CHANNELS,
         silence_hold_ms=_SILENCE_HOLD_MS,
+        # Stated rather than defaulted (AVID-180). M4 has no assistant playback to echo-gate at
+        # all, but a harness that omits a knob reports whatever the default happens to be, and
+        # that is how the margin went unmeasured for four bench runs.
+        barge_in_margin_db=6.0,
+        echo_tail_ms=150,
         # The M4 gate proves the transport loopback (no AI client), so echo mode (#103).
         loopback=True,
     )

@@ -563,6 +563,12 @@ async def _run_conversation(
         sample_rate=config.microphone.sample_rate,
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
+        # ⚠️ From config, not the defaults (AVID-180). This harness omitted both until the bench
+        # tried to tune the margin: every echo-gate line it printed said "margin 6.0 dB" whatever
+        # /etc/robot/config.toml held, so #106's AC-3 — "the margin that achieves this is measured
+        # and recorded" — was reporting a number the operator could not change.
+        barge_in_margin_db=config.gate.barge_in_margin_db,
+        echo_tail_ms=config.gate.echo_tail_ms,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an echo (#103).
         loopback=False,
     )

@@ -167,8 +167,14 @@ class AudioService:
         sample_rate: int,
         channels: int,
         silence_hold_ms: int,
-        barge_in_margin_db: float = 6.0,
-        echo_tail_ms: int = 150,
+        # Required, not defaulted (AVID-180). These carried defaults of 6.0/150 until the bench
+        # tried to *tune* the margin and found the gate harness had never passed them: the
+        # defaults matched the shipped config, so the drop was invisible until the moment the
+        # value was supposed to change. Every echo-gate line ever recorded said "margin 6.0 dB"
+        # whatever the config held. Required turns each omission into a mypy error at the call
+        # site instead of a wrong number in a gate report.
+        barge_in_margin_db: float,
+        echo_tail_ms: int,
         loopback: bool = False,
     ) -> None:
         self._bus = bus

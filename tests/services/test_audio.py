@@ -1139,6 +1139,31 @@ async def test_the_echo_gate_reports_its_calibration_on_every_reply(
     assert "margin 6.0 dB" in caplog.text
 
 
+async def test_the_echo_gate_reports_the_CONFIGURED_margin_not_the_default(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-180: the test above passes whether or not the value reaches the service.
+
+    It asserts ``margin 6.0 dB`` — which is also what the parameter *defaulted* to, so it could
+    never tell a wired knob from an ignored one. That gap was not theoretical: ``conversation_pi``
+    omitted ``barge_in_margin_db`` entirely, so **every echo-gate line ever recorded on the bench
+    said 6.0 dB whatever ``/etc/robot/config.toml`` held** — and #106's AC-3, whose settled wording
+    is *"the margin that achieves this is measured and recorded"*, was reporting a number the
+    operator could not change.
+
+    A deliberately non-default value is the whole point: it is the difference between asserting
+    the log line exists and asserting it is *true*."""
+    with caplog.at_level(logging.INFO, logger="avid.services.audio"):
+        async with _rig(vad_script=[False], barge_in_margin_db=3.5) as rig:
+            rig.service._turn_id = uuid4()
+            await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+            rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+            await rig.service.end_response()
+
+    assert "margin 3.5 dB" in caplog.text
+    assert "margin 6.0 dB" not in caplog.text
+
+
 async def test_a_user_already_talking_when_the_reply_starts_can_still_barge_in() -> (
     None
 ):
