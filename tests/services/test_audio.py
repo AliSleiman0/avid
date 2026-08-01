@@ -465,21 +465,32 @@ class _ParkingSpeaker(FakeSpeaker):
     anyway (SDS §14.3).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, park_first: int = 1) -> None:
         super().__init__()
         # Set once play() has parked, so the test knows the window is open without sleeping.
         self.entered = asyncio.Event()
         # The test sets this to let the parked play() finish.
         self.release = asyncio.Event()
+        # Only the first *park_first* writes park; later ones run straight through, so a test can
+        # open a second episode while the first write is still suspended.
+        self._park_first = park_first
+        self._calls = 0
         self._stopped_while_parked = False
 
     async def play(self, chunk: AudioChunk) -> int:
         submitted = await super().play(chunk)
+        self._calls += 1
+        if self._calls > self._park_first:
+            return submitted
         self.entered.set()
         await self.release.wait()
         if self._stopped_while_parked:
             self._stopped_while_parked = False
-            return 0  # the handle closed mid-write: ALSA took nothing more
+            # A partial write, which is what the real device reports: ``AlsaSpeaker._write_all``
+            # breaks out of its period loop when ``stop()`` sets the flag and returns the ms it
+            # had already handed over. Returning 0 here would be convenient and dishonest — it
+            # would hide the ms-leak half of AVID-174 rather than expose it.
+            return submitted // 2
         return submitted
 
     async def stop(self) -> None:
@@ -540,7 +551,11 @@ async def test_ms_from_an_interrupted_write_never_leak_into_the_next_reply() -> 
     A write that outlives its episode still runs ``self._playing_ms += accepted_ms`` when it
     resumes. If the *next* reply has already opened by then, those ms are added to a turn that
     never played them — and ``played_ms`` is exactly what ``interrupt`` returns as the model's
-    ``audio_end_ms`` (§6.2.4). The model would be told the user heard audio from a previous turn."""
+    ``audio_end_ms`` (§6.2.4). The model would be told the user heard audio from a previous turn.
+
+    This is the test that pins the **epoch check specifically**: the crash in T1 is prevented by
+    capturing the correlation id alone, so without this one a fix could drop the epoch entirely
+    and still look green."""
     speaker = _ParkingSpeaker()
     async with _rig(
         vad_script=[False],
@@ -555,17 +570,20 @@ async def test_ms_from_an_interrupted_write_never_leak_into_the_next_reply() -> 
         try:
             await speaker.entered.wait()
             await rig.service._begin_speech()  # barge-in ends episode 1
-            # The next reply opens while the first write is still parked.
-            speaker.entered.clear()
+            # Episode 2 opens and plays a full 20 ms while write #1 is still suspended.
+            rig.service._turn_id = uuid4()
+            await rig.service.play(_out_chunk(ms=20, fill=2), item_id="item_1")
+            assert rig.service._playing_ms == 20
             speaker.release.set()
-            await playing
+            await playing  # write #1 resumes into a world that moved on
         finally:
             speaker.release.set()
             if not playing.done():
                 playing.cancel()
 
-        assert rig.service._playing_ms == 0, (
-            "the interrupted write wrote its ms back after its episode had ended"
+        assert rig.service._playing_ms == 20, (
+            "the interrupted write added its ms to the NEXT reply's total, so the model would "
+            "be told the user heard audio from a turn that had already been cut off"
         )
 
 
