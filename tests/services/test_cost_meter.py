@@ -171,6 +171,27 @@ async def test_no_turns_projects_zero(rig: Rig) -> None:
     assert rig.meter.cached_ratio == 0.0
 
 
+def test_the_shipped_model_is_priced_from_an_exact_row_not_the_family_guess() -> None:
+    """Whatever ``config/pi.toml`` actually runs must have its own rate row (SDS §6.10.5).
+
+    The family fallback below exists so an unlisted snapshot *roll* still meters something rather
+    than going silent on the number O7 is graded by. It is a safety net, not the resting state for
+    the model we ship: a guess that happens to be right is indistinguishable from one that is not,
+    and O7 is a milestone criterion. Reading the shipped name out of the config file is the point —
+    a future model swap that forgets its rate row fails here rather than on an invoice."""
+    import tomllib
+    from pathlib import Path
+
+    from avid.services.cost_meter import _RATES
+
+    pi_toml = Path(__file__).resolve().parents[2] / "config" / "pi.toml"
+    shipped = tomllib.loads(pi_toml.read_text(encoding="utf-8"))["ai"]["model"]
+    assert shipped in _RATES, (
+        f"config/pi.toml ships {shipped!r} with no exact rate row — O7 would be metered by the "
+        f"mini-vs-flagship family guess. Add it to _RATES with its §6.10.1 published rates."
+    )
+
+
 def test_family_fallback_prices_an_unlisted_mini_snapshot() -> None:
     """An unlisted ``mini`` snapshot still meters via the family fallback, not the flagship."""
     bus = AsyncioEventBus()

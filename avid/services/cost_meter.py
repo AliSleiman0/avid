@@ -61,6 +61,11 @@ _FLAGSHIP_RATES = _Rates(cached_input=0.40, uncached_input=32.00, output=64.00)
 # number the O7 gate watches — the model pin churns fast (SDS §6.10 volatility).
 _RATES: dict[str, _Rates] = {
     "gpt-realtime-mini-2025-12-15": _MINI_RATES,
+    # The flagship the Pi ships since 2026-08-01 (§6.10.5, a LATENCY escalation — see there).
+    # Pinned explicitly rather than left to the family heuristic below: the heuristic exists so an
+    # unlisted snapshot roll still meters *something*, not as the resting state for the model we
+    # actually run. O7 is a graded criterion and it should read an exact rate row, not a guess.
+    "gpt-realtime-2025-08-28": _FLAGSHIP_RATES,
 }
 
 # The §6.10.3 usage model the monthly projection extrapolates from: ~20 turns/day.
