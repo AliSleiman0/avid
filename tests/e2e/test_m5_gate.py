@@ -814,16 +814,44 @@ def test_a_replay_run_cannot_claim_a_live_result() -> None:
     assert _verdict(demo, turns, live=False) == 1
 
 
-def test_a_non_positive_latency_fails_rather_than_flattering_the_histogram() -> None:
-    """A reply that precedes ``speech_ended`` is not a fast robot — it is a broken pairing, and
-    averaging it in would drag P50 down and let a slow robot pass."""
+def test_a_non_positive_latency_is_excluded_rather_than_flattering_the_histogram() -> (
+    None
+):
+    """A reply that precedes ``speech_ended`` is not a fast robot — it is a broken pairing. It is
+    dropped from the histogram (never averaged in, which would drag P50 down and let a slow robot
+    pass) and counted out loud, because an unpairable turn is a fact about the run, not a verdict
+    on it. A run whose turns are *all* unpairable has measured nothing and still fails."""
     demo = _load_conversation_pi()
     fast = demo._Turn(latency_ms=400.0, played_ms=2000, elapsed_ms=2000.0)
     inverted = demo._Turn(latency_ms=-560.0, played_ms=2000, elapsed_ms=2000.0)
 
     assert _verdict(demo, [fast]) == 0
-    assert _verdict(demo, [inverted]) == 1
-    assert _verdict(demo, [fast, inverted, fast]) == 1
+    assert _verdict(demo, [fast, inverted, fast]) == 0  # excluded, not fatal
+    assert _verdict(demo, [inverted]) == 1  # nothing left to grade
+
+
+def test_every_criterion_reports_before_any_verdict_is_decided(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A gate that hides a PASSING criterion behind an unrelated failure is the sibling of one
+    that can pass on silence (AVID-182).
+
+    A bench run demonstrably satisfied AC-6 — the robot lost the session, degraded, spoke a cue
+    and came back — and printed *none* of it, because an O1 check upstream returned first. The
+    operator was left to re-run a five-minute live session for a number the run had already
+    measured. Every check now records its own outcome and the exit code is decided at the end,
+    so one failure costs one line, not the report."""
+    demo = _load_conversation_pi()
+    slow = demo._Turn(latency_ms=9_000.0, played_ms=2000, elapsed_ms=2000.0)
+    arc = demo._Recovery(lost=1, entered=1, exited=1, downtime_s=3.0)
+
+    assert (
+        _verdict(demo, [slow], recovery=arc) == 1
+    )  # the slow turn still fails the run
+    out = capsys.readouterr().out
+    assert "P50" in out  # the criterion that failed said so
+    assert "AC-6 session_lost 1" in out  # ...and the one that PASSED was still reported
+    assert "FAILED: O1-p50" in out  # one verdict, at the end, naming what failed
 
 
 def test_recovery_is_only_gated_when_asked_and_then_both_halves_must_happen() -> None:
