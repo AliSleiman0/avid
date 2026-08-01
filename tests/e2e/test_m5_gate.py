@@ -927,6 +927,36 @@ def test_the_design_target_is_printed_even_when_the_ceiling_is_what_grades(
     assert "AVID-194" in out  # ...and where the route back is written down
 
 
+def test_a_p95_over_too_few_samples_is_named_as_the_worst_turn(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nearest-rank P95 over n < 20 is the maximum, and the report must say so.
+
+    Rank ceil(0.95n) equals n for every n below 20, so a six-turn run reports its **worst turn**
+    under a percentile's name. Grading that against a P95 budget is *stricter* than PMP §5.2 asks
+    — a real P95 tolerates 1 turn in 20 above the line, a maximum tolerates none. The 2026-08-01
+    AC-3 run failed on exactly one 5532 ms turn out of six.
+
+    The label is what is fixed, never the threshold: it still fails. A stricter test wearing a
+    percentile's name misleads both ways — it can fail a robot that meets the criterion, and it
+    can pass one on a sample too small to have measured anything."""
+    demo = _load_conversation_pi()
+    turns = [
+        demo._Turn(latency_ms=v, played_ms=2000, elapsed_ms=2000.0)
+        for v in (400.0, 500.0)
+    ]
+
+    assert _verdict(demo, turns) == 0  # the warning is not itself a failure
+    small = capsys.readouterr().out
+    assert "WORST TURN, not a 95th percentile" in small
+    assert "stricter than PMP" in small
+
+    # ...and it disappears once the sample can actually hold a 95th percentile.
+    many = [demo._Turn(latency_ms=400.0, played_ms=2000, elapsed_ms=2000.0)] * 20
+    assert _verdict(demo, many) == 0
+    assert "WORST TURN" not in capsys.readouterr().out
+
+
 def test_a_disarmed_playback_check_says_so_out_loud(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
