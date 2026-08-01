@@ -71,6 +71,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from avid.core.envelope import envelope
@@ -108,6 +109,21 @@ _SOURCE = "AudioService"
 # the worst case is a loud, finite drop. ≈10 s at the 20 ms ``[microphone] chunk_ms`` the configs
 # ship — long enough that the ~200 ms session-open backlog never comes near it.
 _MIC_QUEUE_FRAMES = 500
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Episode:
+    """A closed playback episode, taken by value at the moment it ended (AVID-174).
+
+    Service-local, not a domain value — it never crosses a port or the bus, so it stays here.
+    Its whole purpose is to be read *after* an ``await``: the fields were sampled inside
+    :meth:`AudioService._take_playback`'s synchronous section, so a caller publishing from a
+    snapshot cannot observe the half-cleared state a concurrent close would otherwise expose.
+    """
+
+    item_id: str
+    played_ms: int
+    corr: UUID
 
 
 class AudioService:
@@ -203,6 +219,11 @@ class AudioService:
         self._playing_item: str | None = None
         self._playing_ms = 0
         self._playing_corr: UUID | None = None
+        # Bumped on every episode close (:meth:`_take_playback`). ``play`` captures it before
+        # awaiting the speaker and re-checks after: a write that outlives its episode must not
+        # write back into the next one (AVID-174). The async twin of ``AlsaSpeaker``'s ``_stopped``
+        # flag — the barge-in never waits for the writer, the writer notices it lost.
+        self._playback_epoch = 0
 
         # The owned mic-consume task (SDS §9.2): None until start(), cleared by stop().
         self._task: asyncio.Task[None] | None = None
@@ -271,6 +292,7 @@ class AudioService:
         that recomputed this from ``chunk.pcm`` would publish ``audio.playback_finished`` for
         audio the room never heard (AVID-91). A shortfall is logged against the turn.
         """
+        epoch = self._playback_epoch
         if self._playing_item is None:
             self._playing_item = item_id
             self._playing_ms = 0
@@ -285,18 +307,40 @@ class AudioService:
             await self._state.transition(
                 Trigger.AUDIO_PLAYBACK_STARTED, correlation_id=corr
             )
+            if self._playback_epoch != epoch:
+                return  # a barge-in ended the episode while we were announcing it
+        else:
+            corr = self._playback_corr()
         submitted_ms = pcm_duration_ms(
             chunk.pcm, sample_rate=chunk.sample_rate, channels=chunk.channels
         )
         accepted_ms = await self._speaker.play(chunk)
+        if self._playback_epoch != epoch:
+            # A barge-in took the episode while this write was in flight (AVID-174). Everything
+            # below belongs to a playback that no longer exists: `_playing_ms` would leak these ms
+            # into the *next* reply's total — and so into the `audio_end_ms` the model is told the
+            # user heard — and the shortfall branch would dereference the cleared episode, which is
+            # the AssertionError that killed the pump task on the bench.
+            _log.debug(
+                "barge-in truncated the write: %d of %d ms for item %s [correlation_id=%s]",
+                accepted_ms,
+                submitted_ms,
+                item_id,
+                corr,
+            )
+            return
         self._playing_ms += accepted_ms
         if accepted_ms < submitted_ms:
+            # Still a live episode, so a shortfall here really is the device dropping audio
+            # (AVID-91) rather than a barge-in cutting the write, and stays a WARNING. The one
+            # thing this split gives up is spotting a genuine device drop that coincides exactly
+            # with a barge-in; a permanent WARNING on every interruption is the worse trade.
             _log.warning(
                 "speaker accepted %d of %d ms for item %s [correlation_id=%s]",
                 accepted_ms,
                 submitted_ms,
                 item_id,
-                self._playback_corr(),
+                corr,
             )
 
     async def end_response(self) -> None:
@@ -305,13 +349,19 @@ class AudioService:
         Publishes ``audio.playback_finished`` (``truncated=False``) with the ms actually emitted
         and drives ``SPEAKING → IDLE``. A no-op when nothing is playing (a turn with no audio).
         Distinct from :meth:`interrupt`, whose barge-in ends in LISTENING, not IDLE."""
-        if self._playing_item is None:
+        episode = self._take_playback()
+        if episode is None:
             return
-        await self._finish_playback(truncated=False)
+        # The tail is armed in the same synchronous breath as the close, so there is no window in
+        # which the uplink is open over a still-draining DAC, and it can never be applied to a
+        # *later* episode a concurrent play() opened meanwhile (AVID-174). A barge-in that took
+        # the episode first returns above and still gets no tail — §6.2.4's rule, now true under
+        # a race as well as without one.
+        self._uplink_shut_until_ns = self._clock.monotonic_ns() + self._echo_tail_ns
+        await self._publish_finished(episode, truncated=False)
         await self._state.transition(
-            Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=self._playback_corr()
+            Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=episode.corr
         )
-        self._clear_playback()
         # The reply is over as far as the model is concerned, but not as far as the room is: the
         # DAC is still clocking out up to a playback-buffer depth of it (§6.2.4). Hold the uplink
         # shut over that tail, or its last ~100 ms goes to the model as user audio (AVID-159).
@@ -331,42 +381,71 @@ class AudioService:
         ``SPEAKING → LISTENING`` move is the ``speech_started`` origin's (see :meth:`_begin_speech`).
         """
         await self._speaker.stop()
-        played_ms = self._playing_ms
-        if self._playing_item is not None:
-            await self._finish_playback(truncated=True)
-            self._clear_playback()
-        return played_ms
+        episode = self._take_playback()
+        if episode is None:
+            return 0
+        await self._publish_finished(episode, truncated=True)
+        return episode.played_ms
 
-    async def _finish_playback(self, *, truncated: bool) -> None:
-        """Publish ``audio.playback_finished`` for the in-flight item (caller clears state)."""
-        assert self._playing_item is not None  # guarded by every caller
+    async def _publish_finished(self, episode: _Episode, *, truncated: bool) -> None:
+        """Publish ``audio.playback_finished`` from a **snapshot**, never from ``self``.
+
+        Taking the episode by value is what makes this safe to await: the fields it reports were
+        read inside :meth:`_take_playback`'s synchronous section, so nothing here can observe a
+        half-cleared episode or race a concurrent close (AVID-174)."""
         await self._bus.publish(
             AudioPlaybackFinished(
                 **envelope(
                     clock=self._clock,
-                    correlation_id=self._playback_corr(),
+                    correlation_id=episode.corr,
                     source=_SOURCE,
                 ),
-                item_id=self._playing_item,
-                played_ms=self._playing_ms,
+                item_id=episode.item_id,
+                played_ms=episode.played_ms,
                 truncated=truncated,
             )
         )
 
     def _playback_corr(self) -> UUID:
-        """The correlation_id of the in-flight playback (the turn that opened it)."""
+        """The correlation_id of the in-flight playback (the turn that opened it).
+
+        Only ever called **synchronously at open**, where a missing ``_turn_id`` is a real bug
+        (playback with no turn) rather than a race. Since AVID-174 nothing calls this after an
+        await — the callers carry a captured ``corr`` or an :class:`_Episode` instead."""
         assert self._playing_corr is not None  # set when playback opened
         return self._playing_corr
 
-    def _clear_playback(self) -> None:
-        """Reset the playback lifecycle for the next response.
+    def _take_playback(self) -> _Episode | None:
+        """Close the in-flight episode and hand its snapshot to the caller. ``None`` if none.
 
-        The single point where a playback episode ends — both a normal ``end_response`` and a
-        barge-in ``interrupt`` land here — so it is where the echo gate reports what it saw."""
-        self._report_echo_gate()
+        **Synchronous by design, and that is the whole mechanism** (AVID-174). In single-threaded
+        asyncio a run of code containing no ``await`` *is* a critical section — the cheapest and
+        strongest lock available — so exactly one caller can ever take a given episode. That is
+        what makes ``end_response`` and ``interrupt`` mutually exclusive finalizers: without it
+        both could pass their ``_playing_item is not None`` guard and publish a second
+        ``audio.playback_finished`` for the same item, which would have ConversationService send
+        ``truncate`` + ``cancel`` for a response that ended normally, and would run the echo-gate
+        report twice — silently halving the suppression counts #106's AC-3 is calibrated from.
+
+        A lock was the obvious alternative and is the wrong one here: to help at all it would have
+        to span ``await speaker.play()`` (a 100-200 ms delta write), adding a full write of
+        barge-in latency against §6.2.4's "immediate" — and its contender would be the *mic loop*,
+        so it would park frame consumption behind the speaker and re-create the starvation
+        AVID-153/159 just fixed.
+        """
+        if self._playing_item is None:
+            return None
+        episode = _Episode(
+            item_id=self._playing_item,
+            played_ms=self._playing_ms,
+            corr=self._playback_corr(),
+        )
+        self._report_echo_gate(episode.corr)
         self._playing_item = None
         self._playing_ms = 0
         self._playing_corr = None
+        self._playback_epoch += 1
+        return episode
 
     # --- the mic loop --------------------------------------------------------------------
 
@@ -472,8 +551,11 @@ class AudioService:
         self._loudest_suppressed_dbfs = max(self._loudest_suppressed_dbfs, frame_dbfs)
         return False
 
-    def _report_echo_gate(self) -> None:
+    def _report_echo_gate(self, corr: UUID) -> None:
         """One line per reply: the calibration datum #106's AC-3 requires (AVID-159).
+
+        *corr* is passed in rather than read back off ``self`` so the call ordering inside
+        :meth:`_take_playback` stops being load-bearing (AVID-174).
 
         Emitted on **every** playback episode, so every bench run is a calibration run and there
         is no separate mode anyone has to remember to enable. ``floor`` is what the mic heard
@@ -492,7 +574,7 @@ class AudioService:
             self._loudest_suppressed_dbfs,
             self._suppressed_frames,
             self._barge_in_margin_db,
-            self._playing_corr,
+            corr,
         )
         self._suppressed_frames = 0
         self._loudest_suppressed_dbfs = SILENCE_DBFS
