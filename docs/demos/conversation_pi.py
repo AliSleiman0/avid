@@ -140,7 +140,9 @@ _PLAYBACK_REL_TOL = 0.15
 class _Turn:
     """One completed turn: the graded O1 metric plus the evidence that audio really played."""
 
-    latency_ms: float  # playback_started − speech_ended (the number O1 grades)
+    latency_ms: (
+        float  # first audio − the user's LAST SPEECH FRAME (the number O1 grades)
+    )
     played_ms: int  # what the speaker reported accepting (AVID-91)
     elapsed_ms: float  # playback_finished − playback_started, wall
 
@@ -168,7 +170,14 @@ class _ConversationCollector:
     ``playback_finished`` fires the awaitable, so the driver never sleeps-and-hopes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, silence_hold_ms: int) -> None:
+        # O1 is measured from the user's last speech frame, NOT from audio.speech_ended
+        # (AVID-176). The falling edge fires `silence_hold_ms` *after* they stop talking, so
+        # pairing against it would make O1 shrink by exactly that much whenever the hold is
+        # tuned — a latency "win" produced by a config edit. Subtracting the hold back off
+        # gives "last word → first audio", which is what the user experiences, is invariant
+        # under the hold, and stays comparable with every figure measured before this change.
+        self._silence_hold_ns = silence_hold_ms * _NS_PER_MS
         self._ended_ns: dict[UUID, int] = {}
         self._started_ns: dict[UUID, int] = {}
         self.turns: list[_Turn] = []
@@ -201,7 +210,7 @@ class _ConversationCollector:
             self.turns.append(
                 _Turn(
                     # monotonic, never timestamp_ms (SDS §9.1.1).
-                    latency_ms=(started - ended) / _NS_PER_MS,
+                    latency_ms=(started - (ended - self._silence_hold_ns)) / _NS_PER_MS,
                     played_ms=played,
                     elapsed_ms=(event.monotonic_ns - started) / _NS_PER_MS,
                 )
@@ -402,9 +411,9 @@ def _report_conversation(
     if nonpositive:
         print(
             f"FAIL: {len(nonpositive)} turn(s) reported a non-positive O1 latency: "
-            f"{nonpositive} — first audio preceded speech_ended, so this pairing is not the\n"
-            f"      O1 metric. Check [gate] silence_hold_ms against [ai.turn_detection] "
-            f"silence_duration_ms."
+            f"{nonpositive} — first audio preceded the user's last speech frame, which no\n"
+            f"      network can do, so this pairing is not the O1 metric. Check that [gate]\n"
+            f"      silence_hold_ms matches the value AudioService was actually built with."
         )
         return 1
     p50 = _percentile(samples, 50.0)
@@ -576,7 +585,7 @@ async def _run_conversation(
     # the running robot about what a turn costs).
     cost_meter = CostMeterService(bus=bus, model=config.ai.model)
 
-    collector = _ConversationCollector()
+    collector = _ConversationCollector(silence_hold_ms=config.gate.silence_hold_ms)
     # Register before the bus starts — subscription is static-at-composition (P3).
     for sub in (*conversation.subscriptions(), *cost_meter.subscriptions()):
         bus.subscribe(

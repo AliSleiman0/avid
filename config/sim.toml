@@ -37,7 +37,11 @@ session_dir = "assets/sessions/two_turn"   # recorded session played back determ
 vad_model            = "silero_v5"
 threshold            = 0.5       # Silero speech-probability cutoff
 ring_buffer_ms       = 300       # pre-roll replayed at a turn's start
-silence_hold_ms      = 500       # silence run before a turn is declared over (debounce)
+silence_hold_ms      = 900       # silence run before a turn is declared over (debounce).
+# MUST clear [ai.turn_detection] silence_duration_ms by >= 200 ms, asserted in Config: the mic
+# stream stops exactly here, so without a gap the server VAD is still counting when the audio
+# ends and the turn never commits. Measured 2026-08-01 -- 500/500: 2 replies in 13 turns;
+# 900/900: 1 in 8; 900/500: 10 in 14. Equal is fatal in both directions (AVID-176).
 session_idle_close_s = 30
 # The echo gate (§6.2.4). The uplink is shut while the robot speaks; a rising edge inside that
 # window is the USER only if it clears the running echo floor by this margin. PROVISIONAL —

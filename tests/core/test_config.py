@@ -32,7 +32,7 @@ def test_audio_loop_config_loads_from_sim_toml() -> None:
     config = load_config(_SIM_TOML)
     assert config.adapters.vad == "fake"
     assert config.gate.threshold == 0.5
-    assert config.gate.silence_hold_ms == 500
+    assert config.gate.silence_hold_ms == 900
     assert config.gate.ring_buffer_ms == 300  # reused by AudioService's pre-roll
     assert config.cues.dir == "assets/cues"
 
@@ -42,7 +42,7 @@ def test_audio_loop_config_defaults_on_bare_model() -> None:
     config = Config()
     assert config.adapters.vad == "fake"
     assert config.gate.threshold == 0.5
-    assert config.gate.silence_hold_ms == 500
+    assert config.gate.silence_hold_ms == 900
     assert config.cues.dir == "assets/cues"
 
 
@@ -161,10 +161,21 @@ def test_the_shipped_think_timeout_is_the_sds_value_and_clears_the_idle_close() 
         assert config.gate.think_timeout_s < config.gate.session_idle_close_s
 
 
-def test_a_local_hold_at_or_above_the_server_vad_is_accepted() -> None:
-    """Equal is the shipped case (both 500 ms in ``config/pi.toml``): the two VADs see the same
-    silence and close together, which is the whole point of streaming the trailing frames."""
-    for hold in (500, 750):
+def test_a_local_hold_must_clear_the_server_vad_by_a_margin() -> None:
+    """AVID-176: **equal is fatal**, and this test used to assert the opposite.
+
+    Its previous docstring read *"equal is the shipped case … the two VADs see the same silence
+    and close together, which is the whole point of streaming the trailing frames"*. The bench
+    measured otherwise, in both directions:
+
+        500 / 500  ->  2 transcripts,  2 replies in 13 turns
+        900 / 900  ->  1 transcript,   1 reply  in 8 turns
+        900 / 500  ->  8 transcripts, 10 replies in 14 turns
+
+    Equal failing on *both* sides is what identifies a race rather than a value being too short:
+    the local gate stops streaming exactly at its hold, so at parity the server is still counting
+    when the audio ends and the turn is never committed. The robot listens and never answers."""
+    for hold in (700, 900, 1000):
         config = Config.model_validate(
             {
                 "gate": {"silence_hold_ms": hold},
@@ -172,3 +183,27 @@ def test_a_local_hold_at_or_above_the_server_vad_is_accepted() -> None:
             }
         )
         assert config.gate.silence_hold_ms == hold
+
+    for too_close in (500, 600, 699):
+        with pytest.raises(ValidationError, match="never commits"):
+            Config.model_validate(
+                {
+                    "gate": {"silence_hold_ms": too_close},
+                    "ai": {"turn_detection": {"silence_duration_ms": 500}},
+                }
+            )
+
+
+def test_both_shipped_profiles_carry_the_measured_margin() -> None:
+    """The key is set **explicitly** in both TOMLs, not left to the default.
+
+    ``deploy/PI_OPERATIONS.md``'s rule is that a key missing from ``/etc/robot/config.toml``
+    falls back to the schema default silently, so the value that governs whether the robot
+    answers at all should be visible in the file an operator reads. 400 ms is what was measured;
+    the validator floor is deliberately lower so a future bench can tune it without a code edit."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        config = load_config(profile)
+        margin = (
+            config.gate.silence_hold_ms - config.ai.turn_detection.silence_duration_ms
+        )
+        assert margin >= 400, f"{profile.name} ships a margin of only {margin} ms"
