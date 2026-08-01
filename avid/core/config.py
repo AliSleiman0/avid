@@ -266,13 +266,17 @@ class GateConfig(_Section):
     # echo floor by this margin. A very large value is full half-duplex — barge-in off, no code
     # change — which is the documented fallback if the levels do not separate on hardware.
     #
-    # PROVISIONAL. The echo-to-speech separation on this rig has never been measured: §6.3
-    # records the mic's own noise floor at -21 dBFS and a speech capture at rms -16.1 dBFS, and
-    # M4 called amp->mic coupling "weak" without quantifying it. 6.0 errs toward staying
-    # interruptible — too low and the robot occasionally cuts itself off, which is loud, logged
-    # and recoverable; too high and it goes silently deaf while speaking, which looks exactly
-    # like working. #106 AC-3 records the measured value.
-    barge_in_margin_db: float = Field(default=6.0, ge=0.0)
+    # MEASURED at the #106 AC-3 bench, 2026-08-01 — it was a provisional 6.0 until then, and 6.0
+    # was too high: it gated out real speech peaking at -7.0 dBFS. At 3.0, five of six replies
+    # suppressed nothing and the sixth correctly rejected a frame 4.2 dB above the floor. Full
+    # rig, table and caveats in config/pi.toml beside the same key.
+    #
+    # The default moves with the shipped value on purpose: deploy/PI_OPERATIONS.md's rule is that
+    # a key missing from /etc/robot/config.toml falls back here *silently*, so the fallback must
+    # be the best-known number rather than a superseded guess. A very large value is still full
+    # half-duplex — barge-in off, no code change — the documented fallback if the levels ever
+    # stop separating on hardware.
+    barge_in_margin_db: float = Field(default=3.0, ge=0.0)
     # How long the uplink stays shut after a reply ends *normally*: the DAC is still draining up
     # to a playback-buffer depth (~107 ms at 24 kHz, §6.2.4) after ``end_response`` clears the
     # in-flight item, and those frames are still the robot. Not applied after a barge-in —

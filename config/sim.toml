@@ -44,9 +44,11 @@ silence_hold_ms      = 900       # silence run before a turn is declared over (d
 # 900/900: 1 in 8; 900/500: 10 in 14. Equal is fatal in both directions (AVID-176).
 session_idle_close_s = 30
 # The echo gate (§6.2.4). The uplink is shut while the robot speaks; a rising edge inside that
-# window is the USER only if it clears the running echo floor by this margin. PROVISIONAL —
-# #106 AC-3 records the measured value. Very large = full half-duplex (barge-in off).
-barge_in_margin_db   = 6.0
+# window is the USER only if it clears the running echo floor by this margin. Very large = full
+# half-duplex (barge-in off). MEASURED at the #106 AC-3 bench, 2026-08-01 — 6.0 was a provisional
+# guess and gated out real speech; the rig, the table and the caveats live beside the same key in
+# config/pi.toml, which is where the measurement was actually taken.
+barge_in_margin_db   = 3.0
 echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
 # §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
 # MUST be < session_idle_close_s, asserted in Config — the idle close cancels this timer and
