@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import ssl as ssl_module
 from collections.abc import AsyncIterator
@@ -314,9 +315,19 @@ def test_translate_turn_done_maps_the_usage_payload() -> None:
     assert event.usage.output_tokens == 48
 
 
-def test_translate_error_becomes_session_closed() -> None:
-    event = _translate({"type": "error", "error": {"type": "server_error"}})
-    assert event == SessionClosed(cause="server_error")
+def test_an_error_frame_yields_no_event_and_does_not_close_the_session() -> None:
+    """AVID-178: **the socket is the authority on whether the session is alive.**
+
+    An ``error`` frame is the API complaining about one client event; a *close* frame is the
+    session ending. This test previously asserted the opposite — that any error becomes
+    ``SessionClosed`` — and that mapping is what made every barge-in tear down a working socket:
+    ``_translate`` → ``SessionClosed`` → ``_on_session_closed`` → ``_degrade`` →
+    ``_teardown_locked`` → ``aclose()``. Ten sessions in eighty seconds of bench, each announcing
+    *"one sec, I lost my connection"* to a user whose connection was fine.
+
+    ``_translate`` now has no ``error`` branch at all: the frame is logged and dropped in
+    ``_events`` before this function sees it, which is what keeps ``_translate`` pure."""
+    assert _translate({"type": "error", "error": {"type": "server_error"}}) is None
 
 
 def test_translate_function_call_done_becomes_tool_call_requested() -> None:
@@ -399,6 +410,359 @@ class _CapturingWs:
 
     async def send(self, raw: str) -> None:
         self.sent.append(json.loads(raw))
+
+
+class _FakeWs:
+    """An async-iterable stand-in for the socket, so ``_events`` can be driven frame by frame.
+
+    ``_events`` is the inbound half of the vendor boundary and **had no test of any kind** before
+    AVID-178 — not for ``ConnectionClosed``, not for the deliberate-close guard, not for the
+    truncation rewrite. That gap is why an error frame ending the stream shipped.
+
+    Deliberately *not* a session fixture: a fixture under ``assets/sessions/`` drives
+    ``ReplayRealtimeClient``, the **fake**. The defect lives in the real client's ``_translate`` /
+    ``_events``, which no fixture can reach — so the frames are canned at the wire level instead.
+    """
+
+    def __init__(
+        self,
+        frames: list[dict[str, object]],
+        *,
+        then_raise: type[Exception] | None = None,
+    ) -> None:
+        self._frames = frames
+        self._then_raise = then_raise
+
+    def __aiter__(self) -> _FakeWs:
+        self._it = iter(self._frames)
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return json.dumps(next(self._it))
+        except StopIteration:
+            if self._then_raise is not None:
+                raise self._then_raise(1006, "abnormal closure") from None
+            raise StopAsyncIteration from None
+
+    async def send(self, raw: str) -> None:  # pragma: no cover - unused by these tests
+        return None
+
+
+def _stub_websockets(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
+    """Install a fake ``websockets.exceptions`` and return its ``ConnectionClosed``.
+
+    ``websockets`` is **not installed in CI** (it belongs to the ``openai`` extra) and ``_events``
+    imports it at call time, so the module has to be stubbed exactly as the connect tests stub it.
+    The exception carries ``code``/``reason`` because the close *code* is what diagnosed the
+    GA-shape defect and ``_events`` now logs it."""
+    import sys
+    import types
+
+    class _ConnectionClosed(Exception):
+        def __init__(self, code: int, reason: str) -> None:
+            super().__init__(code, reason)
+            self.code = code
+            self.reason = reason
+
+    monkeypatch.setitem(
+        sys.modules,
+        "websockets.exceptions",
+        types.SimpleNamespace(ConnectionClosed=_ConnectionClosed),
+    )
+    return _ConnectionClosed
+
+
+async def _drain_events(client: OpenAIRealtimeClient) -> list[object]:
+    return [event async for event in client.events()]
+
+
+async def test_an_error_frame_does_not_end_the_event_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The regression test for AVID-178.** An error must not stop the conversation.
+
+    Before the fix the error became ``SessionClosed`` *and* ``_events`` returned on it, so the
+    stream died twice over — the service degraded and the generator was gone even if it hadn't."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "error", "error": {"type": "invalid_request_error"}},
+            {
+                "type": "response.output_audio_transcript.done",
+                "transcript": "still here",
+                "item_id": "item_0",
+            },
+        ]
+    )
+
+    events = await _drain_events(client)
+
+    assert events == [AssistantTranscript(text="still here", item_id="item_0")]
+    assert not any(isinstance(e, SessionClosed) for e in events)
+
+
+async def test_a_connection_close_yields_one_session_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A *close* really does end the session — the other half of the rule, and untested until now.
+
+    This is the safety net the "no error type is fatal" decision leans on, so it needs a proof
+    rather than a promise."""
+    closed = _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs([], then_raise=closed)  # type: ignore[assignment]
+
+    assert await _drain_events(client) == [SessionClosed(cause="network")]
+
+
+async def test_a_deliberate_aclose_yields_no_session_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """We closed it on purpose, so it is not an outage — the ``_closed`` guard, also untested."""
+    closed = _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs([], then_raise=closed)  # type: ignore[assignment]
+    client._closed = True
+
+    assert await _drain_events(client) == []
+
+
+async def test_a_malformed_frame_is_skipped_and_the_stream_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_translate`` subscripts vendor fields unguarded, and it runs on ConvSvc's pump task.
+
+    Same family as AVID-174: one surprising frame would raise out of ``_events`` — which catches
+    only ``ConnectionClosed`` — and kill the conversation loop. The delta below has no ``delta``
+    key at all."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.output_audio.delta", "item_id": "item_0"},  # no `delta`
+            {
+                "type": "response.output_audio_transcript.done",
+                "transcript": "survived",
+                "item_id": "item_0",
+            },
+        ]
+    )
+
+    assert await _drain_events(client) == [
+        AssistantTranscript(text="survived", item_id="item_0")
+    ]
+
+
+async def test_a_pending_truncation_marks_the_next_user_transcript_approximate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§6.2.4 trap 3: ``truncate`` also drops the transcript for the unplayed portion, so the tail
+    is approximate. The behaviour existed with no proof until the harness made it cheap."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._truncation_pending = True
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "actually never mi",
+            }
+        ]
+    )
+
+    events = await _drain_events(client)
+
+    assert events == [UserTranscript(text="actually never mi", is_approximate=True)]
+    assert client._truncation_pending is False
+
+
+def test_the_error_log_names_the_five_allowed_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-1: the reason must be *readable*. Until now nothing in this 800-line adapter logged an
+    inbound frame at all, which is exactly why the bench trace could not say what went wrong."""
+    client = _openai()
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        client._note_error(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "response_cancel_not_active",
+                    "message": "Cancellation failed: no active response found",
+                    "param": "response",
+                    "event_id": "avid_12_response_cancel",
+                },
+            }
+        )
+
+    for expected in (
+        "invalid_request_error",
+        "response_cancel_not_active",
+        "no active response found",
+        "avid_12_response_cancel",
+        "session continues",
+    ):
+        assert expected in caplog.text
+
+
+def test_the_error_log_never_echoes_the_raw_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SECURITY.md: an allow-list, never a dict dump.
+
+    An error about ``conversation.item.create`` echoes the payload that caused it — and at M7 that
+    payload is a tool output built from on-device memory (§7.10). A rejected
+    ``input_audio_buffer.append`` would spill base64 PCM. Neither belongs in a log line."""
+    client = _openai()
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        client._note_error(
+            {
+                "type": "error",
+                "audio": "SEVDUkVUIFBDTQ==",  # a sibling key the formatter must not touch
+                "error": {"type": "invalid_request_error"},
+            }
+        )
+
+    assert "SEVDUkVUIFBDTQ==" not in caplog.text
+
+
+def test_the_error_log_bounds_a_long_vendor_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``message`` is unbounded free text from the vendor; one line per event is a contract the
+    bench tracer reads."""
+    client = _openai()
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        client._note_error(
+            {"type": "error", "error": {"type": "x", "message": "y" * 5000}}
+        )
+
+    assert len(caplog.text) < 1000
+    assert "…" in caplog.text
+
+
+def test_repeated_errors_are_numbered(caplog: pytest.LogCaptureFixture) -> None:
+    """A storm should read as a storm, not as a wall of identical lines."""
+    client = _openai()
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        for _ in range(3):
+            client._note_error({"type": "error", "error": {"type": "x"}})
+
+    assert "realtime error #1" in caplog.text
+    assert "realtime error #3" in caplog.text
+
+
+async def test_client_events_carry_a_traceable_event_id() -> None:
+    """AVID-178: the API echoes ``event_id`` back in ``error.event_id``.
+
+    Without it the error log can only say *"something you sent was rejected"*. With it the log
+    names the client event — which is what turns #178's Stage 2 from a ranked list of hypotheses
+    into a fact. No user content and no key: a counter and the message type we chose ourselves."""
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+    # A response is in flight, so step 5 actually goes out — the tracking itself is proven by
+    # test_cancel_is_sent_while_a_response_is_generating, which drives it through real frames.
+    client._active_response = "resp_1"
+
+    await client.truncate("item_0", 660)
+    await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == [
+        "conversation.item.truncate",
+        "response.cancel",
+    ]
+    assert ws.sent[0]["event_id"] == "avid_1_conversation_item_truncate"
+    assert ws.sent[1]["event_id"] == "avid_2_response_cancel"
+
+
+async def test_cancel_is_skipped_when_no_response_is_in_flight(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-178 Stage 2, measured against the live API rather than guessed::
+
+        code    'response_cancel_not_active'
+        message 'Cancellation failed: no active response found'
+
+    And it is the *common* case: generation finishes long before playback does, so by the time a
+    user interrupts a reply they are still hearing, the model stopped generating seconds ago.
+
+    ⚠️ The skip is **logged**, and that is not decoration. If this guard is ever wrong the failure
+    is silent — no cancel goes out, the user hears nothing amiss (step 6's mute drops the deltas
+    anyway), and the model believes it said the whole reply, poisoning context and billing output
+    tokens for audio nobody heard. A bench run is graded on *"a sent cancel or a logged skip"*."""
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+
+    with caplog.at_level(logging.DEBUG, logger="avid.adapters.realtime"):
+        await client.cancel()
+
+    assert ws.sent == [], "cancelled a response that was never in flight"
+    assert "no active response to cancel" in caplog.text
+
+
+async def test_cancel_is_sent_while_a_response_is_generating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other edge, and the one that catches the silent failure: a *live* response is cancelled.
+
+    Driven through ``_events`` with real vendor frames rather than by setting the private flag, so
+    the test proves the tracking as well as the guard."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [{"type": "response.created", "response": {"id": "resp_1"}}]
+    )
+    await _drain_events(client)
+
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == ["response.cancel"]
+
+
+async def test_a_finished_response_is_no_longer_cancellable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``response.done`` clears the flag — including for a response that was *itself* cancelled,
+    which is why the terminal frame is tracked rather than the happy path only."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.done", "response": {"id": "resp_1"}},
+        ]
+    )
+    await _drain_events(client)
+
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert ws.sent == []
+
+
+async def test_truncate_is_always_sent_because_the_api_accepts_it() -> None:
+    """Step 4 is deliberately **not** guarded. The probe confirmed the live API accepts
+    ``conversation.item.truncate`` with our device-derived ``audio_end_ms`` — only step 5 was
+    rejected — and §6.2.4 calls that accepted figure "the deliberate choice, not an oversight".
+
+    Guarding truncate as well would have been the tempting symmetric change and would have broken
+    the one part of barge-in that was working."""
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+
+    await client.truncate("item_0", 660)
+
+    assert [p["type"] for p in ws.sent] == ["conversation.item.truncate"]
+    assert ws.sent[0]["audio_end_ms"] == 660
 
 
 def test_tools_are_declared_in_the_session_update_prefix() -> None:

@@ -1185,13 +1185,19 @@ Per §3.10.3, `SPEAKING + audio.speech_started → LISTENING` is the transition 
 3. Compute audio_end_ms = how much the device ACCEPTED — the sum of Speaker.play()'s
    returns (frames ALSA took ÷ 48 bytes/ms at 24kHz mono 16-bit), NOT what we submitted
 4. Send conversation.item.truncate(item_id, content_index, audio_end_ms)
-5. Send response.cancel
+5. Send response.cancel -- ONLY IF a response is still in flight (see below)
 6. Mute inbound deltas for item_id until the next assistant item begins
 ```
 
 **Step 0 exists because a VAD cannot tell you *whose* speech it is (AVID-159).** This section used to assume it could. It cannot, and it is not a detector quality problem: the robot's voice coming back through the mic **is** speech, and Silero is right to say so. The only discriminator left is loudness, so a rising edge that happens while the robot is talking counts as the user only if it clears `EchoFloor` — a running estimate of what the mic hears *while the robot is the one speaking* — by `[gate] barge_in_margin_db`.
 
 The floor is adaptive rather than a configured `playback_level × coupling` constant, because while the assistant speaks what the mic hears **is** the echo: tracking it *is* the acoustic-coupling calibration, so speaker volume, mic gain, room and rig geometry all cancel out of the comparison and nothing needs re-measuring when the desk moves. Two rules make it honest — it never adapts on a frame it has judged to be the user (that would raise the bar under the speaker mid-sentence), and it is only ever consulted while the uplink is shut, so **ordinary turn-taking is never tested against the margin at all.**
+
+**Step 5 is conditional, and the condition is the common case (AVID-178).** `response.cancel` with nothing in flight is an error — measured against the live API as `response_cancel_not_active`, *"Cancellation failed: no active response found"* — and **generation finishes long before playback does**, so by the time a user interrupts a reply they are still *hearing*, the model stopped generating seconds ago. Sending it unconditionally made every barge-in draw an error frame, which the adapter then misread as a session close (§6.2.5): ten sessions in eighty seconds of bench. The client therefore tracks `response.created`/`response.done` and skips step 5 when there is nothing to cancel.
+
+⚠️ **Step 4 is deliberately *not* guarded the same way.** The same probe confirmed the API accepts `conversation.item.truncate` with our device-derived `audio_end_ms`; only step 5 was ever rejected. Guarding both would have been the tempting symmetric change and would have broken the half of barge-in that worked.
+
+⚠️ **A wrong guard here fails silently.** If the tracking is broken no cancel is sent, the user hears nothing amiss — step 6's mute drops the in-flight deltas regardless — and the model goes on believing it said the whole reply, poisoning the context (trap 2 above) and billing output tokens for audio nobody heard. The skip is therefore logged, and a bench run is graded on *"every barge-in shows a sent cancel **or** a logged skip"*, never on the absence of errors alone.
 
 **Step 1 says "at the rising edge *or* mid-utterance", and that is not a detail (AVID-161).** The reply can begin while the user is *already* talking, and such a user has no rising edge left to be judged on — so a check that only ran at the edge left the escape hatch unreachable in exactly the case that needed it: the robot talks over you, the half-duplex uplink shuts, and your words stop reaching the model until you give up and start again. The margin is therefore re-evaluated on every frame for the duration of an overlap, and the interrupt re-opens the uplink so the rest of the turn gets through.
 
@@ -1203,12 +1209,29 @@ Three things follow that are worth stating before anyone tunes this:
 
 **Step 1 says "playback in flight", not "state == SPEAKING", and the difference is not pedantry.** `AudioService` gates the interrupt on its own in-flight playback item, because `RobotState` is a *derived view* that can lag the speaker: the bench caught a reply to an earlier server-side commit beginning 0.9 s **before** our falling edge fired, which leaves the machine in LISTENING with the speaker live. Gated on the state, the interrupt was dead code in exactly that window — and it silently dropped the truncated `audio.playback_finished` that steps 4–6 below are triggered by, so the model was never told (AVID-158). The service that owns the speaker is the one that knows whether it is speaking.
 
-Four traps, all of which will cost you an afternoon each if you meet them cold:
+Five traps, all of which will cost you an afternoon each if you meet them cold:
 
 - **Step 6 is not optional.** Audio deltas already in flight keep arriving *after* truncation. Without muting by item ID you will hear the robot's cancelled sentence resume for ~200 ms after it should have stopped.
 - **Step 3 must measure what the speaker *took*, not what we received.** There are **three** quantities here, not two: what we **received** from the model, what the device **accepted** (`Speaker.play()`'s return), and what the DAC **emitted**. Received-vs-accepted is the entire dropped-audio class — an underrun makes ALSA refuse a whole utterance while returning instantly (AVID-91) — and closing it is what we implement. Accepted-vs-emitted is the playback buffer depth (~107 ms at 24 kHz) and remains a bounded, knowingly-accepted over-report: do not build anything that assumes it is zero. Note step 3's formula above measures **accepted**; that is the deliberate choice, not an oversight. Getting this wrong makes the model believe it said things the user never heard — which then poisons the conversation context.
 - **`conversation.item.truncate` also drops the transcript for the unplayed portion.** Audio/transcript alignment is imprecise, so the transcript you keep for memory extraction (§7.6) is approximate at the truncation boundary. Don't build anything that assumes it's exact.
+- **Steps 4 and 5 may be *refused*, and a refusal is a log line, not a degrade** (AVID-178). The API answers a client event it dislikes with an `error` frame on a socket that stays open; treating that as a session close made every barge-in tear the session down. See §6.2.5.
 - **Steps 2–6 span two tasks, and the playback episode is shared mutable state between them** (AVID-174). `play()` runs on `ConversationService`'s pump; `interrupt()` runs on `AudioService`'s own mic loop; step 6's mute is armed on a third context, a bus worker. Nothing serialises them. A barge-in landing inside `await Speaker.play()` used to clear the episode out from under the suspended writer, which then wrote its ms back into the *next* reply's total and dereferenced the episode that no longer existed — an `AssertionError` on the pump, an owned task nothing observed, so the conversation ended with the socket open and the log silent. Two rules close it and both are load-bearing: **the episode's close is synchronous and single-taker** (`_take_playback` contains no `await`, so exactly one of `end_response`/`interrupt` can ever finalize a given episode — otherwise both pass their guard, a second `audio.playback_finished` makes the model truncate a response that ended normally, and the echo-gate report runs twice, halving the suppression counts §6.3's margin is calibrated from); and **a write that outlives its episode is discarded, not written back** (a playback epoch, captured before the speaker await and re-checked after). A lock is the wrong instrument here: to help it would have to span a 100–200 ms delta write, and its contender is the mic loop, so it would park frame consumption behind the speaker. One consequence worth stating: ms the device accepted into a buffer `Speaker.stop` then closed are now excluded from `audio_end_ms`, so the accepted-vs-emitted over-report above **shrinks** — it does not grow.
+
+## 6.2.5 An error frame is not a close — AVID-178
+
+The Realtime API answers a client event it dislikes with an `error` **frame**, on a socket that stays open. Until AVID-178 the adapter mapped any such frame to `SessionClosed`, and the consequences ran all the way down: `_pump` → `_on_session_closed` → `conversation.session_lost` → DEGRADED → a canned "one sec, I lost my connection" → `client.aclose()`. **The bench measured ten sessions in eighty seconds**, every barge-in tearing down a working socket and announcing an outage to a user whose connection was fine.
+
+**The normative rule: the socket is the authority on whether the session is alive.** An `error` frame is a complaint about *one client event*; a **close** frame ends the session, and `ConnectionClosed → SessionClosed(cause="network")` is the only path that mints it in the real client. An error yields **no** `RealtimeEvent` at all — it is logged and dropped inside the adapter, so nothing about it crosses the port.
+
+**No error type is fatal, and that is deliberate.** A hard-coded list of "fatal" vendor error types is precisely what §6.10's volatility warning says will rot, and every fatal condition this project has actually met arrived as a close instead: the GA-shape migration closed with `4000 invalid_request_error.beta_api_shape_disabled` (§6.2.2), and a bad key fails fast at boot (§3.12.3) without ever reaching a live session.
+
+⚠️ **The risk this accepts, stated so it is not rediscovered:** an error that leaves the socket open but the *session* unusable would now be logged and tolerated rather than degraded. That trade is right — the old behaviour was a degrade→reopen→same-failure loop — and two backstops already cover it: §6.9's think timeout degrades a session that produces no first token within `[gate] think_timeout_s`, and `[gate] session_idle_close_s` closes a quiet one. **Revisit if, and only if, a bench log shows an error frame followed by a socket that stays open and never produces another useful frame.**
+
+**The frame, and what may be logged.** `error` carries `type`, `code`, `message`, `param` and `event_id`. The log line is an **allow-list of exactly those five**, never the frame — an error about `conversation.item.create` echoes the payload that caused it, and at M7 that payload is a tool output built from on-device memory (§7.10, the only memory OpenAI ever sees); a rejected `input_audio_buffer.append` would spill base64 PCM. `message`/`param` are length-bounded so one frame stays one line.
+
+**`error.event_id` echoes the *client* event that caused the error**, which is why every client event we send is stamped `avid_<n>_<type>`. Without it the log can only say "something you sent was rejected"; with it, it names the call. That is the difference between diagnosing the next vendor rejection from a log and diagnosing it from a bench session.
+
+**No fixture represents an error, by design.** `assets/sessions/` fixtures are timelines of *neutral* `RealtimeEvent` members (§14.3), and an error frame yields none — so there is nothing for a fixture to carry, and a fixture would exercise `ReplayRealtimeClient` (the fake) rather than the real client's translation half where this defect lived. The inbound path is covered instead by frame-level tests that drive `_events` with canned JSON.
 
 ## 6.3 The session gate — ADR-007, accepted
 
@@ -1390,7 +1413,8 @@ Tier 1 is pure local state machine — the face is *already correct* before the 
 
 | Failure | Detection | Response |
 |---|---|---|
-| WSS drop mid-turn | close frame / timeout | §3.7.6: DEGRADED, canned WAV, backoff reconnect, **re-seed session** (§6.2.3) |
+| WSS drop mid-turn | **close** frame / timeout (an `error` frame is **not** a close — §6.2.5) | §3.7.6: DEGRADED, canned WAV, backoff reconnect, **re-seed session** (§6.2.3) |
+| Realtime `error` frame | an `error` message on a socket that stays open | **WARNING carrying the vendor `event_id`; no transition, no cue, no teardown — the session continues** (§6.2.5) |
 | 429 rate limit | HTTP status | Exponential backoff + jitter, 1s→30s cap |
 | 401 | HTTP status | **Fail fast at boot.** Refuse to start. §3.12.3. |
 | Slow first token (>10 s) | THINKING timeout | → DEGRADED |
