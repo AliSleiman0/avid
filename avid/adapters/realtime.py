@@ -69,6 +69,7 @@ from avid.core.realtime import (
     TurnDone,
     UserTranscript,
 )
+from avid.core.tasks import spawn
 from avid.domain import TokenUsage
 
 _log = logging.getLogger(__name__)
@@ -492,6 +493,13 @@ class OpenAIRealtimeClient:
         # state: AVID-158 established it is set on the user transcript, which arrives after the
         # assistant's audio and sometimes after the turn has ended.
         self._active_response: str | None = None
+        # Neutral events read from the socket, awaiting the consumer (AVID-182). Unbounded on
+        # purpose: this queue REPLACES the vendor library's own read buffer rather than adding a
+        # second one, so bounding it would drop assistant audio the previous design simply held.
+        # It drains at playback speed and is emptied on every open/close, so it cannot grow past
+        # one reply's worth of deltas.
+        self._inbox: asyncio.Queue[RealtimeEvent | None] = asyncio.Queue()
+        self._reader_task: asyncio.Task[None] | None = None
 
     def __repr__(self) -> str:
         """Key-free repr (AC-6): the secret must never reach a log line via ``repr``."""
@@ -618,6 +626,10 @@ class OpenAIRealtimeClient:
         self._sent_seq = 0
         self._error_count = 0
         self._active_response = None
+        self._inbox = (
+            asyncio.Queue()
+        )  # a cold session starts with an empty stream (§6.2.3)
+        self._reader_task = spawn(self._reader(), name="OpenAIRealtimeClient.reader")
         _, send_ns = await _timed(
             self._send(
                 {"type": "session.update", "session": self._session_config(block)}
@@ -639,9 +651,15 @@ class OpenAIRealtimeClient:
         """Tear the session down and release the socket (idempotent). A subsequent
         :meth:`events` iteration returns at once rather than raising a connection error."""
         self._closed = True
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            self._reader_task = None
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
+        # Release any consumer parked on the queue: the reader's `finally` cannot run if it was
+        # cancelled before reaching it, and a pump waiting forever is the wedge AVID-171 fixed.
+        self._inbox.put_nowait(None)
 
     async def send_audio(self, chunk: AudioChunk) -> None:
         """Append one captured mic frame to the input buffer (``input_audio_buffer.append``).
@@ -670,15 +688,29 @@ class OpenAIRealtimeClient:
         """Yield neutral events translated from the server stream. See :meth:`_events`."""
         return self._events()
 
-    async def _events(self) -> AsyncIterator[RealtimeEvent]:
-        """Iterate the socket, translating each frame (AC-1). A clean/abrupt close surfaces as a
-        single :class:`SessionClosed` (``cause="network"``) unless *we* closed deliberately, so a
-        mid-turn drop reaches ``ConversationService`` as the ``-> DEGRADED`` fact (UC-06)."""
+    async def _reader(self) -> None:
+        """Drain the socket at **wire speed**, into :attr:`_inbox` (AVID-182).
+
+        This exists because the obvious shape — a generator doing ``async for raw in ws`` and
+        ``yield``ing — reads the socket *at playback speed*. An async generator is suspended at
+        its ``yield`` until the consumer asks again, and the consumer is
+        ``ConversationService._pump``, which awaits ``sink.play()`` → the ALSA write for every
+        audio delta. So while a reply is playing, **nothing reads the socket**: frames queue in
+        the vendor buffer and are observed seconds late.
+
+        That is not a tidiness problem, it is a correctness one. ``response.done`` is sent when
+        *generation* ends, often seconds before playback finishes, so :attr:`_active_response`
+        said "generating" during exactly the window in which a user barges in — and the resulting
+        ``response.cancel`` was rejected with ``response_cancel_not_active`` on every bench run.
+        The guard was not buggy; it was reading stale news.
+
+        Frame *interpretation* — the error log, the response lifecycle — therefore happens here,
+        as frames arrive. Only the neutral events are queued, because those are the ones whose
+        delivery is legitimately paced by the consumer.
+        """
         from websockets.exceptions import ConnectionClosed
 
         ws = self._ws
-        if ws is None:
-            return
         try:
             async for raw in ws:
                 msg = json.loads(raw)
@@ -688,11 +720,10 @@ class OpenAIRealtimeClient:
                 self._track_response(msg)
                 try:
                     event = _translate(msg)
-                except Exception:  # noqa: BLE001 - a surprising frame must not kill the pump
-                    # Same failure family as AVID-174: this runs on ConversationService's pump
-                    # task, and _translate subscripts vendor fields unguarded, so one malformed
-                    # frame would end the conversation. Type only — a malformed audio delta's
-                    # body is base64 PCM and does not belong in a log.
+                except Exception:  # noqa: BLE001 - a surprising frame must not kill the reader
+                    # Same failure family as AVID-174: _translate subscripts vendor fields
+                    # unguarded, and this task owns the socket. Type only — a malformed audio
+                    # delta's body is base64 PCM and does not belong in a log.
                     _log.warning(
                         "unhandled realtime frame type=%r — skipped", msg.get("type")
                     )
@@ -702,7 +733,7 @@ class OpenAIRealtimeClient:
                 if isinstance(event, UserTranscript) and self._truncation_pending:
                     event = UserTranscript(text=event.text, is_approximate=True)
                     self._truncation_pending = False
-                yield event
+                await self._inbox.put(event)
         except ConnectionClosed as exc:
             if not self._closed:
                 # The close *code* is how the GA-shape defect was diagnosed
@@ -711,7 +742,31 @@ class OpenAIRealtimeClient:
                 _log.warning(
                     "realtime socket closed: code=%r reason=%r", exc.code, exc.reason
                 )
-                yield SessionClosed(cause="network")
+                await self._inbox.put(SessionClosed(cause="network"))
+        finally:
+            await self._inbox.put(None)  # the stream is over; release the consumer
+
+    async def _events(self) -> AsyncIterator[RealtimeEvent]:
+        """Yield what :meth:`_reader` has queued, in order (AC-1).
+
+        Consumption is deliberately still paced by the caller — audio must be played at the speed
+        the speaker accepts it. What changed in AVID-182 is that *reading* no longer is, so the
+        session's own state is current even while a long reply drains.
+        """
+        if self._ws is None:
+            return
+        if self._reader_task is None or self._reader_task.done():
+            # Normally started by open(). Started here too so that setting the socket directly —
+            # which the offline frame-level tests do, and which is the only way to drive this
+            # path without a network — still produces a live stream.
+            self._reader_task = spawn(
+                self._reader(), name="OpenAIRealtimeClient.reader"
+            )
+        while True:
+            event = await self._inbox.get()
+            if event is None:
+                return
+            yield event
 
     def _track_response(self, msg: dict[str, Any]) -> None:
         """Follow the response lifecycle so :meth:`cancel` knows whether anything is in flight.

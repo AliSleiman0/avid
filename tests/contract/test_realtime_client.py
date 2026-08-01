@@ -679,6 +679,48 @@ async def test_client_events_carry_a_traceable_event_id() -> None:
     assert ws.sent[1]["event_id"] == "avid_2_response_cancel"
 
 
+async def test_the_socket_is_read_at_wire_speed_not_at_consumption_speed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AVID-182: the session's own state must be current even while a long reply drains.
+
+    The original shape — a generator doing ``async for raw in ws`` and ``yield``ing — read the
+    socket **at playback speed**, because an async generator is suspended at its ``yield`` until
+    the consumer asks again, and the consumer awaits the ALSA write for every audio delta. So
+    ``response.done``, which the server sends when *generation* ends, went unread for the whole
+    remaining duration of the reply. ``_active_response`` therefore said "generating" during
+    exactly the window a user barges in, and every resulting ``response.cancel`` came back
+    ``response_cancel_not_active``.
+
+    Proven by consuming **nothing**: the frames must still have been read and interpreted."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {
+                "type": "response.output_audio_transcript.done",
+                "transcript": "a long reply",
+                "item_id": "item_0",
+            },
+            {"type": "response.done", "response": {"id": "resp_1"}},
+        ]
+    )
+
+    stream = client.events()
+    first = await stream.__anext__()  # take ONE event, then stop consuming
+    assert isinstance(first, AssistantTranscript)
+
+    for _ in range(20):  # let the reader run ahead of us
+        await asyncio.sleep(0)
+
+    assert client._active_response is None, (
+        "response.done was not observed until the consumer asked for it — the socket is still "
+        "being read at playback speed"
+    )
+    await stream.aclose()
+
+
 async def test_cancel_is_skipped_when_no_response_is_in_flight(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

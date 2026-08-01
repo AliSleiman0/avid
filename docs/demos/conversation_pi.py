@@ -398,23 +398,36 @@ def _report_conversation(
         print(f"FAIL: captured {len(turns_seen)}/{min_turns} turns")
         return 1
 
-    samples = [turn.latency_ms for turn in turns_seen]
-    # A non-positive O1 means first audio arrived before local VAD closed the turn, so the
-    # pairing is not measuring what O1 defines. Live that cannot happen while [gate]
-    # silence_hold_ms >= [ai.turn_detection] silence_duration_ms (the model cannot answer a
-    # sentence it has not been told is over); against `replay` it happens on every turn, because
-    # a fixture's timeline does not wait for our VAD. Either way it must FAIL rather than be
-    # averaged in — a negative sample drags P50 down and would let a slow robot pass.
+    # A non-positive O1 means this turn's playback began before its own last speech frame, which
+    # no network can do — so the sample is MIS-PAIRED, not fast. It happens when a reply to an
+    # *earlier* turn is still arriving: AudioService stamps a playback episode with whichever turn
+    # is current when its first delta plays, so an overlapping reply is attributed to the wrong
+    # one (AVID-182). Against `replay` it happens on every turn, because a fixture's timeline does
+    # not wait for our VAD.
+    #
+    # ⚠️ The comment this replaces claimed a non-positive sample "cannot happen live while
+    # silence_hold_ms >= silence_duration_ms". AVID-176 gave those two a deliberate 400 ms margin,
+    # so the server now commits — and the model starts replying — while we are still streaming.
+    # First audio routinely precedes our falling edge, and that reasoning died with it.
+    #
+    # Such samples are EXCLUDED and COUNTED rather than failing the run. Failing was wrong twice
+    # over: a mis-paired sample says nothing about latency, and aborting here meant a run that
+    # demonstrably passed AC-6 was reported as a failure with the recovery numbers never printed.
+    # What must not happen is averaging them in — a negative drags P50 down and would let a slow
+    # robot pass.
     nonpositive = [
         i for i, turn in enumerate(turns_seen, start=1) if turn.latency_ms <= 0.0
     ]
+    samples = [turn.latency_ms for turn in turns_seen if turn.latency_ms > 0.0]
     if nonpositive:
         print(
-            f"FAIL: {len(nonpositive)} turn(s) reported a non-positive O1 latency: "
-            f"{nonpositive} — first audio preceded the user's last speech frame, which no\n"
-            f"      network can do, so this pairing is not the O1 metric. Check that [gate]\n"
-            f"      silence_hold_ms matches the value AudioService was actually built with."
+            f"NOTE: {len(nonpositive)} turn(s) could not be paired, excluded from O1: "
+            f"{nonpositive}\n"
+            f"      Their playback began before their own speech, so the reply belongs to an\n"
+            f"      earlier turn (AVID-182). O1 covers the {len(samples)} turn(s) that paired."
         )
+    if not samples:
+        print("FAIL: no turn produced a usable O1 sample")
         return 1
     p50 = _percentile(samples, 50.0)
     p95 = _percentile(samples, 95.0)
@@ -432,11 +445,17 @@ def _report_conversation(
     # means the local VAD never cut the speaker -- which IS the AC-3 failure, read by a human.
     print(f"AC-3 barge-ins observed (playback truncated by local VAD): {barge_ins}")
 
+    # Every criterion reports before any verdict is decided (AVID-182). Returning on the first
+    # failure meant a run that demonstrably passed AC-6 printed no recovery numbers at all,
+    # because an unrelated O1 pairing check aborted first. A gate that hides a PASSING criterion
+    # behind an unrelated failure is the sibling of one that can pass on silence.
+    failures: list[str] = []
+
     # Playback integrity first: it is the one that can invalidate every number above it.
     silent = [i for i, turn in enumerate(turns_seen, start=1) if turn.played_ms == 0]
     if silent:
         print(f"FAIL: {len(silent)} turn(s) played no audio at all: {silent}")
-        return 1
+        failures.append("playback-silent")
     if check_playback:
         bad = [i for i, turn in enumerate(turns_seen, start=1) if _diverged(turn)]
         if bad:
@@ -444,7 +463,7 @@ def _report_conversation(
                 f"FAIL: {len(bad)} turn(s) played for the wrong length of time: {bad} — "
                 f"audio is being dropped or played at the wrong sample rate"
             )
-            return 1
+            failures.append("playback-length")
 
     if recovery is not None:
         print(
@@ -453,12 +472,12 @@ def _report_conversation(
         )
         if recovery.lost == 0 or recovery.entered == 0:
             print("FAIL: the session never dropped — nothing to recover from")
-            return 1
+            failures.append("recovery-no-drop")
         if recovery.exited == 0:
             print(
                 "FAIL: degraded entered but never exited — the robot did not come back"
             )
-            return 1
+            failures.append("recovery-no-return")
 
     if not live:
         print(
@@ -470,15 +489,19 @@ def _report_conversation(
 
     if p50 > p50_budget_ms:
         print(f"FAIL: P50 {p50:.0f} ms exceeds the {p50_budget_ms:.0f} ms budget")
-        return 1
+        failures.append("O1-p50")
     if p95 > p95_budget_ms:
         print(f"FAIL: P95 {p95:.0f} ms exceeds the {p95_budget_ms:.0f} ms budget")
-        return 1
+        failures.append("O1-p95")
     if projected_monthly_usd > budget_usd:
         print(
             f"FAIL: projected ${projected_monthly_usd:.2f}/month exceeds the "
             f"${budget_usd:.0f} O7 budget (§6.10.6 tripwire)"
         )
+        failures.append("O7")
+
+    if failures:
+        print(f"FAILED: {', '.join(failures)} — see the lines above for each")
         return 1
 
     print(f"PASS: {len(turns_seen)} live turns within O1 and O7")
