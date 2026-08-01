@@ -65,9 +65,26 @@ silence_hold_ms      = 900       # silence run before a turn is declared over (d
 # 900/900: 1 in 8; 900/500: 10 in 14. Equal is fatal in both directions (AVID-176).
 session_idle_close_s = 30
 # The echo gate (§6.2.4). The uplink is shut while the robot speaks; a rising edge inside that
-# window is the USER only if it clears the running echo floor by this margin. PROVISIONAL —
-# #106 AC-3 records the measured value. Very large = full half-duplex (barge-in off).
-barge_in_margin_db   = 6.0
+# window is the USER only if it clears the running echo floor by this margin. Very large = full
+# half-duplex (barge-in off), the documented fallback if the levels ever stop separating.
+#
+# MEASURED, no longer provisional (#106 AC-3, 2026-08-01). Pi + USB PnP mic + MAX98357A at 95%,
+# conversational volume at ~50 cm, ambient rms -35.2 dBFS:
+#
+#     margin   suppressed frames per reply        verdict
+#     6.0      67, 52 / 22, 16, 61, 7, 37, 6      user speech gated out mid-interruption
+#     3.0      0, 0, 0, 0, 0, 8                   admitted cleanly, no self-interruption
+#
+# The one suppressing episode at 3.0 is the gate working: its loudest rejected frame was
+# -10.3 dBFS against a -14.3 floor, 4.2 dB up and correctly read as echo. At 6.0 the same rig
+# rejected frames peaking at -7.0 dBFS that were genuinely the user. So the two populations DO
+# separate and this sits between them -- the first of the three documented outcomes, which is
+# why #163 (AEC) is desirable but not required for AC-3.
+#
+# ⚠️ One run per value, and nothing between 3 and 6 has been tried, so this is the best-supported
+# number rather than a proven optimum. ⚠️ Every figure recorded before 2026-08-01 said "6.0"
+# whatever this file held -- the bench harness never passed it (#180).
+barge_in_margin_db   = 3.0
 echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
 # §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
 # MUST be < session_idle_close_s, asserted in Config — the idle close cancels this timer and
