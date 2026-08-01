@@ -631,6 +631,13 @@ class OpenAIRealtimeClient:
         self._sent_seq = 0
         self._error_count = 0
         self._active_response = None
+        # The O1 marks belong to ONE session's turn and must not survive a reconnect. On the
+        # 2026-08-01 AC-4 run a cold open timed out, and the marks left over from before the
+        # retry produced `response.created nan ms` and a 233 ms "total" for a turn whose
+        # response.created belonged to a socket that no longer existed. A stale measurement is
+        # worse than a missing one: it looks like data.
+        self._speech_stopped_ns = None
+        self._response_created_ns = None
         self._inbox = (
             asyncio.Queue()
         )  # a cold session starts with an empty stream (§6.2.3)
@@ -827,16 +834,23 @@ class OpenAIRealtimeClient:
         # First delta of this reply: report, then disarm so the rest of the stream is silent.
         stopped_ns, self._speech_stopped_ns = self._speech_stopped_ns, None
         created_ns = self._response_created_ns
-        accepted_ms = (
-            (created_ns - stopped_ns) / _NS_PER_MS if created_ns else float("nan")
-        )
-        model_ms = (now_ns - created_ns) / _NS_PER_MS if created_ns else float("nan")
+        if created_ns is None:
+            # No response.created between the speech-stop and this delta: the delta belongs to a
+            # response that began before we started watching. Say so rather than printing a split
+            # with a hole in it — `nan ms` is how a missing measurement got into the AC-4 log
+            # looking like a measured one.
+            _log.info(
+                "first token: %.0f ms from the server's own speech-stop "
+                "(no response.created in between — split unavailable for this reply)",
+                (now_ns - stopped_ns) / _NS_PER_MS,
+            )
+            return
         _log.info(
             "first token: server speech-stop -> response.created %.0f ms, "
             "-> first audio delta %.0f ms (model TTFT + one hop, NOT ours); "
             "total %.0f ms from the server's own speech-stop",
-            accepted_ms,
-            model_ms,
+            (created_ns - stopped_ns) / _NS_PER_MS,
+            (now_ns - created_ns) / _NS_PER_MS,
             (now_ns - stopped_ns) / _NS_PER_MS,
         )
 
