@@ -77,6 +77,11 @@ _MANIFEST = "session.json"
 _SUPPORTED_FORMAT = 1
 _NS_PER_MS = 1_000_000
 
+# Cap on the vendor free-text fields that reach the log (AVID-178). ``error.message`` and
+# ``error.param`` are unbounded strings written by the API and can echo the client event that
+# caused them — see :func:`_format_error_frame` for why that is a security bound, not tidiness.
+_MAX_ERROR_CHARS = 200
+
 _T = TypeVar("_T")
 
 
@@ -96,6 +101,35 @@ async def _timed(awaitable: Awaitable[_T]) -> tuple[_T, int]:
     started_ns = time.monotonic_ns()
     result = await awaitable
     return result, time.monotonic_ns() - started_ns
+
+
+def _format_error_frame(msg: dict[str, Any], *, count: int) -> str:
+    """Render an ``error`` server frame as one log line — an **allow-list**, never the raw frame.
+
+    Five fields cross into the log and no others (AVID-178). That bound is a security property,
+    not tidiness: an error about ``conversation.item.create`` echoes the offending payload, and at
+    M7 that payload is a tool output **built from on-device memory** — the top-facts block is the
+    only memory OpenAI ever sees (§7.10), and a log line is not a place to widen it. Dumping the
+    frame would also spill base64 PCM from a rejected ``input_audio_buffer.append``.
+
+    ``message``/``param`` are bounded and ``!r``-quoted so a multi-line vendor string cannot break
+    the one-line-per-event contract the bench tracer reads. ``count`` is a per-session ordinal, so
+    an error *storm* is visible as a storm rather than as a wall of identical lines. The trailing
+    clause is there so nobody at the bench reads this WARNING as the outage it used to cause.
+    """
+    error = msg.get("error") or {}
+
+    def _bounded(value: object) -> str:
+        text = str(value)
+        if len(text) > _MAX_ERROR_CHARS:
+            text = text[:_MAX_ERROR_CHARS] + "…"
+        return repr(text)
+
+    return (
+        f"realtime error #{count}: type={error.get('type')!r} code={error.get('code')!r} "
+        f"event_id={error.get('event_id')!r} param={_bounded(error.get('param'))} "
+        f"message={_bounded(error.get('message'))} (session continues)"
+    )
 
 
 def _format_open_report(
@@ -388,9 +422,11 @@ def _translate(msg: dict[str, Any]) -> RealtimeEvent | None:
                 output_tokens=int(usage.get("output_tokens", 0)),
             )
         )
-    if kind == "error":
-        error = msg.get("error") or {}
-        return SessionClosed(cause=str(error.get("type", "error")))
+    # NOTE: there is deliberately no ``error`` branch here. An error frame is a complaint about
+    # one client event, not a session ending, and it yields no neutral event at all — it is
+    # logged and dropped in :meth:`OpenAIRealtimeClient._note_error` before this function is
+    # reached (AVID-178, SDS §6.2.5). Mapping it to ``SessionClosed`` is what made every barge-in
+    # tear down a perfectly good socket.
     return None
 
 
@@ -446,6 +482,10 @@ class OpenAIRealtimeClient:
         # Set on a truncate() and consumed by the next user transcript: audio/transcript alignment
         # is imprecise at a barge-in boundary, so that transcript's tail is approximate (§6.2.4).
         self._truncation_pending = False
+        # Per-session counters (AVID-178). ``_sent_seq`` stamps outbound events so the API can name
+        # which one it rejected; ``_error_count`` numbers inbound complaints so a storm reads as one.
+        self._sent_seq = 0
+        self._error_count = 0
 
     def __repr__(self) -> str:
         """Key-free repr (AC-6): the secret must never reach a log line via ``repr``."""
@@ -569,6 +609,8 @@ class OpenAIRealtimeClient:
             )
         self._closed = False
         self._truncation_pending = False
+        self._sent_seq = 0
+        self._error_count = 0
         _, send_ns = await _timed(
             self._send(
                 {"type": "session.update", "session": self._session_config(block)}
@@ -632,18 +674,57 @@ class OpenAIRealtimeClient:
             return
         try:
             async for raw in ws:
-                event = _translate(json.loads(raw))
+                msg = json.loads(raw)
+                if msg.get("type") == "error":
+                    self._note_error(msg)
+                    continue  # a complaint, not a close — SDS §6.2.5
+                try:
+                    event = _translate(msg)
+                except Exception:  # noqa: BLE001 - a surprising frame must not kill the pump
+                    # Same failure family as AVID-174: this runs on ConversationService's pump
+                    # task, and _translate subscripts vendor fields unguarded, so one malformed
+                    # frame would end the conversation. Type only — a malformed audio delta's
+                    # body is base64 PCM and does not belong in a log.
+                    _log.warning(
+                        "unhandled realtime frame type=%r — skipped", msg.get("type")
+                    )
+                    continue
                 if event is None:
                     continue  # an unmodelled delta/ack — deliberately not surfaced
                 if isinstance(event, UserTranscript) and self._truncation_pending:
                     event = UserTranscript(text=event.text, is_approximate=True)
                     self._truncation_pending = False
                 yield event
-                if isinstance(event, SessionClosed):
-                    return
-        except ConnectionClosed:
+        except ConnectionClosed as exc:
             if not self._closed:
+                # The close *code* is how the GA-shape defect was diagnosed
+                # (4000 invalid_request_error.beta_api_shape_disabled, §6.2.2). Discarding it is
+                # the same mistake AVID-178 fixed at the inbound end of the wire.
+                _log.warning(
+                    "realtime socket closed: code=%r reason=%r", exc.code, exc.reason
+                )
                 yield SessionClosed(cause="network")
+
+    def _note_error(self, msg: dict[str, Any]) -> None:
+        """Log one ``error`` server frame. **Never** ends the session (AVID-178, SDS §6.2.5).
+
+        The rule this encodes: *the socket is the authority on whether the session is alive.* An
+        error frame is the API complaining about one client event; a **close** frame is the
+        session ending, and :meth:`_events` already turns that into
+        :class:`~avid.core.realtime.SessionClosed`.
+
+        No error type is treated as fatal, and that is deliberate rather than lazy. A hard-coded
+        vendor error-type list is exactly what §6.10's volatility warning says will rot, and every
+        fatal condition this project has actually met closed the socket instead — the GA-shape
+        migration with ``4000 invalid_request_error.beta_api_shape_disabled``, and a bad key fails
+        fast at boot (§3.12.3) without ever reaching a live session.
+
+        Until AVID-178 this frame became ``SessionClosed``, so **every barge-in tore down a working
+        socket**: 10 sessions in 80 s of bench, each announcing "one sec, I lost my connection" to
+        a user whose connection was fine.
+        """
+        self._error_count += 1
+        _log.warning("%s", _format_error_frame(msg, count=self._error_count))
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): tell the model the user cut ``item_id`` off at
@@ -686,9 +767,25 @@ class OpenAIRealtimeClient:
         )  # step 5 — or the model just sits (§6.6)
 
     async def _send(self, payload: dict[str, Any]) -> None:
-        """Serialise and send one client event, if the socket is live. Non-blocking (P8)."""
+        """Serialise and send one client event, if the socket is live. Non-blocking (P8).
+
+        **Every client event is stamped with a traceable ``event_id``** (AVID-178). The API echoes
+        it back in ``error.event_id``, which is the difference between a log line saying *"something
+        you sent was rejected"* and one saying *"our ``response.cancel`` was rejected"* — the whole
+        of #178's Stage 2 hypothesis ranking collapses to a fact because of these four lines.
+
+        The id is ``avid_<n>_<type>``, restricted to ``[a-z0-9_]`` so no server-side format
+        assumption is under test. It carries **no user content and no key** — only a counter and
+        the message type we chose ourselves. Cost on the audio path is one increment and ~30 bytes
+        against a ~1280-byte base64 frame; that is noise against P8, and it is stamped on
+        ``input_audio_buffer.append`` too *because* a rejected append is exactly the error we
+        currently cannot see.
+        """
         if self._ws is not None:
-            await self._ws.send(json.dumps(payload))
+            self._sent_seq += 1
+            kind = str(payload.get("type", "unknown")).replace(".", "_")
+            stamped = {"event_id": f"avid_{self._sent_seq}_{kind}", **payload}
+            await self._ws.send(json.dumps(stamped))
 
 
 # --- CapturingRealtimeClient (#105): record a live session into the replay format ---------
