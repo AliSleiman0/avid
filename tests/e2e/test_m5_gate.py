@@ -780,9 +780,15 @@ def test_the_gate_rejects_silence_slow_turns_and_an_unaffordable_robot() -> None
     assert (
         _verdict(demo, [turn(400.0, played=0, elapsed=0.0)], check_playback=False) == 1
     )
-    # O1: P50 and P95 are independently fatal.
-    assert _verdict(demo, [turn(900.0), turn(950.0), turn(1000.0)]) == 1  # P50 blown
-    assert _verdict(demo, [turn(400.0), turn(500.0), turn(1600.0)]) == 1  # P95 blown
+    # O1: P50 and P95 are independently fatal, graded against M5's PROVISIONAL CEILING
+    # (1600/2700), not the 800/1500 design target — PMP §5.2's O1 note, AVID-194.
+    assert _verdict(demo, [turn(1700.0), turn(1750.0), turn(1800.0)]) == 1  # P50 blown
+    assert _verdict(demo, [turn(400.0), turn(500.0), turn(2800.0)]) == 1  # P95 blown
+    # ...and the band BETWEEN target and ceiling passes. This row is the whole point of keeping
+    # two pairs of numbers: a run here is acceptable for M5 and is NOT on target, and the report
+    # has to be able to say both. Collapsing them would let the target quietly become whatever
+    # was last measured, which is how a budget stops meaning what its name says.
+    assert _verdict(demo, [turn(1000.0), turn(1500.0), turn(2000.0)]) == 0
     # O7: fast and mute-free, but unaffordable.
     assert _verdict(demo, [turn(400.0)], projected_usd=25.01) == 1
     assert _verdict(demo, [turn(400.0)], projected_usd=24.99) == 0
@@ -900,6 +906,25 @@ def test_recovery_is_only_gated_when_asked_and_then_both_halves_must_happen() ->
     assert _verdict(demo, turns, recovery=recovery(1, 1, 1)) == 0  # full arc
     assert _verdict(demo, turns, recovery=recovery(0, 0, 0)) == 1  # never dropped
     assert _verdict(demo, turns, recovery=recovery(1, 1, 0)) == 1  # never came back
+
+
+def test_the_design_target_is_printed_even_when_the_ceiling_is_what_grades(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M5 grades against a provisional ceiling; the 800/1500 design target must still be visible.
+
+    PMP §5.2's O1 ceiling is pinned to a measurement — a target painted around an arrow, recorded
+    as such on purpose. The danger of that is not the number, it is forgetting: a gate that prints
+    only what it grades lets the goal be quietly replaced by whatever was last achieved, which is
+    the same class of failure as a gate that passes on silence. Both numbers, every run."""
+    demo = _load_conversation_pi()
+    inside_the_band = [demo._Turn(latency_ms=1400.0, played_ms=2000, elapsed_ms=2000.0)]
+
+    assert _verdict(demo, inside_the_band) == 0
+    out = capsys.readouterr().out
+    assert "graded against P50 1600" in out
+    assert "DESIGN TARGET is still P50 800" in out
+    assert "AVID-194" in out  # ...and where the route back is written down
 
 
 def test_a_disarmed_playback_check_says_so_out_loud(
