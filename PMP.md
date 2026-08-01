@@ -237,13 +237,15 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M2** | **HAL real** | 2 | Every port has a real adapter that passes the identical contract test suite as its fake. Camera, servo, mic, speaker, display all individually proven. | **8** | M | 21 |
 | **M3** | **The face lives** | 3 | All 7 affects[^m3-affect-count] render on the physical 3.5″ display; a scripted affect sequence plays; measured affect→pixel latency ≤150 ms. | **8** | M | 29 |
 | **M4** | **Audio loop** | 4 | Speak into the USB mic, hear it from the speaker with ≤200 ms round-trip.[^m4-latency] Local VAD correctly gates speech vs. silence over a 10-minute recording.[^m4-vad] | **8** | M | 37 |
-| **M5** | **It talks** | 5 | Full UC-01. Two-minute conversation. Barge-in works. Latency histogram meets O1. Cost meter shows projected monthly spend meeting O7. Survives a Wi-Fi unplug and recovers. | **13** | **L** | 50 |
+| **M5** ✅ | **It talks** | 5 | Full UC-01. Two-minute conversation. Barge-in works. Latency histogram meets O1. Cost meter shows projected monthly spend meeting O7. Survives a Wi-Fi unplug and recovers. | **13** | **L** | 50 |
 | **M6** | **It has a personality** | 6 | Same question asked in two personality configs yields recognizably different responses. Affect inferred from response drives the face without `ai` importing `display`. | **5** | M | 55 |
 | **M7** | **It remembers** | 7 | Full UC-02 + UC-05. Tell it 20 facts, restart the process, recall all 20. Semantic query returns the right fact. Contradictory fact supersedes correctly. "Forget that" deletes. | **13** | **L** | 68 |
 | **M8** | **It sees** | 8 | Full UC-04. Presence detection with hysteresis, no flapping over a 1-hour desk recording. ≤1 core, ≤5 fps, thermals stable. | **8** | M | 76 |
 | **M9** | **It moves** | 9 | Affect drives gesture. Nod, turn, idle micro-motion. No brown-out under stall. Servo relaxes when idle (no buzz). Gesture preemption works. | **5** | M | 81 |
 | **M10** | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
 | **M11** | **It's a product** | 11 | 30-day unattended soak. O5 met. Runbook written. v1.0.0 tagged. | **13** | M | 107 |
+
+✅ = sealed and tagged. **M5 sealed 2026-08-01 as `v0.M5.0` with two gaps recorded rather than closed**, because a milestone marker that hides what it did not reach is worth nothing: **O1's P95 is not met** (P50 1530 ms passes the provisional ceiling, but 1 turn in 10 exceeds 2700 ms where a P95 allows 1 in 20 — cause is AVID-194, two VADs disagreeing about where an utterance ends, written up in `docs/enhancement-single-turn-authority.md`), and **AC-7's 60-second recorded demo was deferred**. AVID-188 and AVID-189 are also open from the same gate. The tail is the part a person notices, so AVID-194 opens M6's list.
 
 [^m3-affect-count]: **"7 affects" counts 4 Tier-1 + 3 Tier-2** — IDLE, LISTENING, THINKING,
     SPEAKING, plus HAPPY, SAD, CONFUSED. `Affect` also has an **eighth** member, `SLEEPING`

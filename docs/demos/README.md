@@ -195,8 +195,33 @@ operator's ear. Accepted deliberately, not overlooked.
 
 ## M5 — It talks
 
-*Not yet sealed.* The gate is AVID-106; the bench runs so far produced defects, not a seal, and
-their evidence is committed under `m5_evidence/`.
+**Sealed 2026-08-01, `v0.M5.0`** — with two named gaps, listed below. The gate is AVID-106 and the
+evidence is on that issue, run by run.
+
+| AC | | |
+|---|---|---|
+| AC-1 | ✅ | this harness + `tests/e2e/test_m5_gate.py` |
+| AC-2 | ✅ | 6 turns, ~2 minutes, live |
+| AC-3 | ✅ | 4 barge-ins, speaker cut every time, **zero session losses** |
+| AC-4 | ⚠️ | **P50 1530 ms** inside M5's provisional ceiling; **P95 NOT met** — see below |
+| AC-5 | ✅ | O7 **$8.26–$11.01/month** against $25 |
+| AC-6 | ✅ | socket closed (code 1006) → DEGRADED → cue → reconnect → resumed, 72.1 s downtime |
+| AC-7 | ⏸ | 60-second recorded demo — **deferred**, not done |
+| AC-8 | ✅ | this file, `docs/journal.md`, PMP §5.2, SDS §6.x; CI green on 3.11 and 3.13 |
+
+**AC-4's gap, stated plainly.** PMP §5.2's O1 target is P50 ≤ 800 / P95 ≤ 1500 ms. M5 grades
+against a *provisional ceiling* of 1600 / 2700 ms, itself pinned to a measurement and recorded as
+such. P50 passes. P95 does not: pooling the two flagship runs (n=10) gives P50 1530 ms but **1 turn
+in 10 above 2700 ms**, where a P95 tolerates 1 in 20. Fewer than 20 samples cannot contain a real
+P95 at all — nearest rank picks the maximum — so the harness now refuses to call it one.
+
+The cause is **AVID-194**: two VADs, ours at 900 ms and the server's at 500 ms, disagreeing about
+where an utterance ends, so the server answers fragments of sentences still being spoken. Written
+up in `docs/enhancement-single-turn-authority.md`. **The tail is the part a person notices**, so
+this is the top of the next milestone's list, not a closed question.
+
+Also open from this gate: AVID-188 (a failed reconnect escapes as an unhandled `OSError`, once per
+utterance) and AVID-189 (playback edges land in IDLE on the first turn after a reconnect).
 
 ### Reading the echo gate's calibration line (AVID-159, AC-3)
 
@@ -210,7 +235,7 @@ what the mic hears while the robot speaks.
 logs one line:
 
 ```
-echo gate: floor -19.4 dBFS, loudest suppressed edge -14.1 dBFS (5 suppressed), margin 6.0 dB
+echo gate: floor -48.5 dBFS, loudest suppressed frame -120.0 dBFS (0 suppressed), margin 3.0 dB
 ```
 
 Collect them all, and pair them with the level of any barge-in that *did* work. What matters is
@@ -218,13 +243,25 @@ whether the two populations separate:
 
 - **They separate** → set `barge_in_margin_db` between them with headroom, record the value **and
   the distance and voice level it was measured at** (AC-3's wording requires both), and re-run.
-- **`suppressed` is 0 on every reply and barge-in works** → the coupling is weaker than the margin
-  and the shipped 6.0 dB is already fine. Record it anyway.
+- **`suppressed` is 0 on every reply and barge-in works** → the coupling is weaker than the margin.
+  Record it anyway. **This is what actually happened** (2026-08-01): 4 barge-ins, 0 suppressed
+  frames, at ~50 cm and conversational volume.
 - **They overlap** → stop. No margin can be tuned into working, and turning the knob will only
   trade a robot that cuts itself off for one that is deaf while speaking. The honest outcomes are
   full half-duplex (a very large margin, AC-3 waived as M4's was) or **AVID-163**, acoustic echo
   cancellation.
 
-The shipped 6.0 dB is deliberately permissive: its failure mode is the robot occasionally
-interrupting itself, which is loud, logged and recoverable. A too-high margin fails *silently* —
-a robot that cannot be interrupted looks exactly like one that simply was not.
+**Shipped value: `barge_in_margin_db = 3.0`**, measured 2026-08-01. The original 6.0 was a
+provisional guess that gated out real speech (~150 suppressed frames per run); 3.0 dropped that to
+8 and then to 0. ⚠️ One run per value and nothing between 3 and 6 was tried, so it is the
+best-supported number rather than a proven optimum.
+
+A permissive margin fails *loudly* — the robot occasionally interrupts itself, which is logged and
+recoverable. A too-high margin fails **silently**: a robot that cannot be interrupted looks exactly
+like one that simply was not.
+
+⚠️ **A margin is only valid at the noise floor it was measured at.** The same evening this was
+calibrated, the room's floor rose ~20 dB (−40 dBFS to −18 dBFS; a bare mic recording read −17.7
+dBFS RMS with nobody speaking) and the robot stopped detecting speech entirely — no session, no
+reply, no error. Nothing was wrong with the code. **Record the floor alongside the margin**, and
+suspect the room before the robot when it goes quiet.
