@@ -501,18 +501,36 @@ def _report_conversation(
         )
         return 1
 
-    if p50 > p50_budget_ms:
-        print(f"FAIL: P50 {p50:.0f} ms exceeds the {p50_budget_ms:.0f} ms budget")
-        failures.append("O1-p50")
-    if p95 > p95_budget_ms:
-        print(f"FAIL: P95 {p95:.0f} ms exceeds the {p95_budget_ms:.0f} ms budget")
-        failures.append("O1-p95")
-    if projected_monthly_usd > budget_usd:
+    if recovery is not None:
+        # A recovery run CUTS THE NETWORK on purpose, so its O1 samples measure the outage, not
+        # the robot. The 2026-08-01 seal run scored a 41 s turn — the reply to an utterance
+        # spoken mid-cut — and reported it as a latency failure. It was not one; it was the test
+        # working. This is the same refusal as the `replay` case above and for the same reason:
+        # a number produced under a stimulus the harness itself induced is not a measurement of
+        # the thing the number names.
+        #
+        # AC-4 therefore comes from a run WITHOUT --require-recovery, and AC-6 from one with it.
+        # Folding them into a single pass was a convenience that cost a seal; the criteria want
+        # incompatible conditions. This is strictly stricter than grading both here — the
+        # recovery run may no longer be cited as AC-4 evidence at all.
         print(
-            f"FAIL: projected ${projected_monthly_usd:.2f}/month exceeds the "
-            f"${budget_usd:.0f} O7 budget (§6.10.6 tripwire)"
+            "WITHHELD: this run induced a network outage (--require-recovery), so the O1 and O7\n"
+            "          figures above describe the outage as much as the robot and are NOT claimed.\n"
+            "          Take AC-4/AC-5 from a run without --require-recovery."
         )
-        failures.append("O7")
+    else:
+        if p50 > p50_budget_ms:
+            print(f"FAIL: P50 {p50:.0f} ms exceeds the {p50_budget_ms:.0f} ms budget")
+            failures.append("O1-p50")
+        if p95 > p95_budget_ms:
+            print(f"FAIL: P95 {p95:.0f} ms exceeds the {p95_budget_ms:.0f} ms budget")
+            failures.append("O1-p95")
+        if projected_monthly_usd > budget_usd:
+            print(
+                f"FAIL: projected ${projected_monthly_usd:.2f}/month exceeds the "
+                f"${budget_usd:.0f} O7 budget (§6.10.6 tripwire)"
+            )
+            failures.append("O7")
 
     if failures:
         print(f"FAILED: {', '.join(failures)} — see the lines above for each")
