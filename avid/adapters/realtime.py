@@ -500,6 +500,11 @@ class OpenAIRealtimeClient:
         # one reply's worth of deltas.
         self._inbox: asyncio.Queue[RealtimeEvent | None] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
+        # The O1 decomposition (#106 AC-4). Wire-arrival marks for the frames between the
+        # SERVER deciding the user stopped talking and the first byte of reply audio — see
+        # :meth:`_note_first_token_timing` for why they are read here and not computed anywhere else.
+        self._speech_stopped_ns: int | None = None
+        self._response_created_ns: int | None = None
 
     def __repr__(self) -> str:
         """Key-free repr (AC-6): the secret must never reach a log line via ``repr``."""
@@ -718,6 +723,7 @@ class OpenAIRealtimeClient:
                     self._note_error(msg)
                     continue  # a complaint, not a close — SDS §6.2.5
                 self._track_response(msg)
+                self._note_first_token_timing(msg)
                 try:
                     event = _translate(msg)
                 except Exception:  # noqa: BLE001 - a surprising frame must not kill the reader
@@ -780,6 +786,59 @@ class OpenAIRealtimeClient:
             self._active_response = str(response.get("id", "")) or "active"
         elif kind == "response.done":
             self._active_response = None
+
+    def _note_first_token_timing(self, msg: dict[str, Any]) -> None:
+        """Log where O1 actually goes, once per reply (#106 AC-4, SDS §2.8.1).
+
+        Two bench runs put O1's P50 at 1773 / 1943 ms against an 800 ms budget, with a *warm*
+        1422 ms connect on the second — so session open is not the cause and nobody knew what
+        was. §2.8.1 itemises the budget but the robot only ever reported the total, and the
+        rule that #168 cost a session to learn is that you measure before you choose a knob.
+
+        Three marks, all taken **as the frame arrives on the socket**, which is only honest
+        because AVID-182 made the reader drain at wire speed — taken at consumption speed they
+        would have measured playback, which is exactly the bug that motivated this.
+
+        * ``input_audio_buffer.speech_stopped`` — the SERVER's own speech-end decision. The right
+          zero: it is what ``[ai.turn_detection] silence_duration_ms`` delays, and unlike our
+          falling edge it does not move when ``[gate] silence_hold_ms`` changes (AVID-176).
+        * ``response.created`` — the server accepted the turn and began work.
+        * the first ``response.output_audio.delta`` — first audio exists.
+
+        ``created → first delta`` is the model's time-to-first-token plus one network hop, and it
+        is the number that decides whether O1 ≤ 800 ms is reachable **at all** with this model:
+        none of it is ours to optimise, and no knob in ``config/pi.toml`` touches it. The
+        remainder — O1 minus this total minus the commit delay — is ours.
+
+        INFO, not DEBUG: this is the evidence a milestone criterion turns on, and it has to
+        survive an ordinary bench run without anyone remembering to raise a log level.
+        """
+        now_ns = time.monotonic_ns()
+        kind = msg.get("type")
+        if kind == "input_audio_buffer.speech_stopped":
+            self._speech_stopped_ns = now_ns
+            self._response_created_ns = None
+            return
+        if kind == "response.created":
+            self._response_created_ns = now_ns
+            return
+        if kind != "response.output_audio.delta" or self._speech_stopped_ns is None:
+            return
+        # First delta of this reply: report, then disarm so the rest of the stream is silent.
+        stopped_ns, self._speech_stopped_ns = self._speech_stopped_ns, None
+        created_ns = self._response_created_ns
+        accepted_ms = (
+            (created_ns - stopped_ns) / _NS_PER_MS if created_ns else float("nan")
+        )
+        model_ms = (now_ns - created_ns) / _NS_PER_MS if created_ns else float("nan")
+        _log.info(
+            "first token: server speech-stop -> response.created %.0f ms, "
+            "-> first audio delta %.0f ms (model TTFT + one hop, NOT ours); "
+            "total %.0f ms from the server's own speech-stop",
+            accepted_ms,
+            model_ms,
+            (now_ns - stopped_ns) / _NS_PER_MS,
+        )
 
     def _note_error(self, msg: dict[str, Any]) -> None:
         """Log one ``error`` server frame. **Never** ends the session (AVID-178, SDS §6.2.5).
