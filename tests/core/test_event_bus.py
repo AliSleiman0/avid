@@ -107,6 +107,35 @@ async def test_publish_returns_before_handler_completes() -> None:
         await asyncio.wait_for(handled.wait(), timeout=1.0)
 
 
+async def test_publish_does_not_suspend_the_caller() -> None:
+    """Stronger than the test above, and load-bearing elsewhere: ``publish`` never *yields*.
+
+    Returning "before the handler completes" would still allow it to hand control back to the
+    loop. It does not — its body is a started-check plus a synchronous ``_enqueue`` — and
+    :meth:`AudioService.play` leans on that: it re-checks its playback epoch **once**, after
+    announcing the episode, on the basis that neither the publish nor the (uncontended) state
+    transition inside that window can let a barge-in in. Pinned here rather than assumed, because
+    if a later change gives ``publish`` a real await — backpressure, tracing, batching — that
+    reasoning silently stops holding and AVID-174 comes back through a door nobody is watching.
+
+    Proven by racing it against a task that sets a flag the instant it is scheduled: if ``publish``
+    suspended even once, that task would run and the flag would be set before ``publish`` returns.
+    """
+    bus = AsyncioEventBus()
+    bus.subscribe(TickEvent, lambda _e: asyncio.sleep(0), name="noop")
+    yielded = False
+
+    async def flag() -> None:
+        nonlocal yielded
+        yielded = True
+
+    async with bus:
+        watcher = asyncio.create_task(flag())
+        await bus.publish(make())
+        assert not yielded, "publish() suspended the caller"
+        await watcher
+
+
 async def test_ordered_per_publisher() -> None:
     """AC (§3.5.4): a single subscriber sees events in publish order."""
     bus = AsyncioEventBus()
