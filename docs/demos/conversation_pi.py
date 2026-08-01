@@ -538,13 +538,21 @@ def _report_conversation(
 
     print(f"PASS: {len(turns_seen)} live turns within O1 and O7")
     if check_playback:
-        worst_div = max(
-            abs(turn.elapsed_ms - turn.played_ms) / max(1, turn.played_ms)
+        # Report the SHORTFALL, which is what `_diverged` grades — not `abs()`. The two-sided
+        # figure prints the network's inter-delta gaps as though they were a speaker fault: the
+        # 2026-08-01 recovery run passed while announcing "worst divergence 27.0%" against a 15%
+        # tolerance, which reads as either a broken check or a broken robot and was neither. A
+        # summary line that grades a different quantity from the check above it is a bug report
+        # waiting to be filed against nothing.
+        worst_short = max(
+            (turn.played_ms - turn.elapsed_ms) / max(1, turn.played_ms)
             for turn in turns_seen
         )
         print(
             f"      playback integrity: {len(turns_seen)}/{len(turns_seen)} turns, "
-            f"worst divergence {worst_div * 100:.1f}%   (speaker=alsa)"
+            f"worst shortfall {max(0.0, worst_short) * 100:.1f}%   (speaker=alsa)\n"
+            f"      (elapsed exceeding played is inter-delta network gap, not a fault — "
+            f"see _diverged)"
         )
     else:
         print(
