@@ -100,8 +100,16 @@ service works in terms of domain events, never a vendor's message shapes.
 
 - **Swapping model or voice is a config edit**, not code — `[ai] model`, `[ai]
   voice`, `[adapters] realtime = "openai" | "replay"` (SDS §9.6). Model names are
-  pinned to dated snapshots (`gpt-realtime-mini-2025-12-15`) because the
-  Realtime family churns fast (SDS §6.10 volatility warning).
+  pinned to dated snapshots (currently `gpt-realtime-2025-08-28`, SDS §6.10.5)
+  because the Realtime family churns fast (SDS §6.10 volatility warning). The
+  payoff is real: M5 swapped mini → flagship for a **latency** reason in one
+  config line, and only the cost meter's rate table moved with it.
+- **Measure the model before you tune around it.** M5 was about to amend a
+  normative latency budget on the assumption that the flagship would be slower;
+  `tools/probe_first_token.py` measured four snapshots in two minutes with no
+  hardware and found it **200 ms faster**. Because the vendor lives behind one
+  adapter, that experiment was cheap — which is the point of the boundary, not a
+  side effect of it.
 - **The adapter is the blast radius.** If OpenAI changes the Realtime API, exactly
   one adapter changes (risk R-10, PMP §9.2). The `RealtimeClient` adapter →
   `ConversationService` translates the vendor's stream into our `conversation.*`
@@ -192,6 +200,35 @@ code **≥ 90% covered**; contract tests updated if a port changed; tests pass u
 `PYTHONASYNCIODEBUG=1`; CI green on **3.11 and 3.13**; SDS updated if an interface/
 event/schema changed; new failure paths log with a correlation ID; no new
 `# type: ignore`/`# noqa` without an inline reason.
+
+### 7.1 Gates and harnesses are held to the same standard as the robot
+
+**A gate that can pass on silence is not a gate** (M4's lesson, `docs/demos/`).
+M5 added the corollaries, and it added them the expensive way — of the defects
+its bench runs surfaced, *most were in the measuring, not the robot*: a network
+cut that never closed a socket, a reporter that returned on its first failure and
+hid a criterion that had passed, a summary printing `abs()` of a quantity the
+check grades one-sided, a banner quoting a config value the run no longer used,
+and a "P95" over five samples that is arithmetically the maximum.
+
+So, for anything that produces a number a milestone turns on:
+
+- **Report the quantity you grade.** A summary line describing something the
+  check does not test is a bug report filed against nothing.
+- **Name the statistic honestly.** Nearest-rank P95 below n=20 *is* the maximum;
+  printing it as a percentile misleads in both directions.
+- **Every criterion reports before any verdict is decided.** Hiding a passing
+  criterion behind an unrelated failure is the sibling of passing on silence.
+- **A stimulus the harness induces is not a measurement of the robot** — a run
+  that cuts the network cannot also claim a latency result.
+- **Read config, never restate it.** A literal in a banner or docstring is drift
+  with a delay fuse.
+- **Prove the fix bites**: commit, then neuter the specific guard and confirm an
+  *assertion* fails. A red for the wrong reason is not a proof.
+
+Widening a budget to fit a measurement is a last resort, taken only with the
+diagnosis attached — and the original target stays visible in the report, or it
+quietly becomes whatever was last achieved.
 
 ---
 
