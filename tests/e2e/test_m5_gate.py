@@ -89,6 +89,9 @@ _CHANNELS = 1
 _CHUNK_MS = 10
 _FRAME_BYTES = 320  # 16000 * 1 * 2 * 10 // 1000
 _SILENCE_HOLD_MS = 20
+# The uplink's DAC-drain tail (§6.2.4). Passed explicitly since AVID-180: a value this rig
+# never varies is still a value the harness must state, or it silently reports someone else's.
+_ECHO_TAIL_MS = 150
 _RING_BUFFER_MS = 300
 
 # A recognizable, non-silent frame: explicit pcm skips FakeMicrophone's tone synth, so the P8
@@ -336,6 +339,7 @@ async def _drive_session(
         channels=_CHANNELS,
         silence_hold_ms=_SILENCE_HOLD_MS,
         barge_in_margin_db=barge_in_margin_db,
+        echo_tail_ms=_ECHO_TAIL_MS,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an M4 echo (#103).
         loopback=False,
     )

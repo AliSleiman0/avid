@@ -231,6 +231,8 @@ async def main() -> int:
         sample_rate=config.microphone.sample_rate,
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
+        barge_in_margin_db=config.gate.barge_in_margin_db,
+        echo_tail_ms=config.gate.echo_tail_ms,
         loopback=False,
     )
     client = _CountingClient(_build_realtime(config, clock=clock))

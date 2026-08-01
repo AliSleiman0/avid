@@ -231,6 +231,10 @@ async def _run_loopback(
         sample_rate=config.microphone.sample_rate,
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
+        # From config like every other knob here (AVID-180) — an omitted one silently reports the
+        # default, which is how the echo-gate margin went unmeasured across four bench runs.
+        barge_in_margin_db=config.gate.barge_in_margin_db,
+        echo_tail_ms=config.gate.echo_tail_ms,
         # The transport gate has no ConversationService to consume the TurnSink seam, so keep the
         # M4 echo: _end_speech loops the captured utterance straight back to the speaker (#103).
         loopback=True,
