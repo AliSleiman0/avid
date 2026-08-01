@@ -101,6 +101,7 @@ from avid.domain import (
     Cue,
     Event,
     Fact,
+    RobotState,
     SystemDegradedEntered,
     SystemDegradedExited,
     Trigger,
@@ -115,6 +116,11 @@ _SOURCE = "ConversationService"
 
 _NS_PER_MS = 1_000_000
 _NS_PER_S = 1_000_000_000
+
+# The `cause` stamped on system.degraded_entered when the §6.9 first-token deadline expires
+# (AVID-171). Distinct from a socket drop's cause so a bench log — and #106's AC-6 counter —
+# can tell "the model went quiet" from "the cable came out".
+_THINK_TIMEOUT_CAUSE = "think_timeout"
 
 # The §6.7-path-1 memory block header (§6.4 layer 4). Kept short — the block is billed as input on
 # every turn (§6.10), and it is the *only* memory content OpenAI ever sees (§7.10), so it stays lean.
@@ -159,6 +165,7 @@ class ConversationService:
         memory: MemoryTools,
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
+        think_timeout_s: float,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -169,6 +176,7 @@ class ConversationService:
         self._memory = memory
         self._idle_close_s = session_idle_close_s
         self._memory_inject_timeout_s = memory_inject_timeout_s
+        self._think_timeout_s = think_timeout_s
 
         # Session lifecycle. The lock guards every open/teardown/degraded mutation so the
         # reactive handlers and the owned tasks cannot race the session in or out.
@@ -197,6 +205,10 @@ class ConversationService:
         self._idle_task: asyncio.Task[None] | None = None
         # The thinking cue, cancelled the moment the turn's first assistant delta arrives.
         self._thinking_task: asyncio.Task[None] | None = None
+        # The §6.9 first-token deadline (AVID-171), armed at the same falling edge as the cue
+        # above and cancelled by the same first delta. The cue is perceived quality; this one is
+        # a state edge, and the difference is why it may not ride the bus best-effort.
+        self._think_task: asyncio.Task[None] | None = None
         # Best-effort cue tasks, swept on stop().
         self._cue_tasks: set[asyncio.Task[None]] = set()
 
@@ -265,6 +277,13 @@ class ConversationService:
         AudioService's, already done by the time this runs, so this handler never drives it.
         """
         async with self._lock:
+            # The user talking again ends the previous turn's wait, whatever came of it —
+            # `(THINKING, AUDIO_SPEECH_STARTED) -> LISTENING` moves the machine out from under an
+            # armed deadline, and LISTENING has no THINK_TIMEOUT row (AVID-171). Before the
+            # session branch on purpose: it is true whether or not a session is open, and
+            # `_cancel_task(None)` is a no-op.
+            self._cancel_task(self._think_task)
+            self._think_task = None
             self._turn_id = event.correlation_id
             if not self._session_open:
                 # Cold session (§6.2.3). The §6.7-path-1 memory block is composed and injected here,
@@ -303,6 +322,9 @@ class ConversationService:
             if not self._session_open:
                 return
             self._arm_idle()
+            # The §6.9 deadline starts at the same instant as the cue below, and for the same
+            # reason: this is the moment the wait for a first token actually begins (AVID-171).
+            self._arm_think_timeout()
         self._start_thinking_cue()
 
     async def _on_playback_finished(self, event: AudioPlaybackFinished) -> None:
@@ -405,6 +427,11 @@ class ConversationService:
             self._first_audio = True
             self._cancel_task(self._thinking_task)
             self._thinking_task = None
+            # The token arrived: the §6.9 deadline this turn was racing is void (AVID-171). Here
+            # rather than at the playback edge because this is where "first token" is defined,
+            # and it runs before `sink.play`, so it always precedes THINKING -> SPEAKING.
+            self._cancel_task(self._think_task)
+            self._think_task = None
         await self._sink.play(ev.chunk, item_id=ev.item_id)
 
     async def _on_tool_call(self, ev: ToolCallRequested) -> None:
@@ -463,22 +490,47 @@ class ConversationService:
         any→DEGRADED, and plays a canned CueBank phrase so the robot says *something* with no
         network. Tears the session down; the next ``audio.speech_started`` re-opens cold.
         """
+        # Read before _degrade clears it — this is the only caller that has an honest value.
         was_mid_turn = self._turn_active
         await self._publish(
             ConversationSessionLost(
                 **self._env(), cause=ev.cause, was_mid_turn=was_mid_turn
             )
         )
-        await self._publish(SystemDegradedEntered(**self._env(), cause=ev.cause))
-        await self._state.transition(
-            Trigger.CONVERSATION_SESSION_LOST, correlation_id=self._corr()
+        await self._degrade(
+            cause=ev.cause,
+            trigger=Trigger.CONVERSATION_SESSION_LOST,
+            cue=Cue.LOST_CONNECTION,
         )
-        self._play_cue(Cue.LOST_CONNECTION)
+
+    async def _degrade(self, *, cause: str, trigger: Trigger, cue: Cue) -> None:
+        """Enter DEGRADED and tear the session down — the one path in, whatever the cause.
+
+        Announce (``system.degraded_entered``) → drive *trigger* → say something local → mark the
+        outage → tear down. Two callers: :meth:`_on_session_closed` when the socket drops, and
+        :meth:`_think_timer` when the model produces no first token (§6.9, AVID-171).
+
+        ``conversation.session_lost`` is deliberately **not** published here. It is loss-specific:
+        its first line is "the Realtime session dropped", it carries ``was_mid_turn``, which a
+        timeout has no honest value for, and ``conversation_pi.py`` counts it to grade #106's AC-6
+        — publishing it on a self-inflicted teardown would make a pulled cable and a model that
+        went quiet indistinguishable in the one artifact that grades recovery. ``_idle_timer``
+        sets the precedent: it also ends in ``aclose()`` and publishes nothing.
+
+        **The teardown is not tidiness, it is load-bearing** (SDS §3.10.3). DEGRADED has a row for
+        neither ``audio.playback_*`` trigger, justified by every path here killing the pump first —
+        so a path that left it alive would let a late delta drive ``playback_started`` from
+        DEGRADED, where there is no row. It is also what makes recovery reachable at all:
+        :meth:`_exit_degraded` fires only when :meth:`_on_speech_started` finds ``_session_open``
+        False. Callers may run inside the pump task; its own cancel is a no-op (``_cancel_task``),
+        and ``aclose`` ends the stream so the loop returns on its own.
+        """
+        await self._publish(SystemDegradedEntered(**self._env(), cause=cause))
+        await self._state.transition(trigger, correlation_id=self._corr())
+        self._play_cue(cue)
         self._degraded = True
         self._lost_at_ns = self._clock.monotonic_ns()
         self._turn_active = False
-        # We are running *inside* the pump task, so its own cancel is a no-op (see
-        # _cancel_task); aclose ends the stream and this loop returns on its own.
         async with self._lock:
             await self._teardown_locked()
 
@@ -565,6 +617,57 @@ class ConversationService:
         async with self._lock:
             await self._teardown_locked()
 
+    # --- the §6.9 first-token deadline (AVID-171) ----------------------------------------
+
+    def _arm_think_timeout(self) -> None:
+        """(Re)start the first-token countdown from *now*. Caller holds the lock."""
+        self._cancel_task(self._think_task)
+        self._think_task = asyncio.create_task(
+            self._think_timer(), name="ConversationService.think_timeout"
+        )
+
+    async def _think_timer(self) -> None:
+        """Degrade if the model produces no first token within ``think_timeout_s`` (§6.9).
+
+        Sleeps on the injected clock, exactly like :meth:`_idle_timer`. The three guards below
+        are not defensive padding — each covers a *reachable* arc that leaves this timer armed:
+
+        * ``_first_audio`` — the delta landed on the same tick the deadline expired.
+        * ``_session_open`` — an idle close or :meth:`stop` got there first.
+        * **the state re-check** — AVID-161's overlap, and the only one no cancel site can
+          reach. A reply to an *earlier* turn draining while this one waits drives
+          ``THINKING + audio.playback_finished -> IDLE``, leaving this timer armed in IDLE with
+          no first audio of its own and no rising edge to cancel it. Only
+          ``(THINKING, THINK_TIMEOUT)`` exists, so firing there would log an "ignored illegal
+          transition" WARNING on ``avid.state`` — the noise the M5 gate forbids, and the exact
+          class of bug AVID-158/161/162 were. Cancelling on ``turn_done`` instead would be
+          wrong: an earlier turn finishing says nothing about *this* turn's first token.
+
+        Degrading here is a deliberate give-up on a socket that is still open, which is why it
+        goes through :meth:`_degrade` (tearing the session down) and publishes no
+        ``conversation.session_lost`` — see that method.
+        """
+        await self._clock.sleep(self._think_timeout_s)
+        if self._first_audio or not self._session_open:
+            return
+        if self._state.state is not RobotState.THINKING:
+            _log.debug(
+                "think timeout elapsed in %s, not THINKING — not degrading [correlation_id=%s]",
+                self._state.state.name,
+                self._corr(),
+            )
+            return
+        _log.warning(
+            "no first token after %ss — degrading [correlation_id=%s]",
+            self._think_timeout_s,
+            self._corr(),
+        )
+        await self._degrade(
+            cause=_THINK_TIMEOUT_CAUSE,
+            trigger=Trigger.THINK_TIMEOUT,
+            cue=Cue.SOMETHING_WRONG,
+        )
+
     # --- teardown & task helpers ---------------------------------------------------------
 
     async def _teardown_locked(self) -> None:
@@ -585,6 +688,8 @@ class ConversationService:
         self._pump_task = None
         self._cancel_task(self._thinking_task)
         self._thinking_task = None
+        self._cancel_task(self._think_task)
+        self._think_task = None
         await self._client.aclose()
 
     def _start_thinking_cue(self) -> None:

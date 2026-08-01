@@ -251,6 +251,43 @@ def test_the_recovery_arc_composes_when_a_slow_open_outran_the_user() -> None:
     ]
 
 
+def test_the_think_timeout_arc_degrades_and_the_next_turn_recovers() -> None:
+    """AVID-171 / SDS §6.9: the turn whose first token never arrives, as one journey.
+
+    The row ``(THINKING, THINK_TIMEOUT) -> DEGRADED`` has existed since AVID-7 and **nothing
+    could reach it** — the timer was never wired. The bench paid for that difference: a 60 ms
+    noise blip opened a session the model never answered, and the robot sat in THINKING for
+    **54 seconds** with no row out, because the only other thing watching that silence was the
+    idle close, which tears the socket down and drives no transition at all.
+
+    The tail is deliberately the full recovery: degrading is only worth anything if the next
+    utterance gets the robot back, and that half rides AVID-162's row unchanged."""
+    assert (
+        _walk(
+            RobotState.IDLE,
+            Trigger.AUDIO_SPEECH_STARTED,  # the blip
+            Trigger.AUDIO_SPEECH_ENDED,  # ...and the falling edge that arms the deadline
+            Trigger.THINK_TIMEOUT,  # no first token: give up on a socket that is still open
+            Trigger.AUDIO_SPEECH_STARTED,  # the user tries again — absorbed while open() runs
+            Trigger.SYSTEM_DEGRADED_EXITED,  # the reopen succeeded
+            Trigger.AUDIO_SPEECH_ENDED,
+            Trigger.AUDIO_PLAYBACK_STARTED,
+            Trigger.AUDIO_PLAYBACK_FINISHED,
+        )
+        == [
+            RobotState.IDLE,
+            RobotState.LISTENING,
+            RobotState.THINKING,
+            RobotState.DEGRADED,
+            RobotState.DEGRADED,
+            RobotState.LISTENING,
+            RobotState.THINKING,
+            RobotState.SPEAKING,
+            RobotState.IDLE,
+        ]
+    )
+
+
 def test_a_failed_reopen_leaves_the_robot_degraded_rather_than_lying() -> None:
     """The asymmetry that makes the LISTENING target safe: nothing moves off DEGRADED except a
     *successful* open. If ``open()`` raises there is no ``degraded_exited``, the user's edges are

@@ -136,6 +136,31 @@ def test_a_local_hold_shorter_than_the_server_vad_is_rejected() -> None:
         )
 
 
+def test_a_think_timeout_at_or_past_the_idle_close_is_rejected() -> None:
+    """AVID-171/§6.9: two timers watch the same silence and only one drives a transition.
+
+    The idle close tears the session down and publishes no trigger, so it leaves the machine
+    exactly where it was — and it cancels the think timer on its way out. Set the think timeout
+    at or past it and the escape hatch can never fire: the robot wedges in THINKING with a
+    closed socket, which is verbatim the 54-second freeze this was filed for. A knob that
+    silently does nothing is worse than no knob, so it is rejected at load."""
+    for think in (30.0, 45.0):
+        with pytest.raises(ValidationError, match="wedges in THINKING"):
+            Config.model_validate(
+                {"gate": {"think_timeout_s": think, "session_idle_close_s": 30}}
+            )
+
+
+def test_the_shipped_think_timeout_is_the_sds_value_and_clears_the_idle_close() -> None:
+    """§6.9 names 10 s, and both shipped profiles carry it explicitly rather than relying on the
+    default — a missing key on the Pi falls back silently, and this one governs a 54 s freeze."""
+    assert Config().gate.think_timeout_s == 10.0
+    for profile in (_SIM_TOML, _PI_TOML):
+        config = load_config(profile)
+        assert config.gate.think_timeout_s == 10.0
+        assert config.gate.think_timeout_s < config.gate.session_idle_close_s
+
+
 def test_a_local_hold_at_or_above_the_server_vad_is_accepted() -> None:
     """Equal is the shipped case (both 500 ms in ``config/pi.toml``): the two VADs see the same
     silence and close together, which is the whole point of streaming the trailing frames."""

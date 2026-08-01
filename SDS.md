@@ -914,7 +914,8 @@ At startup, each adapter reports capabilities. `MotionService` asks: do I have a
       │               └──────────► IDLE
       │
       │          ┌──────────┐
-      └──────────┤ DEGRADED │◄──── from any state on session_lost
+      └──────────┤ DEGRADED │◄──── from any state on session_lost,
+                                    or THINKING on the 10 s think timeout (§6.9)
                  └──────────┘
 ```
 
@@ -960,7 +961,7 @@ The THINKING→LISTENING row is its companion: a user who pauses past `[gate] si
 
 LISTENING is the only target that closes *both* continuations. A user still talking finds `LISTENING + audio.speech_ended`; a user whom a slow open outran finds `LISTENING + audio.playback_started` — the overlap row above, doing double duty — and that is the *common* case rather than the corner one, since AVID-157 measured `open()` at 1.5–6.7 s against a `silence_hold_ms` of a few hundred. THINKING reads better ("we sent the audio, we are waiting on the model") and dead-ends immediately: it has no `audio.speech_ended` row. The robot stays in DEGRADED for the whole open, which is what keeps LISTENING honest — a failed open publishes no `system.degraded_exited`, the speech edges are absorbed, and the robot goes on saying it is broken, because it is.
 
-The absorbing row covers only the user's **own** two edges, deliberately. Both `audio.playback_*` triggers are driven solely from ConversationService's event pump, which `_on_session_closed` tears down before DEGRADED is reachable, so a row for either would be unreachable — and an unreachable row is a lie in a normative table. Note that `AudioService.interrupt` *does* run while degraded, cutting whatever playback the drop abandoned: it publishes `audio.playback_finished` as a **fact** but drives no trigger at all (§9.1.3), which is why no row is needed. ⚠️ **If a background reconnect is ever added it will recover with no turn in flight, and `system.degraded_exited` will be the wrong trigger for it** — that is a different fact and wants its own row, not a reused one.
+The absorbing row covers only the user's **own** two edges, deliberately. Both `audio.playback_*` triggers are driven solely from ConversationService's event pump, and **every** path into DEGRADED tears that pump down before DEGRADED is reachable — `_on_session_closed` when the socket drops, and the §6.9 think timeout (AVID-171) when the model never produces a first token. Both go through the same `_degrade` helper for exactly this reason, so a row for either trigger would be unreachable — and an unreachable row is a lie in a normative table. Note that `AudioService.interrupt` *does* run while degraded, cutting whatever playback the drop abandoned: it publishes `audio.playback_finished` as a **fact** but drives no trigger at all (§9.1.3), which is why no row is needed. ⚠️ **If a background reconnect is ever added it will recover with no turn in flight, and `system.degraded_exited` will be the wrong trigger for it** — that is a different fact and wants its own row, not a reused one.
 
 ## 3.11 Deployment view
 
@@ -1392,6 +1393,18 @@ Tier 1 is pure local state machine — the face is *already correct* before the 
 | 401 | HTTP status | **Fail fast at boot.** Refuse to start. §3.12.3. |
 | Slow first token (>10 s) | THINKING timeout | → DEGRADED |
 | Tool handler raises | exception | Return `{ok: false, error}` to the model — *don't* crash the turn. The model will apologise gracefully, which is the correct behaviour. |
+
+**The THINKING timeout (AVID-171).** The row above was specified from the start and **nothing drove it until AVID-171** — `Trigger.THINK_TIMEOUT` and its `(THINKING, THINK_TIMEOUT) → DEGRADED` row existed and were unreachable. The bench measured what that costs: a **60 ms** noise transient cleared the local VAD, opened a session the model never answered, and the robot sat in THINKING for **54 seconds**. The process was healthy throughout — mic frames arriving, VAD running, queue empty — it was simply waiting forever for a first token. Nothing else watches that silence: `[gate] session_idle_close_s` does fire, but an idle close tears the socket down and drives **no transition**, so the machine never moves.
+
+`ConversationService` arms the deadline at the local VAD's **falling edge** — the same instant as the thinking cue above, because that is when the wait for a first token actually begins — and cancels it on the turn's first assistant delta, on a fresh rising edge (the user resumed: `THINKING + speech_started → LISTENING` leaves no row for the deadline), and on any teardown. Duration is `[gate] think_timeout_s`, default **10 s**, and it **must be less than `session_idle_close_s`** — asserted in `Config`, because the idle close cancels this timer without transitioning, so a larger value silently never fires and restores the wedge exactly.
+
+Three properties are load-bearing and each is enforced by a test:
+
+- **It tears the session down.** DEGRADED has a row for neither `audio.playback_*` trigger, justified in §3.10.3 by every path into DEGRADED killing the pump first. A timeout that degraded while leaving the pump alive would let a late delta drive `audio.playback_started` from DEGRADED, where there is no row — and it would strand recovery, since `_exit_degraded` only fires when a rising edge finds no open session.
+- **It publishes `system.degraded_entered` (`cause="think_timeout"`) but *not* `conversation.session_lost`.** Nothing dropped; we gave up on a socket that is still open, exactly as the idle close does — and that one publishes nothing either. The distinction is not cosmetic: `conversation_pi.py` counts `session_lost` to grade #106's AC-6, so conflating them would make a pulled cable and a quiet model indistinguishable in the one artifact that grades recovery.
+- **The cue is `SOMETHING_WRONG`** ("something went wrong on my end"), not `LOST_CONNECTION` — no connection was lost, and the degraded-mode phrases that promise a return are lies while there is no background reconnect loop (AVID-105).
+
+⚠️ The timer re-checks that the machine is still in THINKING before degrading. This is not defensive padding: AVID-161's overlap arc (`THINKING + playback_finished → IDLE`, an *earlier* turn's reply draining while this one waits) leaves the deadline armed in IDLE with no cancel site reached, and only `(THINKING, THINK_TIMEOUT)` exists.
 
 **The thinking cue.** §2.8.1 concedes ~75% of latency isn't ours, and §6.3's gate adds ~200 ms to the first turn. R-01's contingency is that **perceived latency is designable even when actual latency isn't**: THINKING state renders instantly (Tier 1 affect, <20 ms), and if first audio hasn't arrived by 600 ms we play a short local "hmm" from the WAV bank. A robot that visibly and audibly thinks feels responsive at 1200 ms. A robot that sits silently feels broken at 800 ms.
 
@@ -2415,6 +2428,10 @@ barge_in_margin_db = 6.0        # dB over the echo floor a rising edge must clea
                                 # while the robot speaks (§6.2.4). PROVISIONAL — the M5 gate's
                                 # AC-3 records the measured value. Very large = full half-duplex.
 echo_tail_ms       = 150        # uplink stays shut this long after a reply ends (the DAC drain)
+think_timeout_s    = 10.0       # §6.9: no first audio delta this long after the falling edge -> DEGRADED.
+                                # MUST be < session_idle_close_s (asserted in Config): the idle close
+                                # cancels this timer and drives no transition, so a larger value never
+                                # fires and the robot wedges in THINKING (AVID-171).
 
 [cues]                          # degraded-mode WAV cue bank base dir (§3.6.4, AVID-80)
 dir = "assets/cues"             # committed 24 kHz mono clips; CueBank resolves dir/<cue>.wav

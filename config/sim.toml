@@ -44,6 +44,10 @@ session_idle_close_s = 30
 # #106 AC-3 records the measured value. Very large = full half-duplex (barge-in off).
 barge_in_margin_db   = 6.0
 echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
+# §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
+# MUST be < session_idle_close_s, asserted in Config — the idle close cancels this timer and
+# drives no transition, so a longer value never fires and the robot wedges in THINKING.
+think_timeout_s      = 10.0
 
 [cues]                          # degraded-mode WAV cue bank (AVID-80); consumed by M5's ConversationService
 dir = "assets/cues"             # committed 24 kHz mono clips (#88)

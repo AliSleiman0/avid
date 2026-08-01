@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -184,6 +185,7 @@ async def _rig(
     extra_subs: tuple[_ExtraSub, ...] = (),
     memory: _StubMemory | MemoryService | None = None,
     memory_inject_timeout_s: float = 1.0,
+    think_timeout_s: float = 3600.0,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -191,6 +193,12 @@ async def _rig(
     already driven IDLE→LISTENING on its rising edge **and** LISTENING→THINKING on its falling
     one (AVID-158), so THINKING is where a model-side turn actually begins. All ``subscribe()``
     calls precede ``bus.start()``; the service and bus are torn down on exit.
+
+    ``think_timeout_s`` defaults to an hour of virtual time for the same reason
+    ``session_idle_close_s`` is a knob here: :func:`_advance_until` drains up to 200 virtual
+    seconds, so a realistic 10 s deadline would degrade any test that merely advances the clock
+    while a turn is open — a failure that would look like a regression in whatever that test was
+    actually about. Tests that exercise the deadline pass an explicit small value (AVID-171).
     """
     clock = client_clock(client)
     bus = AsyncioEventBus(clock=clock)
@@ -210,6 +218,7 @@ async def _rig(
         memory=mem,
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
+        think_timeout_s=think_timeout_s,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -528,6 +537,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         memory=memory,
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
+        think_timeout_s=3600.0,
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -945,6 +955,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         memory=_StubMemory(),
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
+        think_timeout_s=3600.0,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -1099,6 +1110,189 @@ async def test_the_first_assistant_delta_cancels_a_pending_thinking_cue() -> Non
 
         assert rig.service._first_audio is True
         assert rig.service._thinking_task is None
+
+
+# --- the §6.9 first-token deadline (AVID-171) ----------------------------------------------
+
+
+async def _arm_the_deadline(rig: Rig) -> None:
+    """Open a session and publish the falling edge, leaving the §6.9 deadline armed.
+
+    The ``settle`` between the two edges is load-bearing, not tidiness: the bus is FIFO **per
+    subscriber, not across** (#72), so ``audio.speech_ended`` can be delivered before
+    ``audio.speech_started`` has opened the session — in which case ``_on_speech_ended`` returns
+    early and arms nothing. Without the settle these tests pass *vacuously*, asserting that a
+    timer which was never armed did not fire. Coverage caught exactly that.
+
+    The closing assertion is the guard against it coming back: every caller here is about what
+    the deadline does, so a caller that has no deadline is a broken test, not a passing one."""
+    await _speak(rig, correlation_id=uuid4())
+    await rig.collector.settle()
+    await rig.bus.publish(
+        AudioSpeechEnded(
+            **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+            duration_ms=200,
+        )
+    )
+    await rig.collector.settle()
+    assert rig.service._think_task is not None, "the deadline was never armed"
+
+
+async def test_a_slow_first_token_degrades_and_tears_the_session_down() -> None:
+    """AVID-171 / §6.9: a session the model never answers must not park the robot forever.
+
+    The empty timeline *is* the bug — on hardware a 60 ms noise blip opened exactly this: a live
+    socket, no first token, and 54 seconds in THINKING with no row out.
+
+    Two assertions carry more weight than the transition itself. **No
+    ``conversation.session_lost``**: nothing dropped, we gave up, and ``conversation_pi.py``
+    counts that event to grade #106's AC-6 — publishing it here would make a pulled cable and a
+    quiet model indistinguishable in the one artifact that grades recovery. **The session is
+    torn down**: DEGRADED has no row for either ``audio.playback_*`` trigger, justified in
+    ``domain/state.py`` by every path here killing the pump first, and a late delta arriving
+    into DEGRADED would falsify that."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())  # answers nothing, ever
+    async with _rig(client=client, think_timeout_s=10.0) as rig:
+        await _arm_the_deadline(rig)
+        await _advance_until(
+            rig, lambda: rig.state.state is RobotState.DEGRADED, step_s=1.0
+        )
+
+        moves = [
+            (e.from_, e.trigger, e.to)
+            for e in rig.collector.of_type(StateTransitioned)
+            if isinstance(e, StateTransitioned)
+        ]
+        assert (
+            RobotState.THINKING,
+            Trigger.THINK_TIMEOUT,
+            RobotState.DEGRADED,
+        ) in moves
+
+        entered = rig.collector.of_type(SystemDegradedEntered)
+        assert len(entered) == 1
+        assert isinstance(entered[0], SystemDegradedEntered)
+        assert entered[0].cause == "think_timeout"
+
+        assert rig.collector.of_type(ConversationSessionLost) == []
+        assert rig.client.closed
+        assert rig.service._pump_task is None
+        assert rig.service._mic_task is None
+        assert any(p.name == "something_wrong.wav" for p in rig.speaker.files_played)
+
+
+async def test_the_first_token_cancels_the_think_timeout() -> None:
+    """The other edge: a turn that *is* answered must never degrade, however long it then runs.
+
+    Armed at the falling edge and cancelled in the same latch that cancels the thinking cue, so
+    a reply that arrives keeps the robot out of DEGRADED for the rest of the session."""
+    clock = FakeClock()
+    async with _rig(
+        client=_replay("two_turn", clock=clock), think_timeout_s=1.0
+    ) as rig:
+        await _arm_the_deadline(rig)
+        await _advance_until(rig, lambda: bool(rig.sink.played))
+
+        assert rig.service._think_task is None
+        await rig.clock.advance(5.0)  # past the deadline the turn was racing
+        await rig.collector.settle()
+
+        assert rig.state.state is not RobotState.DEGRADED
+        assert rig.collector.of_type(SystemDegradedEntered) == []
+
+
+async def test_a_delta_landing_on_the_deadline_wins_the_race() -> None:
+    """The guard for the one interleaving cancellation cannot cover (§6.9, AVID-171).
+
+    ``_cancel_task`` is fire-and-forget, and a cancel only lands at the target's next *await*.
+    So a first delta arriving in the same tick the deadline expires sets ``_first_audio`` and
+    requests the cancel while :meth:`_think_timer` is already past its ``sleep`` — the cancel is
+    then too late and the timer runs on. The re-read of ``_first_audio`` is what keeps that from
+    degrading a turn the model did in fact answer.
+
+    Reproduced by setting the latch directly, because the race is a scheduler interleaving no
+    public sequence can pin deterministically. Asserting private state is the established idiom
+    here (``_first_audio``/``_thinking_task`` are asserted in the cue tests) and is the honest
+    alternative to leaving a real guard uncovered."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, think_timeout_s=1.0) as rig:
+        await _arm_the_deadline(rig)
+        # The delta landed; its cancel has been requested but cannot take effect in time.
+        rig.service._first_audio = True
+
+        await rig.clock.advance(5.0)
+        await rig.collector.settle()
+
+        assert rig.state.state is not RobotState.DEGRADED
+        assert rig.collector.of_type(SystemDegradedEntered) == []
+        assert not rig.client.closed
+
+
+async def test_a_resumed_utterance_cancels_the_think_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The user talking again ends the wait — ``(THINKING, speech_started) -> LISTENING``.
+
+    Without the cancel at the rising edge the deadline would fire in LISTENING, which has no
+    ``THINK_TIMEOUT`` row, and the only symptom would be a WARNING nobody reads. So the
+    assertion is the *absence* of that warning, not just the absence of a degrade."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    with caplog.at_level(logging.WARNING, logger="avid.state"):
+        async with _rig(client=client, think_timeout_s=1.0) as rig:
+            await _arm_the_deadline(rig)
+            # The user starts again before the model ever answered — the real edge AudioService
+            # would drive, applied to the machine as well as the service.
+            await _speak(rig, correlation_id=uuid4())
+            await rig.state.transition(
+                Trigger.AUDIO_SPEECH_STARTED, correlation_id=uuid4()
+            )
+            await rig.clock.advance(
+                5.0
+            )  # past the 1 s deadline the cancelled timer had
+            await rig.collector.settle()
+
+            assert rig.state.state is RobotState.LISTENING
+            assert rig.collector.of_type(SystemDegradedEntered) == []
+    assert "ignored illegal transition" not in caplog.text
+
+
+async def test_the_think_timeout_does_not_fire_from_a_state_with_no_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-161's overlap leaves the deadline armed in a state that cannot receive it.
+
+    A reply to an *earlier* turn draining while this one waits drives
+    ``THINKING + playback_finished -> IDLE``, and none of the three cancel sites is reached:
+    no first audio of this turn's own, no rising edge, no teardown. Only
+    ``(THINKING, THINK_TIMEOUT)`` exists, so the in-timer state re-check is the only thing
+    standing between this arc and an "ignored illegal transition" — which is why that guard is
+    load-bearing rather than defensive padding.
+
+    Cancelling on ``turn_done`` instead would be wrong: an earlier turn finishing says nothing
+    about whether *this* one has been answered."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    with caplog.at_level(logging.WARNING, logger="avid.state"):
+        async with _rig(client=client, think_timeout_s=1.0) as rig:
+            await _arm_the_deadline(rig)
+            # The earlier turn's reply drains, moving the machine out from under the deadline.
+            await rig.state.transition(
+                Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=uuid4()
+            )
+            assert rig.state.state is RobotState.IDLE
+
+            # Past the 1 s deadline, but well short of the rig's 30 s idle close — which would
+            # tear the session down for its own reasons and make the assertion below meaningless.
+            await rig.clock.advance(5.0)
+            await rig.collector.settle()
+
+            assert rig.state.state is RobotState.IDLE
+            assert rig.collector.of_type(SystemDegradedEntered) == []
+            assert not rig.client.closed  # the session is fine; we simply did not fire
+    assert "ignored illegal transition" not in caplog.text
 
 
 async def test_stop_is_idempotent_and_closes_the_session() -> None:
