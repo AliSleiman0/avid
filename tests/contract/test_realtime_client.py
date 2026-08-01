@@ -19,6 +19,7 @@ JSON frames and no socket — the only part of the real client that can be prove
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -677,6 +678,42 @@ async def test_client_events_carry_a_traceable_event_id() -> None:
     ]
     assert ws.sent[0]["event_id"] == "avid_1_conversation_item_truncate"
     assert ws.sent[1]["event_id"] == "avid_2_response_cancel"
+
+
+async def test_the_first_token_split_is_reported_once_per_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#106 AC-4: O1 missed its budget on two runs and nobody could say which leg spent it.
+
+    The split is anchored on the SERVER's ``input_audio_buffer.speech_stopped``, not on our own
+    falling edge, so it does not move when ``[gate] silence_hold_ms`` is retuned (AVID-176) — and
+    it is taken at wire arrival, which is only meaningful because AVID-182 made the reader drain
+    at wire speed. Read at consumption speed it would have measured playback.
+
+    Once per reply, not once per delta: a 6 s reply is hundreds of deltas, and a per-delta line
+    would bury the one that matters under its own output."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "input_audio_buffer.speech_stopped"},
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.output_audio.delta", "item_id": "item_0", "delta": ""},
+            {"type": "response.output_audio.delta", "item_id": "item_0", "delta": ""},
+            {"type": "response.output_audio.delta", "item_id": "item_0", "delta": ""},
+        ]
+    )
+
+    with caplog.at_level(logging.INFO, logger="avid.adapters.realtime"):
+        stream = client.events()
+        with contextlib.suppress(StopAsyncIteration):
+            async for _ in stream:
+                pass
+
+    reports = [r for r in caplog.records if "first token" in r.message]
+    assert len(reports) == 1, "one line per reply, not one per delta"
+    assert "response.created" in reports[0].getMessage()
 
 
 async def test_the_socket_is_read_at_wire_speed_not_at_consumption_speed(
