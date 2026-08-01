@@ -1493,7 +1493,22 @@ Against a $25/month target. **The gate is not an optimisation; it is the differe
 
 ### 6.10.5 Model choice
 
-**Default: `gpt-realtime-2.1-mini`.** ~3× cheaper, $4.30/month against a $25 budget, and for a desk companion the quality delta is not worth 3× on a personal project. Escalate to flagship only if M6's eval suite shows the mini failing personality adherence or tool-calling reliability.
+**Shipped since 2026-08-01: `gpt-realtime-2025-08-28` (flagship).** Escalated from the mini for **latency, not quality** — a trigger this section did not anticipate, which is why it is recorded here rather than left to disagree with `config/pi.toml`.
+
+Measured on the Pi with `tools/probe_first_token.py`, 6 trials each — model time-to-first-token, `response.created` → first `output_audio.delta`:
+
+| model | min | median | max |
+|---|---|---|---|
+| `gpt-realtime-mini-2025-12-15` | 430 ms | 530 ms | 710 ms |
+| **`gpt-realtime-2025-08-28`** | **214 ms** | **328 ms** | **424 ms** |
+| `gpt-realtime-2.1` | 306 ms | 416 ms | 572 ms |
+| `gpt-realtime-2.1-mini` | 292 ms | 464 ms | 2039 ms |
+
+The flagship's *worst* trial beats the mini's median, and O1's P95 (§2.8.1) is graded on exactly that tail. It costs **3.2×** — projected ~$10/month against O7's $25, so the headroom absorbs it. The expectation that flagship would be *slower* was wrong, and had the O1 budget been amended without running this probe it would have been amended around an avoidable 200 ms (AVID-106).
+
+**Revisit if O7 tightens**, or if a newer mini's tail improves — `gpt-realtime-2.1-mini`'s 2039 ms outlier, not its median, is what disqualifies it today. Reverting is a one-line config edit by design (the vendor boundary, CLAUDE.md §3).
+
+*Superseded:* the original rule was **default `gpt-realtime-2.1-mini`**, ~3× cheaper, escalating to flagship **only** if M6's eval suite showed the mini failing personality adherence or tool-calling reliability. That quality trigger still stands; it is now one of two.
 
 Anthropic's cheaper-chained-pipeline alternative (STT → text LLM → TTS) is genuinely cheaper per token but reintroduces multi-hop latency and discards vocal nuance — the exact things speech-to-speech exists to solve. **Not considered for v1.** Revisit only if usage grows ~1000×, which for a desk robot it will not.
 
