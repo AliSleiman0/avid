@@ -34,6 +34,7 @@ from avid.core.event_bus import (
     Subscription,
 )
 from avid.core.ports import Clock, EpisodeStore
+from avid.core.tasks import spawn
 from avid.domain import (
     ConversationAssistantResponded,
     ConversationTurnEnded,
@@ -81,9 +82,7 @@ class EpisodeRecorder:
         """Launch the §7.5 prune loop (AC-3). Its first pass fires only *after* the interval, not
         at ``start`` — so the episode store's first DB touch happens well after ``MemoryService``
         has migrated the shared file at boot, and the retention schedule is honest."""
-        self._prune_task = asyncio.create_task(
-            self._prune_loop(), name="EpisodeRecorder.prune"
-        )
+        self._prune_task = spawn(self._prune_loop(), name="EpisodeRecorder.prune")
 
     async def stop(self) -> None:
         """Cancel the prune loop and close the store within the §9.2 5 s budget. Idempotent."""

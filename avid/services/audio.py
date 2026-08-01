@@ -84,6 +84,7 @@ from avid.core.ports import (
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
+from avid.core.tasks import spawn
 from avid.domain import (
     AudioPlaybackFinished,
     AudioPlaybackStarted,
@@ -211,7 +212,7 @@ class AudioService:
     async def start(self) -> None:
         """Launch the mic-consume loop as an owned task. Idempotent."""
         if self._task is None:
-            self._task = asyncio.create_task(self._run(), name="AudioService.mic_loop")
+            self._task = spawn(self._run(), name="AudioService.mic_loop")
 
     async def stop(self) -> None:
         """Cancel the mic loop and await it, within the §9.2 5 s budget. Idempotent.
