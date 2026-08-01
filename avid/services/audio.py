@@ -59,6 +59,19 @@ committing turns, killing the conversation with the socket still open. Barge-in 
 robot's voice is speech too and the VAD is right to say so. The margin is consulted *only* inside
 that window, so ordinary turn-taking is untouched by it.
 
+**Two tasks, one playback episode** (AVID-174). This service is driven from *both* sides at once:
+:meth:`AudioService.play` and :meth:`AudioService.end_response` are called on
+``ConversationService``'s Realtime pump, while :meth:`AudioService.interrupt` fires from this
+service's own mic loop the instant a barge-in clears the margin. They share ``_playing_item`` /
+``_playing_ms`` / ``_playing_corr``, and nothing serialises them — a lock would have to span the
+speaker write and would park the mic loop behind it, which is the starvation AVID-153/159 just
+fixed. So the episode is protected two other ways instead: :meth:`AudioService._take_playback`
+closes it **synchronously** (no ``await`` inside, so exactly one caller can ever take it, which is
+what makes ``end_response`` and ``interrupt`` mutually exclusive finalizers), and a **playback
+epoch** lets :meth:`AudioService.play` notice that the episode it was writing to ended while its
+write was in flight and discard the result rather than write it back. Before that, a barge-in
+landing mid-write killed the pump with an ``AssertionError`` and the conversation with it.
+
 Purity of the hot path (P8, AC-6): :meth:`~avid.core.ports.VoiceActivityDetector.is_speech`
 is synchronous and sub-ms by contract (SDS §9.3), so it is called **inline** — no
 executor, no loop hop. The blocking device reads/writes live in the adapter threads
