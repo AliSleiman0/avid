@@ -446,6 +446,277 @@ class _StateSpySpeaker(FakeSpeaker):
         await super().stop()
 
 
+class _ParkingSpeaker(FakeSpeaker):
+    """A ``FakeSpeaker`` with the suspension points the real adapter has and the stock fake lacks.
+
+    Two gaps, and between them they are why AVID-174 survived CI while crashing the Pi:
+
+    * ``FakeSpeaker.play`` returns the **full** duration whatever a concurrent ``stop()`` did, so
+      ``accepted_ms < submitted_ms`` — the branch that dereferences the cleared episode — is never
+      true in CI. ``AlsaSpeaker._write_all`` breaks out of its period loop the moment ``stop()``
+      sets its flag, and reports what it actually wrote.
+    * ``FakeSpeaker.stop`` has **no await at all**, so a barge-in is atomic with respect to the
+      pump and the interleaving cannot even be expressed. ``AlsaSpeaker.stop`` hops a thread.
+
+    This fake parks inside ``play`` on an injected gate, so a test can land a barge-in squarely in
+    the window the real device leaves open, and reports a truncated write when it was stopped while
+    parked. Subclassing the fake is this file's established way to vary one behaviour
+    (``_LossySpeaker``, ``_StateSpySpeaker``); no mock, which is banned outside ``tests/adapters/``
+    anyway (SDS §14.3).
+    """
+
+    def __init__(self, *, park_first: int = 1) -> None:
+        super().__init__()
+        # Set once play() has parked, so the test knows the window is open without sleeping.
+        self.entered = asyncio.Event()
+        # The test sets this to let the parked play() finish.
+        self.release = asyncio.Event()
+        # Only the first *park_first* writes park; later ones run straight through, so a test can
+        # open a second episode while the first write is still suspended.
+        self._park_first = park_first
+        self._calls = 0
+        self._stopped_while_parked = False
+
+    async def play(self, chunk: AudioChunk) -> int:
+        submitted = await super().play(chunk)
+        self._calls += 1
+        if self._calls > self._park_first:
+            return submitted
+        self.entered.set()
+        await self.release.wait()
+        if self._stopped_while_parked:
+            self._stopped_while_parked = False
+            # A partial write, which is what the real device reports: ``AlsaSpeaker._write_all``
+            # breaks out of its period loop when ``stop()`` sets the flag and returns the ms it
+            # had already handed over. Returning 0 here would be convenient and dishonest — it
+            # would hide the ms-leak half of AVID-174 rather than expose it.
+            return submitted // 2
+        return submitted
+
+    async def stop(self) -> None:
+        if self.entered.is_set() and not self.release.is_set():
+            self._stopped_while_parked = True
+        await super().stop()
+
+
+async def test_a_barge_in_during_a_write_does_not_kill_the_pump() -> None:
+    """AVID-174: the crash. A barge-in landing inside an in-flight ``speaker.play()``.
+
+    ``play`` runs on ConversationService's pump task; ``interrupt`` runs on AudioService's own mic
+    loop. They share the playback episode with no synchronisation, so the barge-in clears
+    ``_playing_item``/``_playing_ms``/``_playing_corr`` out from under the suspended writer. The
+    writer then resumes, finds the write was cut short, and dereferences the episode that no longer
+    exists — ``AssertionError`` in ``_playback_corr``, on the **pump**, which is an owned task
+    nothing observes. The conversation ends there: socket open, robot deaf, log silent.
+
+    Driven with the play in its own task so the two really interleave, which is the only way to
+    reproduce it — every existing barge-in test awaits ``play`` to completion first."""
+    speaker = _ParkingSpeaker()
+    async with _rig(
+        vad_script=[False],  # the gate fires no edge of its own; we drive it
+        initial=RobotState.THINKING,
+        speaker_factory=lambda _state: speaker,
+    ) as rig:
+        rig.service._turn_id = uuid4()
+        playing = asyncio.create_task(
+            rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0"),
+            name="test.play",
+        )
+        try:
+            await speaker.entered.wait()  # the write is in flight
+            await rig.service._begin_speech()  # the barge-in, on the other task
+            speaker.release.set()
+            await playing  # must not raise
+        finally:
+            speaker.release.set()
+            if not playing.done():
+                playing.cancel()
+
+        finished = [
+            e
+            for e in rig.collector.of_type(AudioPlaybackFinished)
+            if isinstance(e, AudioPlaybackFinished)
+        ]
+        assert len(finished) == 1, "the episode was finalized more than once"
+        assert finished[0].truncated is True
+        assert rig.service._playing_item is None
+        assert rig.service._playing_ms == 0, (
+            "ms from a write that outlived its episode leaked back into the service"
+        )
+
+
+async def test_ms_from_an_interrupted_write_never_leak_into_the_next_reply() -> None:
+    """The silent half of AVID-174, which is worse than the crash because nothing reports it.
+
+    A write that outlives its episode still runs ``self._playing_ms += accepted_ms`` when it
+    resumes. If the *next* reply has already opened by then, those ms are added to a turn that
+    never played them — and ``played_ms`` is exactly what ``interrupt`` returns as the model's
+    ``audio_end_ms`` (§6.2.4). The model would be told the user heard audio from a previous turn.
+
+    This is the test that pins the **epoch check specifically**: the crash in T1 is prevented by
+    capturing the correlation id alone, so without this one a fix could drop the epoch entirely
+    and still look green."""
+    speaker = _ParkingSpeaker()
+    async with _rig(
+        vad_script=[False],
+        initial=RobotState.THINKING,
+        speaker_factory=lambda _state: speaker,
+    ) as rig:
+        rig.service._turn_id = uuid4()
+        playing = asyncio.create_task(
+            rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0"),
+            name="test.play",
+        )
+        try:
+            await speaker.entered.wait()
+            await rig.service._begin_speech()  # barge-in ends episode 1
+            # Episode 2 opens and plays a full 20 ms while write #1 is still suspended.
+            rig.service._turn_id = uuid4()
+            await rig.service.play(_out_chunk(ms=20, fill=2), item_id="item_1")
+            assert rig.service._playing_ms == 20
+            speaker.release.set()
+            await playing  # write #1 resumes into a world that moved on
+        finally:
+            speaker.release.set()
+            if not playing.done():
+                playing.cancel()
+
+        assert rig.service._playing_ms == 20, (
+            "the interrupted write added its ms to the NEXT reply's total, so the model would "
+            "be told the user heard audio from a turn that had already been cut off"
+        )
+
+
+async def test_a_barge_in_shortfall_is_not_reported_as_a_device_drop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A short accept because the barge-in cut the write is expected, not AVID-91's defect.
+
+    Before AVID-174 this WARNed on **every** barge-in, because ``Speaker.stop`` closes the handle
+    and the interrupted write necessarily reports less than it was handed. A warning that fires on
+    correct behaviour is a warning nobody reads — and AVID-91's real signal, a device silently
+    dropping audio, would drown in it."""
+    speaker = _ParkingSpeaker()
+    async with _rig(
+        vad_script=[False],
+        initial=RobotState.THINKING,
+        speaker_factory=lambda _state: speaker,
+    ) as rig:
+        rig.service._turn_id = uuid4()
+        with caplog.at_level(logging.DEBUG, logger="avid.services.audio"):
+            playing = asyncio.create_task(
+                rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0"),
+                name="test.play",
+            )
+            try:
+                await speaker.entered.wait()
+                await rig.service._begin_speech()
+                speaker.release.set()
+                await playing
+            finally:
+                speaker.release.set()
+                if not playing.done():
+                    playing.cancel()
+
+        assert "barge-in truncated the write" in caplog.text
+        assert "speaker accepted" not in caplog.text, (
+            "a barge-in was reported as a device drop"
+        )
+
+
+async def test_a_live_episode_shortfall_is_still_a_device_drop_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other half of the split: with no barge-in, a short accept still WARNs (AVID-91).
+
+    This is the path the M4 gate's mute robot took, and until now the ``play`` seam's copy of that
+    warning had no test at all — only the loopback one did."""
+    async with _rig(
+        vad_script=[False],
+        initial=RobotState.THINKING,
+        speaker_factory=lambda _state: _LossySpeaker(fraction=0.5),
+    ) as rig:
+        corr = uuid4()
+        rig.service._turn_id = corr
+        with caplog.at_level(logging.WARNING, logger="avid.services.audio"):
+            await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+
+        assert "speaker accepted 10 of 20 ms for item item_0" in caplog.text
+        assert str(corr) in caplog.text, "the shortfall was not attributed to its turn"
+
+
+async def test_end_response_and_a_barge_in_cannot_both_finalize_one_episode() -> None:
+    """AVID-174 site (c): the two finalizers are mutually exclusive, under a race as well as not.
+
+    ``end_response`` and ``interrupt`` both used to check ``_playing_item is not None`` and then
+    await, so both could pass the guard for the *same* episode. That publishes a second
+    ``audio.playback_finished`` — making ConversationService send ``truncate`` + ``cancel`` for a
+    response that ended normally — and runs the echo-gate report twice, silently halving the
+    suppression counts #106's AC-3 is calibrated from.
+
+    ⚠️ Reaching it needs ``StateManager.transition`` to genuinely suspend, which it only does when
+    its lock is contended: ``AsyncioEventBus.publish`` never yields (its body is a synchronous
+    enqueue). So the lock is held from a helper task to force the window open. Without that this
+    test would pass against the unfixed code and prove nothing."""
+    async with _rig(vad_script=[False], initial=RobotState.THINKING) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        assert rig.state.state is RobotState.SPEAKING
+
+        # Hold the state lock so end_response() parks inside its transition, mid-finalize.
+        await rig.state._lock.acquire()
+        ending = asyncio.create_task(rig.service.end_response(), name="test.end")
+        try:
+            await asyncio.sleep(0)
+            # The barge-in arrives while end_response is suspended on the lock.
+            interrupted_ms = await rig.service.interrupt()
+        finally:
+            rig.state._lock.release()
+            await ending
+
+        finished = [
+            e
+            for e in rig.collector.of_type(AudioPlaybackFinished)
+            if isinstance(e, AudioPlaybackFinished)
+        ]
+        assert len(finished) == 1, "the episode was finalized twice"
+        assert finished[0].truncated is False, (
+            "end_response took it first, so it is not truncated"
+        )
+        assert interrupted_ms == 0, "the barge-in re-finalized an episode already taken"
+
+
+async def test_a_barge_in_while_announcing_playback_abandons_the_write() -> None:
+    """AVID-174 site (b): the barge-in lands between opening the episode and writing to it.
+
+    ``play`` publishes ``audio.playback_started`` and drives ``THINKING → SPEAKING`` before it
+    touches the speaker. A barge-in inside *that* window leaves the episode already taken, so the
+    write must be abandoned rather than sent to a speaker that was just stopped.
+
+    Like the finalizer test, reaching it needs the state lock contended — ``publish`` never yields
+    (``test_publish_does_not_suspend_the_caller``), so the transition is the only real suspension
+    point in the announce sequence."""
+    async with _rig(vad_script=[False], initial=RobotState.THINKING) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.state._lock.acquire()
+        playing = asyncio.create_task(
+            rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0"),
+            name="test.play",
+        )
+        try:
+            await asyncio.sleep(0)  # play() opens the episode and parks in transition
+            interrupted_ms = await rig.service.interrupt()
+        finally:
+            rig.state._lock.release()
+            await playing
+
+        assert interrupted_ms == 0, "nothing had been written when the barge-in landed"
+        assert rig.speaker.played == [], (
+            "the write went to a speaker that was already stopped"
+        )
+        assert rig.service._playing_item is None
+
+
 async def test_barge_in_stops_the_speaker_before_transitioning_out_of_speaking() -> (
     None
 ):

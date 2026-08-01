@@ -348,6 +348,20 @@ class TurnSink(Protocol):
     frames off :meth:`mic` to forward to the model, and pushes assistant PCM down through
     :meth:`play`. Its real implementation lands with the ``AudioService`` seam (#103); the
     :class:`~avid.adapters.turn_sink.FakeTurnSink` is the simulator (P6).
+
+    **Concurrency contract** (AVID-174). The three playback methods are **not** called from one
+    task. :meth:`play` and :meth:`end_response` come from ``ConversationService``'s Realtime pump;
+    :meth:`interrupt` comes from whichever task detects the barge-in, which for the real sink is
+    ``AudioService``'s own mic loop. An implementation must therefore assume:
+
+    * :meth:`interrupt` **may be called while a** :meth:`play` **is suspended mid-write**, and must
+      not wait for it — barge-in is the one thing §6.2.4 requires to be immediate.
+    * :meth:`end_response` and :meth:`interrupt` are **mutually exclusive finalizers of the same
+      playback episode, and exactly one may win.** Finalizing twice publishes a second
+      ``audio.playback_finished``, which makes the conversation service truncate a response that
+      ended normally.
+    * A :meth:`play` whose episode was finalized while it was suspended must **discard** its result
+      rather than write it back — those ms belong to a playback that has already ended.
     """
 
     def mic(self) -> AsyncIterator[AudioChunk]:

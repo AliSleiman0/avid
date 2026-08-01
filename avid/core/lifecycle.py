@@ -22,6 +22,7 @@ from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.ports import Clock, Service, ServiceNotifier
 from avid.core.state_manager import StateManager
+from avid.core.tasks import spawn
 from avid.domain import (
     SystemShuttingDown,
     SystemStarted,
@@ -151,7 +152,7 @@ async def run(
 
             watchdog_task: asyncio.Task[None] | None = None
             if watchdog_interval_s > 0:
-                watchdog_task = asyncio.create_task(
+                watchdog_task = spawn(
                     _ping_watchdog(
                         notifier=notifier,
                         clock=clock,

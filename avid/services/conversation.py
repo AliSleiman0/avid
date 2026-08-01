@@ -89,6 +89,7 @@ from avid.core.realtime import (
     UserTranscript,
 )
 from avid.core.state_manager import StateManager
+from avid.core.tasks import spawn
 from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
@@ -291,10 +292,8 @@ class ConversationService:
                 # fetch degrades to the stateless M5 instruction (AC-4/AC-6).
                 await self._client.open(memory=self._compose_memory_block())
                 self._session_open = True
-                self._pump_task = asyncio.create_task(
-                    self._pump(), name="ConversationService.pump"
-                )
-                self._mic_task = asyncio.create_task(
+                self._pump_task = spawn(self._pump(), name="ConversationService.pump")
+                self._mic_task = spawn(
                     self._forward_mic(), name="ConversationService.mic"
                 )
                 if self._degraded:
@@ -602,9 +601,7 @@ class ConversationService:
     def _arm_idle(self) -> None:
         """(Re)start the idle-close countdown from *now*. Caller holds the lock."""
         self._cancel_task(self._idle_task)
-        self._idle_task = asyncio.create_task(
-            self._idle_timer(), name="ConversationService.idle"
-        )
+        self._idle_task = spawn(self._idle_timer(), name="ConversationService.idle")
 
     async def _idle_timer(self) -> None:
         """Close the session after ``session_idle_close_s`` of quiet (AC-3).
@@ -622,7 +619,7 @@ class ConversationService:
     def _arm_think_timeout(self) -> None:
         """(Re)start the first-token countdown from *now*. Caller holds the lock."""
         self._cancel_task(self._think_task)
-        self._think_task = asyncio.create_task(
+        self._think_task = spawn(
             self._think_timer(), name="ConversationService.think_timeout"
         )
 
@@ -707,7 +704,7 @@ class ConversationService:
         A cue is perceived-quality filler, never a correctness obligation, so it runs off the
         hot path and self-removes from the tracking set on completion; :meth:`stop` sweeps any
         still pending."""
-        task = asyncio.create_task(
+        task = spawn(
             self._cues.play(cue, correlation_id=self._corr()),
             name=f"ConversationService.cue.{cue.name}",
         )
