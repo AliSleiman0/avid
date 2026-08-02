@@ -42,7 +42,15 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # The `robot` nologin user needs the `video` group to open the CSI camera device
 # (/dev/video*, /dev/media*) and `gpio` for the servos — PrivateDevices is left off so
 # those /dev nodes are reachable, and group membership is the gate (AVID-51 camera, M2).
-SupplementaryGroups=video gpio
+#
+# `audio` is not optional either, and its absence was invisible for two milestones: without
+# it the service opens NO sound card at all — `AudioService.mic_loop` dies at startup with
+# `ALSAAudioError: No such device [plughw:CARD=Device,DEV=0]` while the process still reaches
+# IDLE and reports healthy, so the robot runs deaf and mute and says so nowhere. M4 and M5
+# both passed because their benches run as the *login* user, which is in `audio`; the service
+# audio path had never actually worked. Found at the M7 gate prep, where AC-2's
+# `systemctl restart` makes running-as-the-service unavoidable.
+SupplementaryGroups=video gpio audio
 # Creates /var/lib/robot (owned by the service user) for the on-device SQLite DB
 # — config/pi.toml [memory] db_path = /var/lib/robot/robot.db. Written at M2+.
 StateDirectory=robot
