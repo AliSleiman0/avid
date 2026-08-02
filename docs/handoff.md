@@ -60,13 +60,14 @@ why M7 seals first: O1 gets measured once per baseline, not twice against a movi
 anyone judges personality. Then M6's own scope, epic #210 (#211–#216).
 
 **M8 (epic #217) and M9 (epic #198) are fully filed** — 9 children each, all Backlog. **M10 "It
-initiates" is the only milestone with zero issues filed** — the largest in the register (13 IED, L
-confidence) and the next planning target. M11 has only #21.
+initiates" is now filed too** — epic #230 + 14 children (#231–#245, no #233 — that number went to an
+unrelated PR), all Backlog, none started, the largest single milestone in the register (children sum
+to 13.5 IED against PMP's 13 IED). M11 has only #21.
 
 ## Current state
 
-**Every milestone from M6 through M9 now has a filed epic + full child breakdown; only M10 is
-unplanned.** Summary:
+**Every milestone from M6 through M10 now has a filed epic + full child breakdown; only M11 is
+thin.** Summary:
 
 | Milestone | Issues | Notes |
 |---|---|---|
@@ -75,7 +76,7 @@ unplanned.** Summary:
 | **M7 — It remembers** | 4 open | **All laptop work done; every remaining AC needs the Pi.** #168 (fix merged, AC-2/3 owed), #127 (bench merged, all ACs owed), #129 (ACs settled + harness merged), epic #114 |
 | **M8 — It sees** | 10 open | Epic #217 + 9 (#218–#226) — ONNX face detection, ADR-013 pending, presence hysteresis |
 | **M9 — It moves** | 10 open | Epic #198 + 9 (#199–#207) — 2-servo pan/tilt, `look_at` voice tool |
-| M10 — It initiates | **0** | **Unfiled.** Largest remaining milestone. |
+| **M10 — It initiates** | 15 open | Epic #230 + 14 (#231–#245) — scheduler, pure interruption-policy gate, `BehaviorService`, proactive turn initiation, `set_quiet`; on the critical path (`M6→M10→M11`), 13.5 IED against PMP's 13 |
 | M11 — It's a product | 1 | Only #21 (security doc) |
 
 **M5 sealed** as `v0.M5.0` @ `23b4670`, milestone closed 19/0, epic #98 closed. **Sealed with two
