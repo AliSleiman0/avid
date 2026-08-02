@@ -19,11 +19,26 @@ What each mode grades, and what it deliberately does not:
   branch FTS5 exists for.
 * **supersede (AC-4)** — the old row carries its supersession pointer, the new row wins the present,
   and the old one is still queryable as history.
-* **forget (AC-5)** — the row is gone, no FTS5 index entry outlives it, and it never comes back from
-  retrieval. A hard cascading DELETE checked in the schema and in behaviour, never inferred from a
-  polite refusal to mention it. The index half has to be behavioural: ``facts_fts`` is
-  **external-content**, so a `SELECT` reads through to a row that is already deleted and reports a
-  surviving index entry as clean.
+* **forget (AC-5)** — the row **was there**, is gone now, no FTS5 index entry outlives it, and it
+  never comes back from retrieval. A hard cascading DELETE checked in the schema and in behaviour,
+  never inferred from a polite refusal to mention it. The index half has to be behavioural:
+  ``facts_fts`` is **external-content**, so a `SELECT` reads through to a row that is already
+  deleted and reports a surviving index entry as clean.
+
+  The first clause is the one the first gate attempt lacked (#258). *"The row is gone"* is
+  trivially true of a row that never existed, and the harness reported three PASSes for a fact
+  nobody had spoken. So AC-5 now requires ``--snapshot``, the JSON the **recall** phase writes
+  while the store is still intact, and matches **by row id** rather than by text — a later write
+  with similar wording is a different fact. Without that evidence the verdict is
+  **INCONCLUSIVE**: not a pass, not a failure of forgetting, but a precondition the run did not
+  meet. Inconclusive exits non-zero, because a run that proved nothing must not read as one that
+  proved everything.
+
+**Every "X is absent" check needs evidence X was once present.** That is the shape #258 was filed
+about, and the criteria were audited for it: only two are absence-shaped. AC-1's silence check has a
+companion criterion that fails when there are no episodes at all, so an empty transcript cannot bank
+a free PASS; AC-5 now has the snapshot. Everything else asserts that something IS there — a row, a
+pointer, a fact coming back from retrieval — and a presence check cannot pass on nothing.
 
 **There are two phases and no mode that grades both — that is the whole design.** Supersession and
 forgetting *destroy the evidence AC-2 is scored on*: the superseded coffee row leaves `fetch_live`
@@ -57,7 +72,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from avid.adapters import SqliteFactRepo
 from avid.adapters.clock import SystemClock
@@ -90,6 +105,14 @@ _ANNOUNCEMENTS = (
 _DEFAULT_SCRIPT = Path(__file__).resolve().parent / "m7_evidence" / "facts.json"
 
 
+# The four things a criterion can be. `bool | None` was three — pass, fail, and "recorded, not
+# graded" — and the missing fourth is what let AC-5 report three PASSes for a fact that had never
+# been stored (#258): "the row is gone" is trivially true of a row that never existed. That is not
+# a pass and it is not a failure of forgetting; it is a **precondition the gate did not meet**, and
+# grading it either way states something untrue in one direction or the other.
+_Verdict = Literal["pass", "fail", "recorded", "inconclusive"]
+
+
 @dataclass
 class _Criterion:
     """One reported line. Held rather than printed so **every criterion reports before any verdict
@@ -98,7 +121,7 @@ class _Criterion:
 
     ac: str
     name: str
-    passed: bool | None  # None = recorded, not graded
+    verdict: _Verdict
     detail: str
     rows: list[str] = field(default_factory=list)
 
@@ -143,6 +166,26 @@ def _raw(db_path: Path) -> sqlite3.Connection:
 # ── AC-1 ─────────────────────────────────────────────────────────────────────────────────────
 
 
+def snapshot(script: dict[str, Any], facts: list[Fact]) -> dict[str, int | None]:
+    """Which declared fact landed as which row id — the evidence the mutation phase needs (#258).
+
+    AC-5 asks whether a fact was *deleted*. That question is unanswerable from the mutation phase
+    alone: by the time it runs, a fact that was forgotten and a fact that was never stored look
+    identical — both absent. The first gate attempt reported three PASSes on exactly that
+    ambiguity, for a fact nobody had spoken.
+
+    So the recall phase, which runs while the store is still intact, writes down what it found.
+    **Ids, not matched text**: a later write with similar wording would satisfy a text match and
+    disguise a row that was never actually removed.
+    """
+    return {
+        d["key"]: (
+            found.id if (found := _find(facts, d["match"])) is not None else None
+        )
+        for d in script["facts"]
+    }
+
+
 def _inventory(
     script: dict[str, Any], facts: list[Fact], db_path: Path
 ) -> list[_Criterion]:
@@ -154,7 +197,7 @@ def _inventory(
         _Criterion(
             "AC-1",
             f"extraction: {len(landed)}/{len(declared)} declared facts landed as rows",
-            None,  # recorded, not graded — AC-2 grades this, once, with a denominator
+            "recorded",  # AC-2 grades this, once, with a denominator
             "recorded, not graded (settled on #129: extraction rate is AC-2's to grade)",
             rows=[f"no row for '{d['key']}': {d['say']}" for d in missing],
         )
@@ -171,7 +214,7 @@ def _inventory(
         _Criterion(
             "AC-1",
             "extraction was silent — no write announced in the transcript",
-            not heard,
+            "pass" if not heard else "fail",
             "no announcement phrases found"
             if not heard
             else f"announced: {', '.join(heard)}",
@@ -182,7 +225,7 @@ def _inventory(
             _Criterion(
                 "AC-1",
                 "transcript available to check silence against",
-                False,
+                "fail",
                 "NO EPISODES IN THE STORE — the silence check above passed on an empty string, "
                 "which is not evidence of silence. Confirm [adapters] episode_store is real and "
                 "the conversation ran under the service.",
@@ -222,7 +265,7 @@ async def _recall(
         _Criterion(
             "AC-2",
             f"recall of stated facts: {len(hits)}/{len(declared)} = {rate:.0%}",
-            rate >= _O2_RECALL,
+            "pass" if rate >= _O2_RECALL else "fail",
             f"O2 bar is ≥{_O2_RECALL:.0%} of the {len(declared)} STATED facts — an extraction "
             f"miss counts as a recall miss",
             rows=[f"missed '{k}'" for k in misses],
@@ -243,7 +286,7 @@ async def _semantic(
             _Criterion(
                 "AC-3",
                 f"{label}query returns the right fact: {probe['query']!r}",
-                ok,
+                "pass" if ok else "fail",
                 f"expected '{probe['expect']}', {ms:.0f} ms — judged at the returned fact, "
                 f"not at the phrasing",
             )
@@ -253,7 +296,7 @@ async def _semantic(
             _Criterion(
                 "AC-3",
                 "at least one proper-noun query",
-                False,
+                "fail",
                 "none declared in the script",
             )
         )
@@ -279,9 +322,13 @@ async def _supersede(
         _Criterion(
             "AC-4",
             "the superseded row carries its pointer (superseded_by + superseded_at)",
-            old is not None
-            and old["superseded_by"] is not None
-            and old["superseded_at"] is not None,
+            "pass"
+            if (
+                old is not None
+                and old["superseded_by"] is not None
+                and old["superseded_at"] is not None
+            )
+            else "fail",
             "not found"
             if old is None
             else f"id={old['id']} superseded_by={old['superseded_by']}",
@@ -289,7 +336,7 @@ async def _supersede(
         _Criterion(
             "AC-4",
             "the new row is live (not itself superseded)",
-            new is not None and new["superseded_by"] is None,
+            "pass" if (new is not None and new["superseded_by"] is None) else "fail",
             "not found" if new is None else f"id={new['id']}",
         ),
     ]
@@ -299,7 +346,7 @@ async def _supersede(
         _Criterion(
             "AC-4",
             f"the present is uncontaminated: {spec['probe_present']!r} returns the new fact",
-            present_ok,
+            "pass" if present_ok else "fail",
             f"expected a row matching {spec['match']}",
         )
     )
@@ -310,7 +357,7 @@ async def _supersede(
         _Criterion(
             "AC-4",
             "history is still queryable — the superseded row was not deleted",
-            old is not None,
+            "pass" if old is not None else "fail",
             "supersession is an epistemics operation; only AC-5's forget removes data (§7.8/§7.10)",
         )
     )
@@ -321,7 +368,11 @@ async def _supersede(
 
 
 async def _forget(
-    script: dict[str, Any], repo: SqliteFactRepo, retriever: Any, db_path: Path
+    script: dict[str, Any],
+    repo: SqliteFactRepo,
+    retriever: Any,
+    db_path: Path,
+    snapshot_before: dict[str, int | None] | None,
 ) -> list[_Criterion]:
     """AC-5, checked three ways, because one way is not enough on this schema.
 
@@ -334,7 +385,30 @@ async def _forget(
     spec = script["forget"]
     by_key = {d["key"]: d for d in script["facts"]}
     target = by_key[spec["target"]]
-    term = " ".join(target["match"])
+
+    # The precondition, checked before anything else (#258): AC-5 asks whether a fact was DELETED,
+    # and that is unanswerable without knowing it was once there. A fact never stored and a fact
+    # correctly forgotten are indistinguishable from here — both absent — and the first gate
+    # attempt reported three PASSes on exactly that ambiguity. Neither passed nor failed:
+    # inconclusive, because the run did not meet the precondition, which is not the same as the
+    # robot failing to forget.
+    was_present = snapshot_before.get(spec["target"]) if snapshot_before else None
+    if was_present is None:
+        why = (
+            "no recall-phase snapshot was supplied"
+            if not snapshot_before
+            else f"the declared '{spec['target']}' fact was never stored, so there was nothing "
+            f"to forget"
+        )
+        return [
+            _Criterion(
+                "AC-5",
+                f"the forgotten fact ('{spec['target']}') was in the store before the forget turn",
+                "inconclusive",
+                f"{why} — 'it is gone' is trivially true of a row that never existed, and "
+                f"reporting that as PASS is how a gate passes on silence",
+            )
+        ]
 
     with _raw(db_path) as conn:
         rows = [
@@ -342,7 +416,9 @@ async def _forget(
             for r in conn.execute("SELECT id, text, embedding FROM facts").fetchall()
         ]
     live_ids = {r["id"] for r in rows}
-    row = next((r for r in rows if _matches(r["text"], target["match"])), None)
+    # By id, from the snapshot — not by matching text. A later write with similar wording would
+    # satisfy a text match and disguise a row that was never actually removed.
+    row = next((r for r in rows if r["id"] == was_present), None)
 
     # Query the INDEX directly, not through FactRepository.keyword_search — that method JOINs
     # `facts` (to filter superseded rows), so it can only ever return ids that still have a live
@@ -359,18 +435,16 @@ async def _forget(
         ]
     orphans = [i for i in hits if i not in live_ids]
 
+    returned = tuple(await retriever.retrieve(target["probe"]))
     recalled = [
-        r["text"]
-        for r in rows
-        if r["id"] in tuple(await retriever.retrieve(target["probe"]))
-        and _matches(r["text"], target["match"])
+        r["text"] for r in rows if r["id"] == was_present and r["id"] in returned
     ]
 
     return [
         _Criterion(
             "AC-5",
             f"the forgotten row is gone from `facts` ('{spec['target']}')",
-            row is None,
+            "pass" if row is None else "fail",
             "hard cascading DELETE, not supersession — a rights operation (§7.10)"
             if row is None
             else f"STILL PRESENT as id={row['id']}",
@@ -378,8 +452,8 @@ async def _forget(
         _Criterion(
             "AC-5",
             "no FTS5 index entry survives the deleted row",
-            not orphans,
-            f"keyword_search({term!r}) returns only live rows"
+            "pass" if not orphans else "fail",
+            f"the FTS5 index returns only live rows for {match!r}"
             if not orphans
             else f"orphaned index rowid(s) {orphans} — searchable text left on disk after the "
             f"row was deleted (the facts_fts_ad trigger did not fire)",
@@ -387,7 +461,7 @@ async def _forget(
         _Criterion(
             "AC-5",
             "it never reappears in retrieval",
-            not recalled,
+            "pass" if not recalled else "fail",
             f"probe {target['probe']!r} returns nothing matching the forgotten fact"
             if not recalled
             else f"came back: {recalled}",
@@ -402,35 +476,41 @@ def _report(criteria: list[_Criterion]) -> int:
     print("\n" + "=" * 78)
     print("M7 gate — #129, verified at the database")
     print("=" * 78)
-    graded = 0
-    failed = 0
+    marks = {"pass": "PASS", "fail": "FAIL", "recorded": "····", "inconclusive": "????"}
+    passed = sum(1 for c in criteria if c.verdict == "pass")
+    failed = sum(1 for c in criteria if c.verdict == "fail")
+    unknown = sum(1 for c in criteria if c.verdict == "inconclusive")
     for c in criteria:
-        if c.passed is None:
-            mark = "····"
-        elif c.passed:
-            mark = "PASS"
-            graded += 1
-        else:
-            mark = "FAIL"
-            graded += 1
-            failed += 1
-        print(f"[{mark}] {c.ac}  {c.name}")
+        print(f"[{marks[c.verdict]}] {c.ac}  {c.name}")
         if c.detail:
             print(f"        {c.detail}")
         for row in c.rows:
             print(f"          - {row}")
     print("-" * 78)
-    print(f"{graded - failed}/{graded} graded criteria passed; {failed} failed.")
+    print(f"{passed}/{passed + failed} graded criteria passed; {failed} failed.")
+    if unknown:
+        print(
+            f"{unknown} criterion(s) INCONCLUSIVE — the run could not establish the precondition\n"
+            "they need, so they are neither passed nor failed. A gate cannot be sealed on these:\n"
+            "fix the precondition and re-run, or the milestone rests on a check that never ran."
+        )
     if failed:
         print(
             "\nA failure here is a result, not an accident — record it on #129 and seal with the\n"
             "gap named, the way M5 sealed with O1's P95 unmet. Do not move a bar to fit a number."
         )
-    return 1 if failed else 0
+    # Inconclusive is not success. Exiting 0 here would let a run that proved nothing read as a
+    # pass in CI, in a script, or to a tired human at midnight — which is #258's whole complaint.
+    return 1 if (failed or unknown) else 0
 
 
 async def _run(
-    args: argparse.Namespace, *, config: Config, script: dict[str, Any], db_path: Path
+    args: argparse.Namespace,
+    *,
+    config: Config,
+    script: dict[str, Any],
+    db_path: Path,
+    snapshot_before: dict[str, int | None] | None,
 ) -> int:
     clock: Clock = SystemClock()
     bus = AsyncioEventBus(clock=clock)
@@ -463,21 +543,30 @@ async def _run(
         if mode in ("mutations", "supersede"):
             criteria += await _supersede(script, facts, retriever, db_path)
         if mode in ("mutations", "forget"):
-            criteria += await _forget(script, repo, retriever, db_path)
+            criteria += await _forget(script, repo, retriever, db_path, snapshot_before)
 
         code = _report(criteria)
         if args.json:
             payload = json.dumps(
-                [
-                    {
-                        "ac": c.ac,
-                        "name": c.name,
-                        "passed": c.passed,
-                        "detail": c.detail,
-                        "rows": c.rows,
-                    }
-                    for c in criteria
-                ],
+                {
+                    "mode": mode,
+                    # The recall phase records which declared fact landed as which row id, while
+                    # the store is still intact. The mutation phase reads it back to answer "was
+                    # this fact ever here?" — see snapshot() and #258.
+                    "snapshot": snapshot(script, facts)
+                    if mode in ("recall", "inventory")
+                    else None,
+                    "criteria": [
+                        {
+                            "ac": c.ac,
+                            "name": c.name,
+                            "verdict": c.verdict,
+                            "detail": c.detail,
+                            "rows": c.rows,
+                        }
+                        for c in criteria
+                    ],
+                },
                 indent=2,
             )
             await asyncio.to_thread(
@@ -512,6 +601,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json", default=None, help="also write the criteria to this JSON file"
     )
+    parser.add_argument(
+        "--snapshot",
+        default=None,
+        help="the recall phase JSON; REQUIRED by --mode mutations, which cannot otherwise tell a "
+        "forgotten fact from one that was never stored (#258)",
+    )
     return parser
 
 
@@ -528,7 +623,40 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.is_file():
         print(f"no store at {db_path} — has the robot run under this config?")
         return 2
-    return asyncio.run(_run(args, config=config, script=script, db_path=db_path))
+
+    # The mutation phase cannot grade AC-5 without the recall phase's snapshot (#258): a fact that
+    # was forgotten and a fact that was never stored are both simply absent by then. Missing it is
+    # not fatal — the run still reports AC-4 and says AC-5 is inconclusive — but it is refused
+    # loudly here, because discovering it in the output at midnight is how the first attempt went.
+    snapshot_before: dict[str, int | None] | None = None
+    if args.mode in ("mutations", "forget"):
+        if args.snapshot is None:
+            print(
+                "--mode mutations needs --snapshot: the JSON written by the recall phase, which\n"
+                "records which declared fact landed as which row id. Without it AC-5 cannot tell\n"
+                "a forgotten fact from one that was never stored, and it will report INCONCLUSIVE."
+            )
+        elif not Path(args.snapshot).is_file():
+            print(f"no snapshot at {args.snapshot}")
+            return 2
+        else:
+            loaded = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
+            snapshot_before = loaded.get("snapshot")
+            if snapshot_before is None:
+                print(
+                    f"{args.snapshot} carries no snapshot — it was written by "
+                    f"--mode {loaded.get('mode')!r}, and only the recall phase records one."
+                )
+
+    return asyncio.run(
+        _run(
+            args,
+            config=config,
+            script=script,
+            db_path=db_path,
+            snapshot_before=snapshot_before,
+        )
+    )
 
 
 if __name__ == "__main__":
