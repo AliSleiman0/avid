@@ -1649,18 +1649,27 @@ Not sqlite-vec. The research is clear on why:
 
 Numpy brute-force over pre-normalised 384-dim vectors is a two-line function with no dependency risk. **Adopt sqlite-vec when it hits 1.0 and we have >50k facts**, i.e. probably never for a single-user robot.
 
-**Scale thresholds (the `Expected` column is design estimate — SPK-3 / #127 measures the real on-device latency and folds the numbers here; not yet run as of M7's build-out):**
+**Scale thresholds — MEASURED on the Pi, 2026-08-02 (SPK-3 / #127, `tools/spk3_retrieval_scan.py`, 50 queries per size, real `LocalMiniLmEmbedder`):**
 
-| Facts | Expected | Action |
-|---|---|---|
-| < 10k | comfortable | numpy brute force |
-| 10k–50k | acceptable | numpy; monitor |
-| 50k–100k | tight at 384 dims | int8 quantise, or sqlite-vec |
-| > 100k | too slow | ANN (vectorlite/HNSW) |
+| Facts | scan p50 / P95 | of it, **inline on the loop** | FTS5 | Action |
+|---|---|---|---|---|
+| 1k | 9.9 / 27.8 ms | **0.6 / 4.1 ms** | 7.8 ms | numpy brute force — comfortable |
+| 5k | 33.1 / 41.8 ms | **2.8 / 4.0 ms** | 28.8 ms | numpy brute force — comfortable |
+| 10k | 62.3 / 71.8 ms | **5.7 / 5.8 ms** | 55.5 ms | over the 50 ms scan budget, **and it is FTS5, not the vectors** — see below |
+| 50k–100k | extrapolated | — | — | int8 quantise, or sqlite-vec |
+| > 100k | extrapolated | — | — | ANN (vectorlite/HNSW) |
+
+**ADR-005 is confirmed, and by a wider margin than it claimed.** The numpy brute-force cosine — the part ADR-005 exists to defend — is the **inline** column: **0.6 ms at 1k, 5.7 ms at 10k**, roughly 2% of what a `recall` costs. The scan budget's breach at 10k is **SQLite FTS5** (55.5 of 62.3 ms), which is the keyword branch, not the vector branch. *int8 quantising the embeddings would optimise the component that is already free.* If retrieval ever needs work at scale, it is the FTS5 side that needs it.
+
+**The scan budget and P8's slow-callback bar are different claims that share a number.** Only the matmul + top-k runs inline on the event loop; `FactRepository.keyword_search` goes through the repository's executor. So the 10k scan breach is **latency, not a loop stall** — P8's bar is met with an order of magnitude to spare at every measured size.
+
+Index rebuild at boot (§8.5) is linear and cheap: **50 ms / 222 ms / 495 ms** at 1k / 5k / 10k.
 
 Realistic ceiling for one user over years: **low thousands.** We are architecting for a problem we will not have — deliberately, because the cheap option is also the correct one at our scale, and §7.4's escape hatch covers the rest.
 
 **Latency budget: <50 ms on the Pi.** Retrieval is off the turn path (§6.7) so this has slack, but if it exceeds ~150 ms the `recall` tool starts to be noticeable even with async function calling.
+
+> ⚠️ **As measured, `recall` is already past the ~150 ms line at every size — and the index is not why.** Full recall is **225 / 245 / 277 ms p50** at 1k / 5k / 10k, of which **~190 ms is a single `LocalMiniLmEmbedder.embed` of the query** (§7.4, flat in N, 1.86–1.88 cores after #168's thread-pool cap). The embedding is ~85% of a recall at 1k and still ~70% at 10k. Mitigations therefore belong to §7.4 — a smaller or quantised sentence model, or caching query vectors — **not** to ADR-005's storage choice. §6.6's async function calling is what keeps this from being heard as dead air today; that is a real mitigation, not a reason the number is fine.
 
 ## 7.8 Conflict resolution and supersession
 
