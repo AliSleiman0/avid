@@ -31,9 +31,11 @@ It follows :class:`~avid.adapters.vad.SileroVad` line for line: ``onnxruntime``,
 belong to the Pi-only ``pi`` extra and are absent off it (ADR-008), so keeping them out of module
 scope lets this file load everywhere (the fake path, mypy, and the composition-root import all work
 off-Pi, P5). The ~80–90 MB model file lives on the device and is never committed; its real contract
-leg is Pi-gated so CI never sees the blob (§14.4). Two things differ from Silero: inference is *tens
-of ms* (not sub-ms), so it runs **off the loop** via :func:`asyncio.to_thread` (P8, AC-6); and it
-needs a WordPiece tokenizer, loaded from the model's ``tokenizer.json``.
+leg is Pi-gated so CI never sees the blob (§14.4). Three things differ from Silero: inference is
+*tens of ms* (not sub-ms), so it runs **off the loop** via :func:`asyncio.to_thread` (P8, AC-6); it
+needs a WordPiece tokenizer, loaded from the model's ``tokenizer.json``; and its ONNX thread pool is
+capped at **two** intra-op threads rather than Silero's one — the same defect with different
+arithmetic, justified in :meth:`LocalMiniLmEmbedder._ensure_session` (#168).
 """
 
 from __future__ import annotations
@@ -229,6 +231,37 @@ class LocalMiniLmEmbedder:
             import onnxruntime
             from tokenizers import Tokenizer
 
-            self._session = onnxruntime.InferenceSession(str(self._model_path))
+            # Bounded, non-spinning thread pool — the same treatment as
+            # avid/adapters/vad.py's SileroVad session, with a DIFFERENT thread count. Keep the
+            # two in step: they are the project's only two ONNX adapters (#168).
+            #
+            # ONNX Runtime defaults to one intra-op thread PER CORE and spin-waits between
+            # inferences. Measured on the Pi (n=20 embeds, 4 cores): the shipped default took
+            # 124 ms/embed while burning **3.92 of 4 cores**, which starves the audio loop and is
+            # how the robot went deaf at M5 — P8 violated by CPU monopoly, not by an un-threaded
+            # call, so the `to_thread` hop in embed() cannot save us on its own.
+            #
+            # 2, not vad.py's 1: Silero is tiny (~0.4 ms/call) so single-threading it is nearly
+            # free, but MiniLM is a 90 MB transformer where it costs 340 ms/embed. The sweep:
+            #
+            #   threads | median/embed | cores busy
+            #   1       | 340.5 ms     | 1.00
+            #   2       | 192.1 ms     | 1.93   <- half the latency of 1, half the cores of 4
+            #   3       | 239.0 ms     | 2.11
+            #   4       | 191.2 ms     | 2.78   <- no faster than 2, 0.85 more cores
+            #
+            # 192 ms leaves ~5x headroom against `memory_inject_timeout_s` = 1.0 s and keeps two
+            # cores for the audio loop and the websocket that open() runs concurrently.
+            options = onnxruntime.SessionOptions()
+            options.intra_op_num_threads = 2
+            options.inter_op_num_threads = 1
+            options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+            # Kept even though the sweep shows spinning barely moves the median: the probe runs
+            # embeds back to back and so measures only the *busy* case, while M5's lesson was
+            # about cores burned **between** calls, with the robot idle. Off is the honest default.
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            self._session = onnxruntime.InferenceSession(
+                str(self._model_path), sess_options=options
+            )
             self._tokenizer = Tokenizer.from_file(str(self._tokenizer_path))
         return np
