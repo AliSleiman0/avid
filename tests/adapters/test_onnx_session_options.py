@@ -118,10 +118,7 @@ def _build_embedder_session(tmp_path: Path) -> _RecordingSessionOptions:
 
     embedder = LocalMiniLmEmbedder(model_path=model, tokenizer_path=tokenizer)
     embedder._ensure_session()
-    session = embedder._session
-    assert isinstance(session, _RecordingSession)
-    assert isinstance(session.sess_options, _RecordingSessionOptions)
-    return session.sess_options
+    return _options_of("LocalMiniLmEmbedder", embedder._session)
 
 
 def _build_vad_session(tmp_path: Path) -> _RecordingSessionOptions:
@@ -130,9 +127,21 @@ def _build_vad_session(tmp_path: Path) -> _RecordingSessionOptions:
         threshold=0.5, sample_rate=16_000, model_path=tmp_path / "silero.onnx"
     )
     vad._ensure_session()
-    session = vad._session
+    return _options_of("SileroVad", vad._session)
+
+
+def _options_of(name: str, session: Any) -> _RecordingSessionOptions:
+    """The options *name* handed to its ``InferenceSession`` — the no-options case named.
+
+    Passing no ``sess_options`` at all is the shape the original defect had, so it gets its own
+    message rather than surfacing as a bare ``isinstance`` failure that says nothing about why the
+    reader should care.
+    """
     assert isinstance(session, _RecordingSession)
-    assert isinstance(session.sess_options, _RecordingSessionOptions)
+    assert isinstance(session.sess_options, _RecordingSessionOptions), (
+        f"{name} built its InferenceSession with no SessionOptions at all — it inherits ONNX's "
+        f"one-thread-per-core spinning default and starves the audio loop on the Pi (#168)"
+    )
     return session.sess_options
 
 
@@ -185,4 +194,8 @@ def test_the_two_adapters_do_not_share_a_thread_count(tmp_path: Path) -> None:
     embedder_options = _build_embedder_session(tmp_path / "embedder")
     vad_options = _build_vad_session(tmp_path / "vad")
 
+    # Both counts have to be *set* before "they differ" means anything: two unset pools are also
+    # unequal to nothing, and a check that passes on None is the disarmed kind.
+    assert embedder_options.intra_op_num_threads is not None
+    assert vad_options.intra_op_num_threads is not None
     assert embedder_options.intra_op_num_threads != vad_options.intra_op_num_threads
