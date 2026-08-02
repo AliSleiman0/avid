@@ -6,37 +6,77 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-02 · `main = 23b4670` · tag **`v0.M5.0` pushed** · gh `AliSleiman0`.
+**As of:** 2026-08-02 · `main = 62fdb64` · tag **`v0.M5.0` pushed** · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**M5 is sealed. The next thing that matters is [#194](https://github.com/AliSleiman0/avid/issues/194).**
+**M7's laptop work is finished. Everything left in the milestone is on the Pi, and every
+instrument now exists.** This is a hardware session — a live key, a mic, and someone at it.
 
-Read [`enhancement-single-turn-authority.md`](enhancement-single-turn-authority.md) **first** — the
-whole diagnosis is written down, with the evidence. Do not re-derive it.
+### The run, in order
 
-> **Two VADs disagree about whose turn it is.** Local Silero at `[gate] silence_hold_ms` = 900 ms,
-> the server at `[ai.turn_detection] silence_duration_ms` = 500 ms. **A 500–900 ms pause is
-> ordinary speech** — a breath, a mid-sentence think — so the server commits and answers a
-> *fragment* while the local gate still considers the utterance open. The robot talks over people.
+**#127 first** (settled on #129's AC-6, and it also produces #168's AC-3 numbers in the same pass):
 
-It is **not** a config edit: `RealtimeClient` has `open`/`aclose`/`send_audio`/`events`/`truncate`/
-`cancel`/`send_tool_output` and **no commit**, so it is a new port method across three adapters, a
-call site in `ConversationService._on_speech_ended`, config handling and contract tests. ~1 day.
-Nothing in `domain/` moves.
+```sh
+/opt/avid/.venv/bin/python tools/spk3_retrieval_scan.py --config /etc/robot/config.toml \
+    --counts 1000,5000,10000 --queries 50
+```
 
-⚠️ **It projects ~990 ms and the target is 800 ms.** Do it for turn-taking and *predictability*,
-not to reach the budget. Anyone selling it as a route to 800 ms has not read the doc.
+Reports scan / embed / full-recall / FTS5 separately against §7.7's two different budgets (<50 ms
+for the inline scan, ~150 ms for the whole `recall`). **The shape to check:** on the laptop FTS5 was
+5.29 of the scan's 6.29 ms — the time goes to SQLite, not the cosine scan ADR-005 worried about. If
+that holds, §7.7's int8-quantisation escape hatch addresses the wrong component. Fold the numbers
+into §7.7's scale table (AC-5) and record the post-fix per-embed median + cores-busy on **#168**
+(expect ~192 ms / ~1.93 cores; the table in that issue was measured *before* the fix).
 
-**Then, in order:** #170 (the thinking cue has no 600 ms timer, so the robot says "one sec" on
-every turn — this is a *felt* defect and cheap), #188 (a failed reconnect escapes as an unhandled
-`OSError`, once per utterance, and the first open of a process is one of them), #189 (playback
-edges land in IDLE after a reconnect — an illegal transition, the #158/#161/#162 family), #157
-(session open costs 1.5–6.7 s against §6.3's 200 ms budget).
+**Then the gate, #129 — and the harness runs TWICE, which is the whole design:**
 
-All six are on **M6**. M7's gate (#129) and #127 still stand ahead of M9 (epic #198).
+1. State the 20 declared facts (`docs/demos/m7_evidence/facts.json` — read them naturally, do not
+   read the file aloud), then `systemctl restart robot`, then:
+   `memory_pi.py --config /etc/robot/config.toml --mode recall --json m7_recall.json` → **AC-1/2/3**
+2. *Then* the supersession turn ("I've switched to tea") and the forget turn, then:
+   `memory_pi.py --config /etc/robot/config.toml --mode mutations --json m7_mutations.json` → **AC-4/5**
+3. **AC-7** is `conversation_pi.py --memory real` — it already stands up the full M7 stack.
+
+⚠️ **Do not run `--mode recall` after the mutation turns.** Supersession and forgetting destroy the
+evidence AC-2 is scored on; a correct robot scores 2/4 and it reads as a model that forgot half of
+what it was told. There is deliberately no mode that grades both.
+
+### Two open loops that are NOT tasks
+
+- **#168 and #127 are merged but stay OPEN.** Their code/instrument shipped; their ACs are the
+  on-device measurements above. **Do not close them on the strength of the merge** — an earlier
+  baton said to, and it was wrong.
+- **`docs/handoff.md` was being written by two sessions at once** on 2026-08-02, which is how this
+  file came to describe a merged branch as "uncommitted, never run". If you are one of two, say so.
+
+### After M7
+
+**#194 opens M6** — read [`enhancement-single-turn-authority.md`](enhancement-single-turn-authority.md)
+first, do not re-derive it. Two VADs disagree whose turn it is; ~1 day; a new `RealtimeClient.commit()`
+across three adapters. ⚠️ **It moves O1's baseline** (~1530 → ~990 ms projected), which is precisely
+why M7 seals first: O1 gets measured once per baseline, not twice against a moving one. Then #170,
+#173, #188, #189, #157 — M5 debt parked in M6's milestone, and #216 AC-1 requires them closed before
+anyone judges personality. Then M6's own scope, epic #210 (#211–#216).
+
+**M8 (epic #217) and M9 (epic #198) are fully filed** — 9 children each, all Backlog. **M10 "It
+initiates" is the only milestone with zero issues filed** — the largest in the register (13 IED, L
+confidence) and the next planning target. M11 has only #21.
 
 ## Current state
+
+**Every milestone from M6 through M9 now has a filed epic + full child breakdown; only M10 is
+unplanned.** Summary:
+
+| Milestone | Issues | Notes |
+|---|---|---|
+| M0–M5 | closed | Sealed, tags through `v0.M5.0` |
+| **M6 — It has a personality** | 13 open | Epic #210 + 6 new (#211–#216) + **6 inherited M5 defects** (#157/#170/#173/#188/#189/#194) |
+| **M7 — It remembers** | 4 open | **All laptop work done; every remaining AC needs the Pi.** #168 (fix merged, AC-2/3 owed), #127 (bench merged, all ACs owed), #129 (ACs settled + harness merged), epic #114 |
+| **M8 — It sees** | 10 open | Epic #217 + 9 (#218–#226) — ONNX face detection, ADR-013 pending, presence hysteresis |
+| **M9 — It moves** | 10 open | Epic #198 + 9 (#199–#207) — 2-servo pan/tilt, `look_at` voice tool |
+| M10 — It initiates | **0** | **Unfiled.** Largest remaining milestone. |
+| M11 — It's a product | 1 | Only #21 (security doc) |
 
 **M5 sealed** as `v0.M5.0` @ `23b4670`, milestone closed 19/0, epic #98 closed. **Sealed with two
 gaps recorded rather than closed** — say this plainly, it is in the tag message, the journal, the
@@ -57,45 +97,28 @@ losing the session, degrade-and-recover across a real socket drop, **O7 at $8–
 
 ## What just shipped (this session)
 
-**Model:** swapped to the **flagship** `gpt-realtime-2025-08-28` for a **latency** reason (SDS
-§6.10.5 amended — it previously only contemplated a *quality* escalation). `tools/probe_first_token.py`
-measured four snapshots, six trials each, no hardware, in ~2 minutes:
+**#168 fixed** (PR #227, `d8b25dd`) — the MiniLM embedder's ONNX session now gets the same
+`intra_op_num_threads=1` / `inter_op_num_threads=1` / spinning-disabled treatment `SileroVad`
+already carried. Not yet closed by hand (see Next session).
 
-| model | min | median | max |
-|---|---|---|---|
-| `gpt-realtime-mini-2025-12-15` | 430 | **530** | 710 ms |
-| **`gpt-realtime-2025-08-28`** | 214 | **328** | 424 ms |
-| `gpt-realtime-2.1` | 306 | 416 | 572 ms |
-| `gpt-realtime-2.1-mini` | 292 | 464 | **2039** ms |
+**Three planning epics filed, all Backlog, none started** — M6 (#210), M8 (#217), M9 (#198), 26
+child issues total. Each is designed against the *current* code, not just the SDS/PMP text, and each
+epic documents specific things the codebase already half-built:
 
-I predicted the flagship would be slower. It is not, and amending the budget without running this
-would have amended it around an avoidable 200 ms.
+- **M6** — `AffectService` already implements both §6.8 affect tiers and a `set_affect()` surface;
+  what's missing is the tool-call wire (#214). `AiConfig.personality` points at
+  `config/personality/default.toml`, **which does not exist** (#211).
+- **M8** — two state-table rows (`VISION_PRESENCE_GAINED`, `PRESENCE_LOST_TIMEOUT`) already exist
+  with no driver; `FakeCamera.person_present` was already built for this milestone. New: **ADR-013**
+  (proposed in #218, not yet written into the SDS) pins ONNX face detection over MediaPipe/Haar/
+  motion-only, and amends PMP's "Full UC-04" wording (greeting is M10, not M8).
+- **M9** — the rig is now physically 2-servo (pan ch0 + tilt ch13), resolving ADR-009; a
+  voice-callable `look_at` tool was added to the milestone above the PMP register line, via a
+  `GestureTools` port mirroring `MemoryTools`.
 
-**Three real robot bugs, all fixed and proven by neutering:**
-
-- **#186** (`08707d0`) — `_first_audio` was reset only inside `_start_thinking_cue()`, which #171's
-  guard returns *before* reaching. One early reply latched it `True` for the whole session, so the
-  §6.9 deadline armed on no later turn. The robot sat mute through **41 s** of network outage with
-  a 10 s timeout configured. #176's deliberate VAD margin made that the normal case on turn one.
-- **#182** (`e7c50b9`) — the Realtime socket was read *inside* the async generator, i.e. at playback
-  speed, so `response.done` went unread for the length of a reply and every barge-in cancelled a
-  response the server had already finished. An owned reader task now drains at wire speed.
-  ⚠️ The issue's original premise (overlapping responses) was **wrong** — `tools/probe_overlap.py`
-  proved a second `response.create` is always rejected.
-- **#180-family harness fixes** — see below; they are not incidental.
-
-**Five defects in the MEASURING, not the robot** — the day's real lesson, now codified in
-CLAUDE.md §7.1:
-
-- `cut_api.sh` installed a **blackhole route**, which does not close an established TCP connection.
-  60 s "outage", `session_lost 0`, and the reply arrived 41 s later on the same socket. Now
-  `nft ... reject with tcp reset`. **This Pi has no iptables binary at all.**
-- The reporter returned on its first failure, hiding a **passing AC-6** behind an unrelated O1 check.
-- The summary printed `abs(elapsed − played)` while `_diverged` grades one-sided — "27% divergence"
-  on a run that passed.
-- The bargein banner quoted `6.0 dB` when the config had been `3.0` since morning. It now reads the
-  live value from the config file.
-- A **"P95" over 5 samples is the maximum**, not a percentile. Threshold untouched, label fixed.
+⚠️ Filing mistake caught and fixed in-session: an early loop update wrote M8's child bodies at an
+off-by-one issue number and clobbered the epic's own body; re-verified all ten M8 issues individually
+by fetching each body's opening line before moving on.
 
 ## Previously
 
@@ -104,6 +127,37 @@ Earlier seals are not re-summarised here — `docs/journal.md` carries one hones
 tags but no journal entry**; nobody should invent one after the fact, but the gap is real.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A check that queries through the port can be structurally incapable of failing.** The M7
+  gate's "no FTS5 entry outlives a deleted row" check first asked `FactRepository.keyword_search`,
+  which **JOINs `facts`** to filter superseded rows — so it can only ever return ids that still have
+  a live row, and an orphaned index entry is invisible to it. It passed a store where the delete
+  trigger had been dropped. The honest question was behavioural (`SELECT rowid FROM facts_fts WHERE
+  facts_fts MATCH ?`, then compare against live ids). **Before trusting a check, ask what result
+  would make it fail** — and note `facts_fts` is **external-content** (`content='facts'`), so a
+  plain `SELECT text` reads *through* to the deleted row and reports a leak as clean.
+- ⚠️ **A gate harness cannot grade two mutually destructive states in one run.** M7's supersession
+  and forget turns *destroy the evidence its recall criterion is scored on* — a correct robot scored
+  **2/4**, reading exactly like a model that forgot half of what it was told. The fix is two phases
+  (`--mode recall` before the mutation turns, `--mode mutations` after) and deliberately **no mode
+  that grades both**. Caught by the harness's own baseline test, which is the argument for writing
+  the baseline first.
+- ⚠️ **Testing a dispatcher's parts is not testing the dispatcher.** Every M7 harness test called the
+  criterion functions directly with an explicit phase, so collapsing the two phases back into one —
+  the exact defect the design prevents — left **all sixteen tests green**. Only argparse's `choices`
+  guarded it. If a module's behaviour depends on a mode/flag/route, **one test must drive the real
+  entry point with real argv**, or the wiring is unproven.
+- ⚠️ **P8 is violated by CPU monopoly, not only by an un-threaded call.** `LocalMiniLmEmbedder.embed`
+  already hopped to a thread and still stalled the loop, because ONNX's default pool took 3.92 of 4
+  cores and starved the loop thread (#168). Code review cannot see this; only a real run on real
+  hardware can. Both ONNX adapters now cap their pools — **and the thread count does not generalise**
+  (Silero 1, MiniLM 2; copying `vad.py`'s 1 costs 340 ms/embed). Guarded by
+  `tests/adapters/test_onnx_session_options.py`.
+- ⚠️ **Two sessions writing `docs/handoff.md` at once produce a baton that describes work as missing
+  while it is being merged.** On 2026-08-02 a parallel session rewrote this file from a mid-flight
+  snapshot: it called a merged branch "uncommitted, never run" and told the next session to close an
+  issue whose on-device ACs were still owed. `git add -A` then swept the edit into an unrelated
+  feature commit. **Commit the handoff on its own, and check `git status` before `git add -A`.**
 
 - ⚠️ **`config/pi.toml` IN THE REPO CANNOT RUN THE ROBOT.** It still ships M1-vintage all-fake
   adapters (`microphone`/`speaker`/`vad` = `"fake"`, `realtime = "replay"`). Every HAL bring-up
