@@ -6,20 +6,27 @@ hardware that has to live with it. PMP §6.4 time-box: 0.5 IED — **report the 
 
 **§7.7 budgets two different things, and conflating them is how a spike measures the wrong one:**
 
-* **< 50 ms — the scan.** The per-query matmul runs *inline on the event loop* (§8.5), so this is
-  really P8's slow-callback bar wearing a retrieval costume. Exceeding it stalls the loop.
+* **< 50 ms — the scan** (§7.7's retrieval budget). Note this is **not** the same as P8's
+  slow-callback bar, though they share a number and the first version of this file ran them
+  together. Only the *matmul + top-k* runs inline on the loop; `keyword_search` goes through
+  `SqliteFactRepo`'s executor, i.e. **off** it. So the inline part gets its own measured row, and
+  P8's verdict is passed on that row alone — grading a budget against a quantity that includes an
+  off-loop DB call is the mistake this comment exists to stop.
 * **~150 ms — the whole `recall` round trip.** Past this the tool "starts to be noticeable even
   with async function calling" (§6.6). This is a *felt* budget, not a loop-safety one, and it
   includes the query embedding, which the scan does not.
 
-So this reports four numbers, each measured directly — **nothing is derived by subtraction**:
+So this reports five numbers, each measured directly — **nothing is derived by subtraction**,
+because subtracting one row from another mixes two different queries' tails and invents a figure
+nothing ever timed:
 
 | number | what runs | budget |
 |---|---|---|
-| **scan** | `HybridRetriever.retrieve()` with the query vector pre-computed: FTS5 ∪ matmul ∪ §7.7 ranking | < 50 ms |
+| **scan** | `HybridRetriever.retrieve()` with the query vector pre-computed: FTS5 ∪ matmul ∪ §7.7 ranking | < 50 ms (§7.7) |
+| **inline** | `HybridRetriever.similar()` — matmul + argsort + top-k, no DB call, no embed | < 50 ms (**P8**) |
+| **FTS5** | `FactRepository.keyword_search()` alone — attribution, and it runs off the loop | none |
 | **embed** | `Embedder.embed()` alone, plus the cores it burns | none published (§7.4) |
 | **full recall** | `HybridRetriever.retrieve()` with the real embedder — what the `recall` tool costs | < ~150 ms |
-| **FTS5** | `FactRepository.keyword_search()` alone — attribution for the scan number | none |
 
 Both retrievers are the **real** `HybridRetriever` built through the composition root's own
 `_build_retriever` over a real `SqliteFactRepo` (#127 AC-3: the real index path, not a bespoke
@@ -229,11 +236,23 @@ async def _measure(
         scan_ms.append(ms_since(started_ns))
 
     # ── FTS5 alone, so the scan number can be attributed rather than guessed at ──
+    # NOTE it runs in SqliteFactRepo's executor (`_run` → `run_in_executor`), i.e. OFF the loop.
+    # That is why it cannot be graded against P8 even though it is inside `retrieve()`.
     fts_ms: list[float] = []
     for text in texts:
         started_ns = time.monotonic_ns()
         await repo.keyword_search(text, limit=config.memory.top_k)
         fts_ms.append(ms_since(started_ns))
+
+    # ── the part that actually runs INLINE on the event loop: matmul + argsort + top-k ──
+    # `similar()` is the real index's vector path with no DB call and no embed in it, so this is
+    # the only row P8's 50 ms bar legitimately applies to. Measured, not derived: subtracting FTS
+    # from the scan would mix two different queries' tails and invent a number nothing timed.
+    inline_ms: list[float] = []
+    for vector in vectors:
+        started_ns = time.monotonic_ns()
+        await scan_retriever.similar(vector, threshold=0.0, k=config.memory.top_k)
+        inline_ms.append(ms_since(started_ns))
 
     # ── the whole recall: what the tool actually costs the conversation ──
     full_ms: list[float] = []
@@ -248,6 +267,7 @@ async def _measure(
         "cores": cores,
         "scan_ms": scan_ms,
         "fts_ms": fts_ms,
+        "inline_ms": inline_ms,
         "full_ms": full_ms,
     }
 
@@ -276,6 +296,11 @@ def _report(count: int, m: dict[str, Any], *, real_embedder: bool) -> bool:
         f"{'FTS5 keyword_search (a part of it)':<34}{_p50(m['fts_ms']):>9.2f}ms"
         f"{fts_tail:>11.2f}ms   —"
     )
+    inline_tail, _ = _tail(m["inline_ms"])
+    print(
+        f"{'  of it, INLINE on the loop':<34}{_p50(m['inline_ms']):>9.2f}ms"
+        f"{inline_tail:>11.2f}ms   < {_SCAN_BUDGET_MS:.0f} ms  (P8)"
+    )
     print(
         f"{'embed (one query)':<34}{_p50(m['embed_ms']):>9.2f}ms"
         f"{embed_tail:>11.2f}ms   —          ({embed_label})"
@@ -294,11 +319,16 @@ def _report(count: int, m: dict[str, Any], *, real_embedder: bool) -> bool:
     )
 
     scan_ok = scan_tail < _SCAN_BUDGET_MS
+    inline_ok = inline_tail < _SCAN_BUDGET_MS
     full_ok = full_tail < _NOTICEABLE_MS
     print()
     print(
-        f"  scan < {_SCAN_BUDGET_MS:.0f} ms (§7.7, and P8's bar since it runs inline): "
+        f"  scan < {_SCAN_BUDGET_MS:.0f} ms (§7.7's retrieval budget): "
         f"{'PASS' if scan_ok else 'FAIL'}"
+    )
+    print(
+        f"  inline part < {_SCAN_BUDGET_MS:.0f} ms (P8's slow-callback bar — the ONLY row it "
+        f"applies to): {'PASS' if inline_ok else 'FAIL'}"
     )
     print(
         f"  full recall < {_NOTICEABLE_MS:.0f} ms (§7.7 'noticeable'): "
@@ -316,7 +346,7 @@ def _report(count: int, m: dict[str, Any], *, real_embedder: bool) -> bool:
             "      measure the FAKE embedder and say nothing about §7.4 or the recall tool on the\n"
             "      Pi. Only the scan and FTS rows are meaningful in this configuration."
         )
-    return scan_ok
+    return scan_ok and inline_ok
 
 
 async def _run(args: argparse.Namespace, *, config: Config, db_path: Path) -> int:
