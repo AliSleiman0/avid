@@ -528,6 +528,8 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         text_model=FakeTextModel(),
         supersession_threshold=0.85,
         supersession_k=5,
+        forget_relevance_floor=0.60,
+        forget_k=5,
         top_facts_max=15,
         top_facts_token_budget=600,
     )

@@ -21,8 +21,10 @@ from avid.domain import (
     MemoryFactSuperseded,
     MemoryRecallCompleted,
     RetrievalCandidate,
+    RetrievalMatch,
     ScoredCandidate,
     ScoreWeights,
+    deletable_ids,
     rank_candidates,
     recency_decay,
     select_top_facts,
@@ -336,3 +338,53 @@ def test_select_top_facts_always_admits_the_first_even_over_budget() -> None:
 
 def test_select_top_facts_empty_input() -> None:
     assert select_top_facts([], max_facts=10, max_tokens=600) == ()
+
+
+# --- deletable_ids — the §7.10 forget policy (#257) --------------------------------------------
+
+
+def _match(fact_id: int, relevance: float, *, keyword: bool = False) -> RetrievalMatch:
+    return RetrievalMatch(fact_id=fact_id, relevance=relevance, keyword_hit=keyword)
+
+
+def test_only_matches_at_or_above_the_floor_are_deletable() -> None:
+    """The bar `forget` never had. On the M7 gate one call deleted five of six facts because every
+    id the top-k returned was deleted, at cosines no one would call a match."""
+    matches = (_match(1, 0.91), _match(2, 0.60), _match(3, 0.59), _match(4, 0.21))
+    assert deletable_ids(matches, floor=0.60) == (1, 2)
+
+
+def test_a_keyword_hit_is_deletable_below_the_floor() -> None:
+    """The disjunction's whole point: MiniLM embeds a proper noun to something generic, which is why
+    §7.7 unions FTS5 into retrieval at all. Without this branch, "forget what I told you about
+    Biscuit" would silently delete nothing."""
+    matches = (_match(7, 0.12, keyword=True),)
+    assert deletable_ids(matches, floor=0.60) == (7,)
+
+
+def test_a_weak_match_that_is_not_a_keyword_hit_is_not_deletable() -> None:
+    """The M7 gate case, reduced: the coffee query pulled in unrelated facts at 0.2-0.4 and deleted
+    them. They are neither close enough nor named."""
+    matches = (_match(1, 0.42), _match(2, 0.31), _match(3, 0.22))
+    assert deletable_ids(matches, floor=0.60) == ()
+
+
+def test_order_is_preserved_so_a_cap_keeps_the_strongest() -> None:
+    """The retriever hands matches over best-first; the policy filters without reordering, so a
+    caller that also caps the count drops the weakest rather than an arbitrary subset."""
+    matches = (_match(9, 0.95), _match(4, 0.80), _match(6, 0.70))
+    assert deletable_ids(matches, floor=0.60) == (9, 4, 6)
+
+
+def test_no_matches_deletes_nothing() -> None:
+    assert deletable_ids((), floor=0.60) == ()
+
+
+@pytest.mark.parametrize("floor", [0.0, 0.5, 1.0])
+def test_the_floor_is_injected_not_assumed(floor: float) -> None:
+    """P7: the bar is a config value the caller supplies. A floor of 0.0 admits everything — which
+    is precisely the pre-#257 behaviour, and it must be something a caller *chooses*, not a default
+    hiding in the domain."""
+    matches = (_match(1, 0.9), _match(2, 0.5), _match(3, 0.0))
+    expected = tuple(m.fact_id for m in matches if m.relevance >= floor)
+    assert deletable_ids(matches, floor=floor) == expected

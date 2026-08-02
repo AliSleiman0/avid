@@ -43,6 +43,7 @@ from avid.domain import (
     Fact,
     MemoryRecallCompleted,
     RetrievalCandidate,
+    RetrievalMatch,
     ScoreWeights,
     rank_candidates,
 )
@@ -204,9 +205,68 @@ class HybridRetriever:
         ``latency_ms`` derived from ``monotonic_ns`` (never wall clock, §9.1.1). ``correlation_id``
         is the turn this recall serves (#122 / the ``recall`` tool pass it); a fresh id is minted
         when a recall stands alone (the eval harness)."""
+        started_ns = self._clock.monotonic_ns()
+        candidates, _ = await self._candidates(query)
+        ranked = rank_candidates(
+            candidates,
+            weights=self._weights,
+            half_life_days=self._half_life_days,
+            k=self._top_k,
+        )
+        result = tuple(s.fact_id for s in ranked)
+
+        latency_ms = (self._clock.monotonic_ns() - started_ns) / 1_000_000
+        await self._bus.publish(
+            MemoryRecallCompleted(
+                **envelope(
+                    clock=self._clock,
+                    correlation_id=correlation_id or uuid4(),
+                    source=_SOURCE,
+                ),
+                query=query,
+                n_returned=len(result),
+                latency_ms=latency_ms,
+            )
+        )
+        return result
+
+    async def match(self, query: str, *, k: int) -> tuple[RetrievalMatch, ...]:
+        """The hybrid candidates for ``query`` with the **evidence** for each (#257, §7.7).
+
+        Same candidate generation as :meth:`retrieve` — one matmul over the §8.5 matrix, unioned
+        with FTS5's keyword hits — but it hands back the **raw** cosine and the keyword flag instead
+        of a ranking, because §7.7's combined score is min-max normalised across the candidate set
+        and so cannot say whether a match is good in absolute terms. ``forget`` needs that, since it
+        deletes irreversibly (§7.10); the policy itself lives in the domain
+        (:func:`~avid.domain.deletable_ids`), not here.
+
+        Ordered by raw cosine, best first, truncated to ``k``. **Publishes nothing** — a forget is
+        not a recall (cf. :meth:`similar`)."""
+        candidates, keyword_ids = await self._candidates(query)
+        matches = [
+            RetrievalMatch(
+                fact_id=c.fact_id,
+                relevance=c.relevance,
+                keyword_hit=c.fact_id in keyword_ids,
+            )
+            for c in candidates
+        ]
+        # Sorted on the raw cosine, with fact_id breaking ties, so the order is deterministic and
+        # does not depend on set iteration — the same determinism rule rank_candidates states.
+        matches.sort(key=lambda m: (-m.relevance, m.fact_id))
+        return tuple(matches[:k])
+
+    async def _candidates(
+        self, query: str
+    ) -> tuple[list[RetrievalCandidate], frozenset[int]]:
+        """The shared candidate generation behind :meth:`retrieve` and :meth:`match`.
+
+        Extracted so the two cannot drift: a `forget` that considered a different candidate set than
+        a `recall` would make "it never comes back from retrieval" untestable. Returns the scoring
+        candidates (carrying the raw cosine in ``relevance``) and the FTS5 hit ids.
+        """
         import numpy as np
 
-        started_ns = self._clock.monotonic_ns()
         vector = await self._embedder.embed(query)
         keyword_ids = await self._repo.keyword_search(query, limit=self._top_k)
 
@@ -236,25 +296,4 @@ class HybridRetriever:
             )
             for fid in candidate_ids
         ]
-        ranked = rank_candidates(
-            candidates,
-            weights=self._weights,
-            half_life_days=self._half_life_days,
-            k=self._top_k,
-        )
-        result = tuple(s.fact_id for s in ranked)
-
-        latency_ms = (self._clock.monotonic_ns() - started_ns) / 1_000_000
-        await self._bus.publish(
-            MemoryRecallCompleted(
-                **envelope(
-                    clock=self._clock,
-                    correlation_id=correlation_id or uuid4(),
-                    source=_SOURCE,
-                ),
-                query=query,
-                n_returned=len(result),
-                latency_ms=latency_ms,
-            )
-        )
-        return result
+        return candidates, frozenset(fid for fid in keyword_ids if fid in self._meta)

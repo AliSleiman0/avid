@@ -40,7 +40,7 @@ from uuid import UUID
 from avid.core.event_bus import E, Subscription
 from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
 from avid.core.realtime import RealtimeEvent
-from avid.domain import Event, Fact
+from avid.domain import Event, Fact, RetrievalMatch
 
 
 @runtime_checkable
@@ -591,6 +591,21 @@ class Retriever(Protocol):
         """The live fact ids whose embedding cosine ≥ ``threshold``, best first, capped at ``k`` — the
         §7.8 near-duplicate search a write runs *before* deciding supersession. Pre-normalised vectors
         (§8.2) mean cosine is a dot product; publishes nothing (it is not a recall)."""
+        ...
+
+    async def match(self, query: str, *, k: int) -> tuple[RetrievalMatch, ...]:
+        """The same hybrid candidates :meth:`retrieve` finds, but carrying **why** each matched (#257).
+
+        :meth:`retrieve` returns a ranking; this returns evidence. The difference matters to exactly
+        one caller so far — ``forget`` — because §7.7's combined score is min-max normalised across
+        the candidate set and therefore cannot answer *"is this match good enough to delete
+        something irreversibly?"*. Each :class:`~avid.domain.RetrievalMatch` carries the **raw**
+        cosine and whether FTS5 hit the fact directly, and the *service* applies the policy (P2 —
+        the index reports facts, it does not decide them).
+
+        Best-first, capped at ``k``. **Publishes nothing**: a forget is not a recall, the same reason
+        :meth:`similar` publishes nothing — a `memory.recall_completed` for a deletion would put a
+        lie in the event catalog."""
         ...
 
     def append(self, fact: Fact, embedding: bytes | None) -> None:

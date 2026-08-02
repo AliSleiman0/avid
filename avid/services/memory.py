@@ -40,6 +40,7 @@ from avid.domain import (
     MemoryFactDeleted,
     MemoryFactStored,
     MemoryFactSuperseded,
+    deletable_ids,
     select_top_facts,
 )
 
@@ -73,6 +74,8 @@ class MemoryService:
         text_model: TextModel,
         supersession_threshold: float,
         supersession_k: int,
+        forget_relevance_floor: float,
+        forget_k: int,
         top_facts_max: int,
         top_facts_token_budget: int,
     ) -> None:
@@ -84,6 +87,8 @@ class MemoryService:
         self._text_model = text_model
         self._supersession_threshold = supersession_threshold
         self._supersession_k = supersession_k
+        self._forget_relevance_floor = forget_relevance_floor
+        self._forget_k = forget_k
         self._top_facts_max = top_facts_max
         self._top_facts_token_budget = top_facts_token_budget
 
@@ -251,8 +256,17 @@ class MemoryService:
         (cascading to its embedding/routines/episodes via ``ON DELETE CASCADE``), **then from the
         matrix** (§8.5's ordering — so a retrieval can never surface a fact whose row is already gone),
         then ``memory.fact_deleted`` is published. Losing a deletion is a privacy bug (§3.7.3), so every
-        step is awaited and durable before this returns."""
-        ids = await self._retriever.retrieve(query, correlation_id=correlation_id)
+        step is awaited and durable before this returns.
+
+        **What it may delete is bounded (#257).** It asks the retriever for *evidence* rather than a
+        ranking and applies :func:`~avid.domain.deletable_ids`: cosine at or above
+        ``forget_relevance_floor``, or a direct FTS5 hit. Until the M7 gate this deleted every id the
+        top-k returned — one call destroyed five of six facts, at cosines no one would call a match —
+        and because the DELETE cascades there is nothing to undo it with. `retrieve` is deliberately
+        **not** used here: it ranks (min-max normalised, so a lone candidate always looks perfect)
+        and it publishes ``memory.recall_completed``, which a deletion is not."""
+        matches = await self._retriever.match(query, k=self._forget_k)
+        ids = deletable_ids(matches, floor=self._forget_relevance_floor)
         corr = correlation_id or uuid4()
         for fact_id in ids:
             await self._repo.delete(fact_id)

@@ -1701,7 +1701,27 @@ Retrieval defaults to `WHERE superseded_by IS NULL`. History remains queryable b
 
 Step 3 is a **synchronous LLM call inside a tool handler**. Isn't that a latency violation? No — §6.6's async function calling means the model handles the wait gracefully, and this only fires on fact-writes with a near-duplicate, which is rare. But it is the highest-latency path in the system and it must be measured at M7, not assumed.
 
-> **As built (#122).** `MemoryService.store_fact` (`avid/services/memory.py`) implements this pseudocode, durable-before-return then publishing `memory.fact_stored`/`memory.fact_superseded`. The **cosine threshold is `0.85` and `k = 5`** exactly as above — injected from `[memory] supersession_threshold` / `supersession_k` (P7, defaults in `avid/core/config.py`), not hard-coded. Step 3's judgement is the `TextModel.judge_supersession` port (§3.9.1): the real adapter is an OpenAI text client, the fake decides in-process, and it returns only the ids genuinely superseded — a subset of the candidates, `()` for none, never a guess (the gap-year rule below).
+> **As built (#122).** `MemoryService.store_fact` (`avid/services/memory.py`) implements this pseudocode, durable-before-return then publishing `memory.fact_stored`/`memory.fact_superseded`. `k = 5`, and the cosine threshold is injected from `[memory] supersession_threshold` / `supersession_k` (P7, defaults in `avid/core/config.py`), not hard-coded. Step 3's judgement is the `TextModel.judge_supersession` port (§3.9.1): the real adapter is an OpenAI text client, the fake decides in-process, and it returns only the ids genuinely superseded — a subset of the candidates, `()` for none, never a guess (the gap-year rule below).
+
+### The threshold, measured — and why 0.85 was wrong (#260)
+
+The pseudocode's `0.85` shipped for a whole milestone and **fired on nothing**. Step 2 is a *hard* gate: below it, step 3 never runs, so the judge that exists to decide contradictions was never asked. Nothing errored; the store simply accumulated contradictions and answered with stale facts.
+
+Measured on the Pi, real `LocalMiniLmEmbedder`, 42 pairs — `assets/eval/supersession.json` via `tools/eval_supersession.py` (Tier-5, §14.7):
+
+| class | n | min | p50 | max |
+|---|---|---|---|---|
+| **contradictions** (must reach the judge) | 16 | 0.6217 | 0.7615 | 0.8915 |
+| **paraphrases** (should reach it) | 10 | 0.7917 | 0.9519 | 0.9803 |
+| **unrelated** (must not) | 16 | 0.2151 | 0.4152 | 0.5807 |
+
+At **0.85 only 4 of 16 contradictions were admitted** — including *"Ali has switched to tea and no longer drinks coffee"* against a coffee fact, at 0.6328, the exact case §7.8 is written about. A close paraphrase of a fact scores 0.7917 against *itself* and was also rejected.
+
+**The classes separate cleanly:** worst contradiction 0.6217, best unrelated 0.5807, so any bar in **(0.5807, 0.6217]** admits every contradiction and no unrelated pair. **`supersession_threshold = 0.60`** sits in that band, roughly centred, and admits 16/16 contradictions, 10/10 paraphrases, 0/16 unrelated.
+
+The value is chosen *recall-first* on purpose. Step 2 is a cheap pre-filter and step 3 is the precise judge, so admitting a doubtful pair costs one off-turn-path TextModel call, while rejecting a real contradiction leaves a wrong memory in place indefinitely. **A gate tuned for precision rejects its own judge's input** — which is what 0.85 did.
+
+⚠️ The band is narrow (0.041 wide) and the value is tied to *this* embedder. **Re-run the eval whenever `[memory] embedder` changes**; a threshold carried across models is a guess again.
 
 **The gap-year problem** — the same structure as LACPA's predecessor-acknowledgement rule, as it happens. If the user says "I drink coffee at 8" (T1), goes quiet for a year, then "I've switched to tea" (T2), what was true in between? We record the supersession timestamp, not a retroactive claim. The robot knows tea is current and coffee was previous; it does not invent a switch date. **Do not let the extraction model guess at this.** Unknown is a valid answer and a confabulated date is a bug.
 
@@ -1726,6 +1746,23 @@ Reflection is what separates a fact database from a memory. It also runs at 03:0
 | Audit | "What do you know about me?" → a supported query, returns all non-superseded facts |
 
 The `forget` / supersession asymmetry is deliberate and worth stating explicitly: **supersession is an epistemics feature (what's true now); deletion is a rights feature (what may be retained).** They look similar and must never be conflated. When the user says "forget that," they are not saying "that stopped being true" — they are withdrawing consent, and the row goes away.
+
+### What `forget` may delete (#257)
+
+`forget` ran with **no relevance bar at all** until the M7 gate: it deleted every id the top-k returned, so on a small store the query's whole neighbourhood went. One call destroyed **five of six facts** — hard cascading DELETE, nothing to undo it with, and the model reported success.
+
+A fact is now deletable when its **raw cosine** clears `[memory] forget_relevance_floor` **or** FTS5 matched the query text directly (`deletable_ids`, `avid/domain/memory.py`; the evidence comes from `Retriever.match`, which publishes nothing because a forget is not a recall).
+
+Both halves are load-bearing:
+
+- **Without the floor**, the top-k sweep above.
+- **Without the keyword branch**, forgetting *by name* breaks. A proper noun embeds to something generic — the reason §7.7 unions FTS5 into retrieval at all — so a floor-only rule would leave the row in place while telling the user it was forgotten. A privacy failure wearing a success message.
+
+**The floor is 0.65, deliberately stricter than §7.8's 0.60**, because the error costs are reversed: a doubtful *supersession* costs one model call, a doubtful *deletion* destroys data permanently. 0.65 also clears the closest genuinely-related pair measured in the real gate store (0.6017, "building a robot" vs "learning AI") — two facts a user would be dismayed to lose while forgetting the other.
+
+⚠️ The calibration set measures **fact-vs-fact** similarity, which is exactly what §7.8 does but only an approximation of `forget`, whose query is model-authored (at the gate the model passed a whole fact's text as the query, which is why the analogy holds as well as it does). Short, user-phrased queries are the weak case — and they are precisely what the FTS5 branch covers.
+
+> **The cosine is the raw one, never §7.7's score.** `rank_candidates` min-max normalises relevance across the candidate set, so a lone candidate always scores 1.0 — a ranking, not a measurement. A caller deciding what to destroy must not read it as one.
 
 ---
 

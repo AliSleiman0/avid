@@ -198,6 +198,23 @@ class SqliteFactRepo:
         def _delete() -> None:
             conn = self._conn_sync()
             with conn:
+                # Clear the supersession pointer PAIR on any fact this one replaced, first and in
+                # the same transaction. The §8.3 schema declares `superseded_by ... ON DELETE SET
+                # NULL` alongside `CHECK ((superseded_by IS NULL) = (superseded_at IS NULL))`, and
+                # the two disagree: SET NULL nulls the pointer and leaves the timestamp, so SQLite
+                # rejects its own cascade and the DELETE raises IntegrityError. Reachable from one
+                # ordinary sequence — state a fact, contradict it, then ask to forget the newer
+                # one — and it raises inside a tool handler, where it abandons the whole write.
+                #
+                # Clearing both columns completes what SET NULL was chosen to mean: if the fact
+                # that replaced it is gone, the older fact is no longer superseded by anything and
+                # returns to live retrieval. The alternative, cascading the delete, would destroy
+                # a fact the user never asked to forget (§7.10).
+                conn.execute(
+                    "UPDATE facts SET superseded_by = NULL, superseded_at = NULL "
+                    "WHERE superseded_by = ?",
+                    (fact_id,),
+                )
                 conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
 
         await self._run(_delete)

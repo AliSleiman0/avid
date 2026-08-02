@@ -135,6 +135,9 @@ async def _make_rig(
     embedder: object | None = None,
     text_model: object | None = None,
     boom_on: type[Event] | None = None,
+    supersession_threshold: float = 0.60,
+    forget_relevance_floor: float = 0.65,
+    forget_k: int = 5,
 ) -> AsyncIterator[Rig]:
     clock = FakeClock()
     bus = AsyncioEventBus()
@@ -172,8 +175,10 @@ async def _make_rig(
         retriever=retriever,
         embedder=emb,  # type: ignore[arg-type]
         text_model=tm,  # type: ignore[arg-type]
-        supersession_threshold=0.85,
+        supersession_threshold=supersession_threshold,
         supersession_k=5,
+        forget_relevance_floor=forget_relevance_floor,
+        forget_k=forget_k,
         top_facts_max=15,
         top_facts_token_budget=600,
     )
@@ -347,7 +352,9 @@ async def test_forget_hard_deletes_matching_facts() -> None:
         )
         deleted = await rig.memory.forget("Maya")
 
-        assert deleted >= 1
+        # Exactly one, not ">= 1". The loose form stayed green while forget was deleting the whole
+        # top-k — it is the assertion that let #257 through, so it is the one that changed.
+        assert deleted == 1
         assert await rig.repo.get(fid) is None  # row + FTS shadow + cascade gone
         assert [
             f.id for f in await rig.memory.retrieve("Maya")
@@ -474,3 +481,224 @@ async def test_recall_returns_facts_capped_at_k() -> None:
         assert all(isinstance(f, Fact) for f in got)
         await _drain(rig)
         assert len(_of(rig, MemoryRecallCompleted)) == 1  # the retriever published it
+
+
+# --- #257: forget deletes only what it can justify ---------------------------------------------
+
+
+async def test_forget_deletes_one_fact_not_the_whole_top_k() -> None:
+    """The M7 gate scenario, reduced to a test (#257 AC-2).
+
+    On the Pi a single `forget` destroyed **five of six facts**: it deleted every id the top-k
+    returned, so the store's whole population came back as "matches" and was hard-deleted, cascade
+    and all. Here six facts exist, one query names one of them, and exactly one row goes.
+
+    The vectors are scripted rather than left to ``FakeEmbedder``, because the precise cosine is the
+    thing under test — a legitimate fake, not a mock (§14.3).
+    """
+    target = "the user drinks black coffee with no sugar"
+    # Three unrelated facts, not the gate's five: the claim is "forget does not sweep the whole
+    # candidate set", which four rows prove as well as six. Six put this test 3 ms over the P8
+    # slow-callback bar, and eating another test's margin to make a point twice is a bad trade.
+    others = [
+        "the user lives in Beirut",
+        "the user works as an engineer",
+        "the user runs on Tuesday mornings",
+    ]
+    query = "coffee"
+    # The target sits at cosine 1.0 with the query; the others at 0.30 — the 0.2-0.4 band the real
+    # store showed for facts nobody would call a match.
+    table: dict[str, Sequence[float]] = {target: [1.0, 0.0], query: [1.0, 0.0]}
+    for text in others:
+        table[text] = [0.30, (1 - 0.30**2) ** 0.5]
+
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder, forget_relevance_floor=0.60):
+        await rig.memory.start()
+        target_id = await rig.memory.store_fact(_fact(target, kind="preference"))
+        other_ids = [
+            await rig.memory.store_fact(_fact(t, kind="other")) for t in others
+        ]
+
+        deleted = await rig.memory.forget(query)
+
+        assert deleted == 1, "forget must not sweep the top-k"
+        assert await rig.repo.get(target_id) is None
+        for fid in other_ids:
+            assert await rig.repo.get(fid) is not None, (
+                "an unrelated fact was destroyed — the #257 defect. The DELETE cascades, so "
+                "there is nothing to undo it with"
+            )
+
+
+async def test_forget_with_a_query_that_matches_nothing_deletes_nothing() -> None:
+    """#257 AC-3. §7.7 records that a negative query still returns its best-but-irrelevant
+    matches — for a recall that costs a wasted line of context; for a forget it cost five facts."""
+    stored = "the user lives in Beirut"
+    query = "something entirely unrelated"
+    table: dict[str, Sequence[float]] = {
+        stored: [1.0, 0.0],
+        query: [0.15, (1 - 0.15**2) ** 0.5],
+    }
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder, forget_relevance_floor=0.60):
+        await rig.memory.start()
+        fid = await rig.memory.store_fact(_fact(stored, kind="identity"))
+
+        assert await rig.memory.forget(query) == 0
+        assert await rig.repo.get(fid) is not None
+
+
+async def test_forget_still_works_by_proper_noun_below_the_floor() -> None:
+    """The disjunction earning its keep: the FTS5 branch (§7.7 proper nouns).
+
+    "Biscuit" embeds to something generic — scripted here at 0.10, far under the floor — but FTS5
+    matches the term exactly. A floor-only policy would leave the fact in place while telling the
+    user it was forgotten, which is a privacy failure wearing a success message.
+    """
+    stored = "the neighbour dog is called Biscuit"
+    query = "Biscuit"
+    table: dict[str, Sequence[float]] = {
+        stored: [1.0, 0.0],
+        query: [0.10, (1 - 0.10**2) ** 0.5],
+    }
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder, forget_relevance_floor=0.60):
+        await rig.memory.start()
+        fid = await rig.memory.store_fact(_fact(stored, kind="relationship"))
+
+        assert await rig.memory.forget(query) == 1
+        assert await rig.repo.get(fid) is None
+
+
+async def test_forget_reports_exactly_what_it_deleted() -> None:
+    """The count returned, the rows gone and the events published must agree — a bounded forget
+    that under-reports would be its own privacy bug."""
+    a, b = "the user drinks coffee", "the user enjoys espresso"
+    table: dict[str, Sequence[float]] = {
+        a: [1.0, 0.0],
+        b: [1.0, 0.0],
+        "coffee": [1.0, 0.0],
+    }
+    embedder = _ScriptedEmbedder(table, dimensions=2)
+    async for rig in _make_rig(embedder=embedder, forget_relevance_floor=0.60):
+        await rig.memory.start()
+        ids = {
+            await rig.memory.store_fact(_fact(a, kind="preference")),
+            await rig.memory.store_fact(_fact(b, kind="preference")),
+        }
+        deleted = await rig.memory.forget("coffee")
+        await _drain(rig)
+
+        assert deleted == len(ids)
+        events = _of(rig, MemoryFactDeleted)
+        assert {e.fact_id for e in events} == ids  # type: ignore[union-attr]
+
+
+# --- #260: the gate must admit what its judge exists to decide ---------------------------------
+
+
+class _CountingTextModel:
+    """Wraps a judge and counts calls — a fake that records, not a mock that asserts.
+
+    The point of #260 is that ``judge_supersession`` was **never invoked**: the cosine gate at 0.85
+    rejected every candidate, so a test checking only the *outcome* cannot tell "the judge said no"
+    from "the judge was never asked". This tells them apart.
+    """
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    async def judge_supersession(
+        self, *, new_fact: str, candidates: Sequence[tuple[int, str]]
+    ) -> Sequence[int]:
+        self.calls += 1
+        return await self._inner.judge_supersession(  # type: ignore[attr-defined]
+            new_fact=new_fact, candidates=candidates
+        )
+
+
+async def test_a_pair_above_the_gate_reaches_the_judge() -> None:
+    """The mechanism, not the value: with the bar injected below the pair cosine, the judge is
+    consulted. The *value* is chosen from ``assets/eval/supersession.json`` against real
+    embeddings — Tier 5, never a CI gate (§14.7), because CI runs the bag-of-words fake."""
+    old_text, new_text = "the user drinks coffee", "the user switched to tea"
+    table: dict[str, Sequence[float]] = {
+        old_text: [1.0, 0.0],
+        new_text: [0.70, (1 - 0.70**2) ** 0.5],
+    }
+    judge = _CountingTextModel(_AlwaysSupersede())
+    async for rig in _make_rig(
+        embedder=_ScriptedEmbedder(table, dimensions=2),
+        text_model=judge,
+        supersession_threshold=0.60,
+    ):
+        await rig.memory.start()
+        old_id = await rig.memory.store_fact(_fact(old_text, kind="preference"))
+        await rig.memory.store_fact(_fact(new_text, kind="preference"))
+
+        assert judge.calls == 1, "the cosine gate must hand this pair to the judge"
+        old = await rig.repo.get(old_id)
+        assert old is not None and old.superseded_by is not None
+
+
+async def test_a_pair_below_the_gate_never_reaches_the_judge() -> None:
+    """The gate still has a cost job: an unrelated write must not buy a TextModel call. This is the
+    half that keeps the #260 fix from becoming "ask the judge about everything"."""
+    old_text, new_text = "the user drinks coffee", "the user lives in Beirut"
+    table: dict[str, Sequence[float]] = {
+        old_text: [1.0, 0.0],
+        new_text: [0.20, (1 - 0.20**2) ** 0.5],
+    }
+    judge = _CountingTextModel(_AlwaysSupersede())
+    async for rig in _make_rig(
+        embedder=_ScriptedEmbedder(table, dimensions=2),
+        text_model=judge,
+        supersession_threshold=0.60,
+    ):
+        await rig.memory.start()
+        await rig.memory.store_fact(_fact(old_text, kind="preference"))
+        await rig.memory.store_fact(_fact(new_text, kind="identity"))
+
+        assert judge.calls == 0
+
+
+async def test_forgetting_a_fact_that_superseded_another_does_not_raise() -> None:
+    """Deleting the newer half of a supersession pair must work, and must free the older half.
+
+    The §8.3 schema declares ``superseded_by ... ON DELETE SET NULL`` next to
+    ``CHECK ((superseded_by IS NULL) = (superseded_at IS NULL))``. Those disagree: the cascade nulls
+    the pointer, leaves the timestamp, and SQLite rejects its own write. Reached by an ordinary
+    sequence — state a fact, contradict it, ask to forget the newer one — and it raised
+    ``IntegrityError`` **inside a tool handler**, abandoning the write. Found by the #257 tests.
+
+    The older fact returns to live retrieval, which is what SET NULL was chosen to mean: nothing
+    supersedes it any more. Cascading instead would destroy a fact the user never asked to forget.
+    """
+    old_text, new_text = "the user drinks coffee", "the user drinks tea"
+    table: dict[str, Sequence[float]] = {
+        old_text: [1.0, 0.0],
+        new_text: [1.0, 0.0],
+        "tea": [1.0, 0.0],
+    }
+    async for rig in _make_rig(
+        embedder=_ScriptedEmbedder(table, dimensions=2),
+        text_model=_AlwaysSupersede(),
+        forget_relevance_floor=0.60,
+    ):
+        await rig.memory.start()
+        old_id = await rig.memory.store_fact(_fact(old_text, kind="preference"))
+        new_id = await rig.memory.store_fact(_fact(new_text, kind="preference"))
+
+        superseded = await rig.repo.get(old_id)
+        assert superseded is not None and superseded.superseded_by == new_id
+
+        assert await rig.memory.forget("tea") == 1  # must not raise
+
+        assert await rig.repo.get(new_id) is None
+        freed = await rig.repo.get(old_id)
+        assert freed is not None, (
+            "forgetting the newer fact must not destroy the older one"
+        )
+        assert freed.superseded_by is None and freed.superseded_at is None

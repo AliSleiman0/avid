@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "what": "Calibration set for [memory] supersession_threshold and forget_relevance_floor (#260, #257).",
+    "why": [
+      "Both values are cosine bars over the SAME embedding space, and both were wrong in opposite",
+      "directions: supersession at 0.85 admitted nothing (a paraphrase of the same fact scored",
+      "0.7917), while forget had no bar at all and deleted five unrelated facts on one call.",
+      "A bar chosen from a single anecdote is a guess wearing a measurement's clothes, so this set",
+      "exists to produce a distribution instead."
+    ],
+    "shape": [
+      "Every text is written the way the MODEL stores facts (third person, whole sentences) rather",
+      "than the way a user says them, because that is the text the embedder actually sees. Taken",
+      "from real rows recovered from the M7 gate store, e.g. 'Ali drinks black coffee with no",
+      "sugar, and sometimes drinks a caramel latte with skim milk and sugar-free syrup.'"
+    ],
+    "classes": {
+      "contradictions": "new REPLACES old. Must reach the §7.8 judge — this is the case supersession exists for.",
+      "paraphrases": "new RESTATES old. Near-duplicates; should also reach the judge (they are what 0.85 was aiming at).",
+      "unrelated": "new has nothing to do with old. Must NOT reach the judge, and must NOT be swept up by forget."
+    },
+    "reading_it": [
+      "The gate is a RECALL filter in front of a precision judge (§7.8): admitting an unrelated pair",
+      "costs one cheap TextModel call, while rejecting a contradiction costs a wrong memory forever.",
+      "The two error costs are not symmetric, and the chosen value should say so out loud.",
+      "If the classes overlap with no separating value, that IS the finding — report it, do not",
+      "split the difference and call it calibrated."
+    ],
+    "tier": "5 (SDS §14.7) — scored and tracked, never pass/fail. tools/eval_supersession.py always exits 0.",
+    "run_on": "the Pi, with [adapters] embedder = local_minilm. FakeEmbedder is bag-of-words and has a different distribution; a value calibrated on it would be a number about the fake."
+  },
+
+  "contradictions": [
+    {"id": "drink",     "old": "Ali drinks black coffee with no sugar, and sometimes drinks a caramel latte with skim milk and sugar-free syrup.", "new": "Ali has switched to tea and no longer drinks coffee."},
+    {"id": "city",      "old": "Ali lives in Beirut.",                                  "new": "Ali has moved to Limassol and now lives there."},
+    {"id": "job",       "old": "Ali works as a software engineer at a startup.",        "new": "Ali has left the startup and now works as a teacher."},
+    {"id": "phone",     "old": "Ali's phone number ends in 4471.",                      "new": "Ali has a new phone number ending in 9032."},
+    {"id": "pet",       "old": "Ali has a dog called Biscuit.",                          "new": "Biscuit died last month, and Ali now has a cat called Pepper."},
+    {"id": "exercise",  "old": "Ali goes to the gym three times a week.",                "new": "Ali stopped going to the gym and runs outdoors instead."},
+    {"id": "car",       "old": "Ali drives a red Corolla.",                              "new": "Ali sold the Corolla and now drives a blue Civic."},
+    {"id": "diet",      "old": "Ali is vegetarian.",                                     "new": "Ali is vegan now."},
+    {"id": "schedule",  "old": "Ali's team standup is at nine every weekday.",           "new": "The standup has moved to eleven every weekday."},
+    {"id": "allergy",   "old": "Ali is allergic to cats.",                               "new": "Ali is no longer allergic to cats after treatment."},
+    {"id": "laptop",    "old": "Ali uses a Windows laptop for work.",                    "new": "Ali switched to a Mac for work."},
+    {"id": "manager",   "old": "Ali's manager is Sam.",                                  "new": "Ali's manager is now Dana, not Sam."},
+    {"id": "flight",    "old": "Ali is flying to Cyprus in September.",                  "new": "Ali moved the Cyprus trip to November."},
+    {"id": "music",     "old": "Ali cannot stand loud music.",                           "new": "Ali has started enjoying loud music at concerts."},
+    {"id": "coffeeshop","old": "Ali always orders from the cafe on the corner.",         "new": "Ali stopped going to the corner cafe and orders from the roastery now."},
+    {"id": "study",     "old": "Ali is learning AI now.",                                "new": "Ali has finished the AI course and is learning robotics."}
+  ],
+
+  "paraphrases": [
+    {"id": "drink_p",   "old": "Ali drinks black coffee with no sugar, and sometimes drinks a caramel latte with skim milk and sugar-free syrup.", "new": "Ali takes his coffee black, without sugar."},
+    {"id": "city_p",    "old": "Ali lives in Beirut.",                                   "new": "Ali is based in Beirut."},
+    {"id": "job_p",     "old": "Ali works as a software engineer at a startup.",         "new": "Ali is a software engineer, working at a startup."},
+    {"id": "sister_p",  "old": "Ali's sister Maya is a doctor in Cyprus.",               "new": "Maya, Ali's sister, works as a doctor in Cyprus."},
+    {"id": "pet_p",     "old": "Ali has a dog called Biscuit.",                          "new": "The dog Ali has is named Biscuit."},
+    {"id": "run_p",     "old": "Ali runs on Tuesday mornings.",                          "new": "Ali goes running every Tuesday morning."},
+    {"id": "read_p",    "old": "Ali reads for half an hour before bed.",                 "new": "Before going to sleep Ali reads for thirty minutes."},
+    {"id": "birth_p",   "old": "Ali's birthday is the ninth of November.",               "new": "Ali was born on November ninth."},
+    {"id": "robot_p",   "old": "Ali is building a robot using the OpenAI API integrated into a Raspberry Pi.", "new": "Ali is putting together a Raspberry Pi robot that uses the OpenAI API."},
+    {"id": "friend_p",  "old": "Ali's oldest friend Karim lives in Berlin.",             "new": "Karim, who Ali has known longest, is based in Berlin."}
+  ],
+
+  "unrelated": [
+    {"id": "u_city_pet",    "old": "Ali lives in Beirut.",                               "new": "Ali has a dog called Biscuit."},
+    {"id": "u_drink_job",   "old": "Ali drinks black coffee with no sugar, and sometimes drinks a caramel latte with skim milk and sugar-free syrup.", "new": "Ali works as a software engineer at a startup."},
+    {"id": "u_drink_name",  "old": "Ali drinks black coffee with no sugar, and sometimes drinks a caramel latte with skim milk and sugar-free syrup.", "new": "Ali's name is Ali and he lives in Beirut."},
+    {"id": "u_drink_robot", "old": "Ali drinks black coffee with no sugar, and sometimes drinks a caramel latte with skim milk and sugar-free syrup.", "new": "Ali is building a robot using the OpenAI API integrated into a Raspberry Pi."},
+    {"id": "u_sister_run",  "old": "Ali's sister Maya is a doctor in Cyprus.",           "new": "Ali runs on Tuesday mornings."},
+    {"id": "u_read_car",    "old": "Ali reads for half an hour before bed.",             "new": "Ali drives a red Corolla."},
+    {"id": "u_birth_music", "old": "Ali's birthday is the ninth of November.",           "new": "Ali cannot stand loud music."},
+    {"id": "u_manager_pet", "old": "Ali's manager is Sam.",                              "new": "Ali has a dog called Biscuit."},
+    {"id": "u_flight_std",  "old": "Ali is flying to Cyprus in September.",              "new": "Ali's team standup is at nine every weekday."},
+    {"id": "u_diet_laptop", "old": "Ali is vegetarian.",                                 "new": "Ali uses a Windows laptop for work."},
+    {"id": "u_friend_gym",  "old": "Ali's oldest friend Karim lives in Berlin.",         "new": "Ali goes to the gym three times a week."},
+    {"id": "u_study_phone", "old": "Ali is learning AI now.",                            "new": "Ali's phone number ends in 4471."},
+    {"id": "u_groc_allergy","old": "Ali does the grocery shop on Saturday.",             "new": "Ali is allergic to cats."},
+    {"id": "u_window_move", "old": "Ali always picks the window seat.",                  "new": "Ali moved into this flat two years ago."},
+    {"id": "u_spicy_marath","old": "Ali loves spicy food.",                              "new": "Ali is running the marathon next spring."},
+    {"id": "u_guitar_city", "old": "Ali started guitar lessons in June.",                "new": "Ali lives in Beirut."}
+  ]
+}

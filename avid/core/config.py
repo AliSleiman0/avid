@@ -343,8 +343,23 @@ class MemoryConfig(_Section):
     weights: WeightsConfig = WeightsConfig()
     # §7.8 supersession-on-write (#122): a stored fact whose embedding cosine ≥ this against an existing
     # live fact becomes a candidate the text model judges; at most this many candidates are considered.
-    supersession_threshold: float = 0.85
+    # Measured on the Pi against `assets/eval/supersession.json` (42 pairs, real MiniLM): the
+    # contradiction and unrelated classes separate at (0.5807, 0.6217], so 0.60 admits 16/16
+    # contradictions and 0/16 unrelated. It was 0.85, which admitted **4 of 16** — a hard gate in
+    # front of the judge, so §7.8's judge was never called at all (#260). Recall-first on purpose:
+    # this filter is cheap and the TextModel behind it is the precise one. SDS §7.8 has the table.
+    # ⚠️ Re-run tools/eval_supersession.py whenever `embedder` changes — the band is 0.041 wide.
+    supersession_threshold: float = 0.60
     supersession_k: int = 5
+    # §7.10 forget (#257): the cosine a fact must reach before `forget` may DELETE it, and the most
+    # it will consider. A fact below the floor is still deletable when FTS5 matched the query text
+    # directly — the proper-noun branch, which vectors are weak on (§7.7). `forget` had neither bar
+    # and deleted every id the top-k returned; one call destroyed five of six facts at the M7 gate.
+    # **Stricter than supersession above, on purpose**: a doubtful supersession costs one model
+    # call, a doubtful deletion is permanent. 0.65 also clears the closest genuinely-related pair in
+    # the real gate store (0.6017), which 0.60 would not.
+    forget_relevance_floor: float = 0.65
+    forget_k: int = 5
     # §6.7 pre-injection budget (#122): the top_facts block is cached instruction prefix, so it is capped
     # by BOTH a fact count (~10–15) and a token estimate (~600) — unbounded growth inflates every turn.
     top_facts_max: int = 15
