@@ -199,6 +199,16 @@ Verify a new model against the adapter's actual call before trusting it: inputs 
 `state (2,?,128)`, `sr` int64; outputs `output`, `stateN`. Sanity check — the cue bank's TTS reads
 0.999–1.000 speech probability while `boot_chime.wav` reads 0.340.
 
+**⚠️ Every ONNX session must cap its own thread pool.** ONNX Runtime defaults to one intra-op thread
+**per core** and spin-waits between inferences, which on four cores starves the audio loop — this is
+how the robot went deaf mid-M5 bench (Silero at 306% CPU), and `LocalMiniLmEmbedder` then shipped
+with the same default for a milestone because its real leg had never run here (#168). It is a P8
+violation by *CPU monopoly*, so `asyncio.to_thread` does not save you and code review cannot see it;
+only a run on this hardware can. Both adapters now set `intra_op_num_threads` / `inter_op = 1` /
+`ORT_SEQUENTIAL` / `allow_spinning = 0`, guarded by `tests/adapters/test_onnx_session_options.py`.
+**The thread count does not generalise** — Silero wants 1, MiniLM 2 (1 costs it 340 ms/embed).
+A third ONNX adapter should sweep the counts on the Pi, not copy either number.
+
 ---
 
 ## 6. Shell & SSH traps
