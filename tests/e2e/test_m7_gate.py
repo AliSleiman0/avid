@@ -484,3 +484,58 @@ def test_the_matcher_is_loose_on_phrasing_and_strict_on_content(
     matcher loose enough to score "tea" as the coffee fact would make every other check meaningless.
     """
     assert _load_memory_pi()._matches(text, needles) is expected
+
+
+def _config_file(tmp_path: Path, db_path: Path) -> Path:
+    """A real TOML pointing at the store — so the harness's own `main` does the config loading."""
+    text = Path("config/sim.toml").read_text(encoding="utf-8")
+    text = text.replace(
+        'db_path                = ".artifacts/sim.db"',
+        f'db_path = "{db_path.as_posix()}"',
+    )
+    out = tmp_path / "gate.toml"
+    out.write_text(text, encoding="utf-8")
+    return out
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("recall", {"AC-1", "AC-2", "AC-3"}), ("mutations", {"AC-4", "AC-5"})],
+)
+async def test_each_phase_grades_only_its_own_criteria(
+    tmp_path: Path, mode: str, expected: set[str]
+) -> None:
+    """The mode → criteria dispatch, driven through the harness's real `main` and argv.
+
+    Every other test here calls the criterion functions directly with an explicit phase, which
+    means none of them can see the dispatch. That gap is not hypothetical: collapsing the two
+    phases back into one — the exact defect this design exists to prevent — left all of them
+    green. This test is the one that goes red, so the phases are enforced by more than a comment.
+    """
+    db = await _store(tmp_path, facts=_ALL_FACTS)
+    config = _config_file(tmp_path, db)
+    out = tmp_path / f"{mode}.json"
+
+    memory_pi = _load_memory_pi()
+    await asyncio.to_thread(
+        memory_pi.main,
+        [
+            "--config",
+            str(config),
+            "--script",
+            str(_script_file(tmp_path)),
+            "--mode",
+            mode,
+            "--json",
+            str(out),
+        ],
+    )
+
+    graded = {c["ac"] for c in json.loads(out.read_text(encoding="utf-8"))}
+    assert graded == expected, f"--mode {mode} graded {graded}, not {expected}"
+
+
+def _script_file(tmp_path: Path) -> Path:
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps(_SCRIPT), encoding="utf-8")
+    return path
