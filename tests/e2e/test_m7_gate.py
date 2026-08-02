@@ -140,6 +140,20 @@ async def _store(
                 fact, embedding=pack_embedding(await embedder.embed(text))
             )
 
+        # The snapshot the recall phase would write, taken here because that is when it is taken
+        # in production: while the store is still intact, before the supersession and forget turns.
+        # Building it afterwards is exactly the mistake #258 is about.
+        snap = {
+            d["key"]: next(
+                (i for t, i in ids.items() if all(n in t.lower() for n in d["match"])),
+                None,
+            )
+            for d in _SCRIPT["facts"]
+        }
+        (db_path.parent / "snapshot.json").write_text(
+            json.dumps({"snapshot": snap}), encoding="utf-8"
+        )
+
         if supersede is not None:
             old_needle, new_text = supersede
             old_id = next(i for t, i in ids.items() if old_needle in t.lower())
@@ -199,7 +213,11 @@ def _config(db_path: Path) -> Config:
 
 
 async def _run(
-    db_path: Path, script: dict[str, Any] | None = None, *, phase: str = "recall"
+    db_path: Path,
+    script: dict[str, Any] | None = None,
+    *,
+    phase: str = "recall",
+    snapshot_before: dict[str, int | None] | None = "auto",  # type: ignore[assignment]
 ) -> list[Any]:
     """Drive one phase of the harness and return its criteria.
 
@@ -225,13 +243,24 @@ async def _run(
         )
         await retriever.rebuild()
         spec = script if script is not None else _SCRIPT
+        if snapshot_before == "auto":
+            # What _store recorded before it mutated anything — the production ordering. Tests
+            # about a missing precondition pass None explicitly instead.
+            snap_file = db_path.parent / "snapshot.json"
+            snapshot_before = (
+                json.loads(snap_file.read_text(encoding="utf-8"))["snapshot"]
+                if snap_file.is_file()
+                else None
+            )
         if phase == "recall":
             criteria = list(memory_pi._inventory(spec, facts, db_path))
             criteria += await memory_pi._recall(spec, facts, retriever)
             criteria += await memory_pi._semantic(spec, facts, retriever)
         else:
             criteria = list(await memory_pi._supersede(spec, facts, retriever, db_path))
-            criteria += await memory_pi._forget(spec, repo, retriever, db_path)
+            criteria += await memory_pi._forget(
+                spec, repo, retriever, db_path, snapshot_before
+            )
         return criteria
     finally:
         await repo.aclose()
@@ -239,7 +268,7 @@ async def _run(
 
 
 def _failed(criteria: list[Any]) -> list[str]:
-    return [f"{c.ac} {c.name}" for c in criteria if c.passed is False]
+    return [f"{c.ac} {c.name}" for c in criteria if c.verdict == "fail"]
 
 
 def _by_ac(criteria: list[Any], ac: str) -> list[Any]:
@@ -285,7 +314,7 @@ async def test_recall_scored_on_a_mutated_store_undercounts_which_is_why_phases_
     criteria = await _run(db, phase="recall")
 
     recall = _by_ac(criteria, "AC-2")[0]
-    assert recall.passed is False
+    assert recall.verdict == "fail"
     assert "2/4" in recall.name, "the two mutated facts read as recall misses"
 
     memory_pi = _load_memory_pi()
@@ -311,13 +340,13 @@ async def test_a_missing_fact_fails_recall_against_the_stated_denominator(
     criteria = await _run(db, phase="recall")
 
     recall = _by_ac(criteria, "AC-2")[0]
-    assert recall.passed is False
+    assert recall.verdict == "fail"
     assert "3/4" in recall.name and "75%" in recall.name
     assert any("run" in row for row in recall.rows)
 
     # ...and the inventory line reports the same gap without grading it twice.
     inventory = _by_ac(criteria, "AC-1")[0]
-    assert inventory.passed is None
+    assert inventory.verdict == "recorded"
     assert "3/4" in inventory.name
 
 
@@ -333,7 +362,7 @@ async def test_an_announced_write_fails_the_silence_criterion(tmp_path: Path) ->
     )
     criteria = await _run(db, phase="recall")
     silence = next(c for c in _by_ac(criteria, "AC-1") if "silent" in c.name)
-    assert silence.passed is False
+    assert silence.verdict == "fail"
     assert "i'll remember" in silence.detail
 
 
@@ -351,7 +380,7 @@ async def test_an_empty_transcript_cannot_pass_the_silence_criterion(
     )
     criteria = await _run(db, phase="recall")
     assert any(
-        c.passed is False and "transcript available" in c.name
+        c.verdict == "fail" and "transcript available" in c.name
         for c in _by_ac(criteria, "AC-1")
     )
 
@@ -371,7 +400,7 @@ async def test_a_supersession_that_never_marked_the_old_row_fails(
     )
     criteria = await _run(db, phase="mutations")
     pointer = next(c for c in _by_ac(criteria, "AC-4") if "pointer" in c.name)
-    assert pointer.passed is False
+    assert pointer.verdict == "fail"
 
 
 async def test_a_forget_that_leaves_the_fts_index_behind_fails(tmp_path: Path) -> None:
@@ -393,8 +422,8 @@ async def test_a_forget_that_leaves_the_fts_index_behind_fails(tmp_path: Path) -
     criteria = await _run(db, phase="mutations")
     gone = next(c for c in _by_ac(criteria, "AC-5") if "gone from" in c.name)
     orphan = next(c for c in _by_ac(criteria, "AC-5") if "index entry" in c.name)
-    assert gone.passed is True, "the row itself really was deleted"
-    assert orphan.passed is False, (
+    assert gone.verdict == "pass", "the row itself really was deleted"
+    assert orphan.verdict == "fail", (
         "the deleted fact is still searchable — a hard delete that leaves the index behind is not "
         "a hard delete, and this is the check that has to catch it"
     )
@@ -405,7 +434,7 @@ async def test_a_row_that_was_never_deleted_fails_forget(tmp_path: Path) -> None
     db = await _store(tmp_path, facts=_ALL_FACTS, forget=None)
     criteria = await _run(db, phase="mutations")
     gone = next(c for c in _by_ac(criteria, "AC-5") if "gone from" in c.name)
-    assert gone.passed is False
+    assert gone.verdict == "fail"
     assert "STILL PRESENT" in gone.detail
 
 
@@ -422,8 +451,8 @@ async def test_every_criterion_reports_even_when_an_earlier_one_fails(
     criteria = await _run(db, phase="recall")
 
     assert {c.ac for c in criteria} == {"AC-1", "AC-2", "AC-3"}
-    assert _by_ac(criteria, "AC-2")[0].passed is False
-    assert all(c.passed is True for c in _by_ac(criteria, "AC-3")), (
+    assert _by_ac(criteria, "AC-2")[0].verdict == "fail"
+    assert all(c.verdict == "pass" for c in _by_ac(criteria, "AC-3")), (
         "AC-3 passed and must still say so — M5 shipped a reporter that returned on its first "
         "failure and buried a criterion that had passed"
     )
@@ -531,7 +560,7 @@ async def test_each_phase_grades_only_its_own_criteria(
         ],
     )
 
-    graded = {c["ac"] for c in json.loads(out.read_text(encoding="utf-8"))}
+    graded = {c["ac"] for c in json.loads(out.read_text(encoding="utf-8"))["criteria"]}
     assert graded == expected, f"--mode {mode} graded {graded}, not {expected}"
 
 
@@ -539,3 +568,96 @@ def _script_file(tmp_path: Path) -> Path:
     path = tmp_path / "script.json"
     path.write_text(json.dumps(_SCRIPT), encoding="utf-8")
     return path
+
+
+# --- #258: AC-5 cannot report a vacuous PASS ---------------------------------------------------
+
+
+async def test_a_fact_that_was_never_stored_is_inconclusive_not_passed(
+    tmp_path: Path,
+) -> None:
+    """This issue, as a test (#258 AC-4).
+
+    On the first M7 gate attempt the declared `dog` fact was never spoken, so it was never stored —
+    and the harness reported **all three AC-5 criteria as PASS**, because "the row is gone" is
+    trivially true of a row that never existed. That is the *gate that can pass on silence*
+    failure, in the harness written to prevent it.
+
+    It is not a failure either: the robot was never asked to forget anything. It is a precondition
+    the run did not meet, and the only honest verdict is INCONCLUSIVE.
+    """
+    # Everything except the forget target, so the store is healthy and only the precondition is
+    # absent — the neuter must be the one thing under test.
+    without_dog = tuple(t for t in _ALL_FACTS if "Biscuit" not in t)
+    db = await _store(tmp_path, facts=without_dog, supersede=None, forget=None)
+
+    criteria = await _run(db, phase="mutations")
+    ac5 = _by_ac(criteria, "AC-5")
+
+    assert ac5, "AC-5 must still report, not vanish"
+    assert not any(c.verdict == "pass" for c in ac5), (
+        "a fact that was never stored cannot yield a PASS for having been deleted — this is the "
+        "vacuous pass #258 was filed for"
+    )
+    assert any(c.verdict == "inconclusive" for c in ac5)
+    assert "never stored" in " ".join(c.detail for c in ac5)
+
+
+async def test_an_inconclusive_run_does_not_exit_as_success(tmp_path: Path) -> None:
+    """Inconclusive must not read as a pass to a script, to CI, or to a tired human at midnight.
+
+    The verdict is only worth having if the exit code carries it: a run that proved nothing and
+    returned 0 is indistinguishable from a run that proved everything.
+    """
+    # Supersession DID happen (so AC-4 passes) and the forget target was simply never stored, so
+    # the only thing wrong with this run is the missing precondition.
+    without_dog = tuple(t for t in _ALL_FACTS if "Biscuit" not in t)
+    db = await _store(tmp_path, facts=without_dog, forget=None)
+
+    criteria = await _run(db, phase="mutations")
+    assert _failed(criteria) == [], "nothing here should be a FAILURE"
+    assert _load_memory_pi()._report(criteria) == 1, (
+        "no failures, but the run still must not exit 0 — it did not establish what it claims"
+    )
+
+
+async def test_without_a_snapshot_ac5_is_inconclusive_rather_than_guessing(
+    tmp_path: Path,
+) -> None:
+    """The mutation phase refuses to grade AC-5 on a store alone (#258 AC-1/AC-2).
+
+    By the time it runs, a forgotten fact and a fact that was never stored are both simply absent.
+    Without the recall phase's snapshot there is no evidence either way, and the harness says so
+    instead of picking the flattering reading.
+    """
+    db = await _store(tmp_path, facts=_ALL_FACTS)  # a genuinely correct forget happened
+    criteria = await _run(db, phase="mutations", snapshot_before=None)
+
+    ac5 = _by_ac(criteria, "AC-5")
+    assert [c.verdict for c in ac5] == ["inconclusive"]
+    assert "no recall-phase snapshot" in ac5[0].detail
+
+
+async def test_ac5_matches_the_row_by_id_not_by_text(tmp_path: Path) -> None:
+    """#258 AC-5: identity, not wording.
+
+    A fact is deleted and something similar is written afterwards — a plausible sequence, since the
+    user may simply say it again. Matching on text would find the *new* row and report the old one
+    as still present. The snapshot records ids, so the check follows the row that actually went.
+    """
+    db = await _store(
+        tmp_path, facts=_ALL_FACTS
+    )  # the Biscuit row is deleted by _store
+    await asyncio.to_thread(
+        _sql,
+        db,
+        "INSERT INTO facts(text, kind, importance, created_at, last_accessed_at) "
+        f"VALUES ('The dog is called Biscuit', 'other', 5, {int(time.time())}, {int(time.time())})",
+    )
+
+    criteria = await _run(db, phase="mutations")
+    gone = next(c for c in _by_ac(criteria, "AC-5") if "gone from" in c.name)
+    assert gone.verdict == "pass", (
+        "the forgotten ROW is gone; a later row with the same wording is a different fact and "
+        "must not be mistaken for it"
+    )
