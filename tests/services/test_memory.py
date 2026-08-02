@@ -135,8 +135,8 @@ async def _make_rig(
     embedder: object | None = None,
     text_model: object | None = None,
     boom_on: type[Event] | None = None,
-    supersession_threshold: float = 0.85,
-    forget_relevance_floor: float = 0.60,
+    supersession_threshold: float = 0.60,
+    forget_relevance_floor: float = 0.65,
     forget_k: int = 5,
 ) -> AsyncIterator[Rig]:
     clock = FakeClock()
