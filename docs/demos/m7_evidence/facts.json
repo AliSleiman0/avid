@@ -1,0 +1,79 @@
+{
+  "_readme": [
+    "The M7 gate's declared corpus (#129 AC-1/AC-2). Written down BEFORE the run, because a",
+    "criterion whose content is improvised at the mic cannot be scored — and because AC-2's",
+    "denominator is 'facts stated', which has to be a fixed 20 to be a denominator at all.",
+    "",
+    "'say' is what the operator says aloud, in a natural conversation, NOT read as a list.",
+    "'match' is every lowercase substring that must appear in a stored row for it to count as",
+    "this fact — deliberately loose on phrasing (the model stores the user's own words, §7.6)",
+    "and strict on content. 'probe' is the question asked after the restart; recall is judged",
+    "on whether THIS fact comes back, not on how the answer sounds.",
+    "",
+    "ORDER MATTERS: recall (AC-2) is scored before supersede (AC-4) and forget (AC-5) run, or",
+    "the two of them silently lower the AC-2 score by mutating the store it grades."
+  ],
+
+  "facts": [
+    {"key": "name",      "kind": "identity",     "say": "My name is Ali",                                        "match": ["ali"],                 "probe": "what is my name?"},
+    {"key": "city",      "kind": "identity",     "say": "I live in Beirut",                                      "match": ["beirut"],              "probe": "where do I live?"},
+    {"key": "job",       "kind": "identity",     "say": "I work as a software engineer",                         "match": ["engineer"],            "probe": "what do I do for work?"},
+    {"key": "birthday",  "kind": "identity",     "say": "My birthday is the ninth of November",                  "match": ["november"],            "probe": "when is my birthday?"},
+
+    {"key": "coffee",    "kind": "preference",   "say": "I drink black coffee, no sugar",                        "match": ["coffee"],              "probe": "what do I drink in the morning?"},
+    {"key": "music",     "kind": "preference",   "say": "I can't stand loud music",                              "match": ["loud", "music"],       "probe": "how do I feel about loud music?"},
+    {"key": "spicy",     "kind": "preference",   "say": "I love spicy food",                                     "match": ["spicy"],               "probe": "what kind of food do I like?"},
+    {"key": "window",    "kind": "preference",   "say": "I always pick the window seat",                         "match": ["window"],              "probe": "which seat do I prefer on a plane?"},
+
+    {"key": "run",       "kind": "routine",      "say": "I run on Tuesday mornings",                             "match": ["run", "tuesday"],      "probe": "when do I go running?"},
+    {"key": "read",      "kind": "routine",      "say": "I read for half an hour before bed",                    "match": ["read"],                "probe": "what do I do before bed?"},
+    {"key": "groceries", "kind": "routine",      "say": "I do the grocery shop on Saturday",                     "match": ["grocer", "saturday"],  "probe": "when do I buy groceries?"},
+    {"key": "standup",   "kind": "routine",      "say": "My team standup is at nine every weekday",              "match": ["standup"],             "probe": "when is my standup?"},
+
+    {"key": "sister",    "kind": "relationship", "say": "My sister Maya is a doctor in Cyprus",                   "match": ["maya"],                "probe": "what did I say about my sister?"},
+    {"key": "manager",   "kind": "relationship", "say": "My manager is called Sam",                              "match": ["sam"],                 "probe": "who is my manager?"},
+    {"key": "dog",       "kind": "relationship", "say": "The neighbour's dog is called Biscuit",                 "match": ["biscuit"],             "probe": "what is the neighbour's dog called?"},
+    {"key": "friend",    "kind": "relationship", "say": "My oldest friend Karim lives in Berlin now",            "match": ["karim"],               "probe": "where does Karim live?"},
+
+    {"key": "flight",    "kind": "event",        "say": "I'm flying to Cyprus in September",                     "match": ["cyprus"],              "probe": "where am I travelling in September?"},
+    {"key": "guitar",    "kind": "event",        "say": "I started guitar lessons in June",                      "match": ["guitar"],              "probe": "what did I start learning?"},
+    {"key": "move",      "kind": "event",        "say": "We moved into this flat two years ago",                 "match": ["flat", "moved"],       "probe": "when did we move in?"},
+    {"key": "marathon",  "kind": "event",        "say": "I'm running the marathon next spring",                  "match": ["marathon"],            "probe": "what am I training for?"}
+  ],
+
+  "semantic_probes": [
+    {
+      "_why": "AC-3: the pre-injection block cannot cover this — it has to trigger the recall tool.",
+      "query": "what did I say about my sister?",
+      "expect": "sister",
+      "proper_noun": false
+    },
+    {
+      "_why": "AC-3's proper-noun case — the branch §7.7 built FTS5 for, where a vector alone fails.",
+      "query": "tell me about Biscuit",
+      "expect": "dog",
+      "proper_noun": true
+    },
+    {
+      "_why": "A second proper noun, on a person rather than a pet.",
+      "query": "what do I know about Karim?",
+      "expect": "friend",
+      "proper_noun": true
+    }
+  ],
+
+  "supersession": {
+    "_why": "AC-4: the new fact wins the present, the old one stays queryable as history (§7.8).",
+    "say": "I've switched to tea, I don't drink coffee any more",
+    "supersedes": "coffee",
+    "match": ["tea"],
+    "probe_present": "what do I drink in the morning?",
+    "probe_history": "what did I used to drink?"
+  },
+
+  "forget": {
+    "_why": "AC-5: a rights operation, verified at the database — row, FTS shadow, embedding, all gone.",
+    "say": "Forget what I told you about the neighbour's dog",
+    "target": "dog"
+  }
+}
