@@ -629,6 +629,8 @@ def _build_memory(
         text_model=_build_text_model(config),
         supersession_threshold=config.memory.supersession_threshold,
         supersession_k=config.memory.supersession_k,
+        forget_relevance_floor=config.memory.forget_relevance_floor,
+        forget_k=config.memory.forget_k,
         top_facts_max=config.memory.top_facts_max,
         top_facts_token_budget=config.memory.top_facts_token_budget,
     )

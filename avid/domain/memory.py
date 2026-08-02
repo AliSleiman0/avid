@@ -188,6 +188,50 @@ class ScoredCandidate:
     score: float
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RetrievalMatch:
+    """A retrieval hit with the **evidence** for it, rather than only its rank (#257).
+
+    Distinct from :class:`ScoredCandidate` for one reason: ``score`` there is the §7.7 blend
+    *after* :func:`_min_max` normalises each component across the candidate set, so it is a
+    ranking, not a measurement — a lone candidate always scores 1.0. A caller that needs to
+    decide *whether a match is good enough at all* cannot use it, and `forget` is exactly such a
+    caller: it deletes irreversibly (§7.10), so it must see the raw evidence.
+
+    ``relevance`` is therefore the **unnormalised** cosine straight from the index, and
+    ``keyword_hit`` records whether FTS5 matched the query text directly. Both are needed because
+    neither alone is sufficient: vectors are weak on proper nouns (the reason §7.7 has an FTS5
+    branch at all), and a keyword hit says nothing about semantic closeness.
+    """
+
+    fact_id: int
+    relevance: (
+        float  # raw cosine, NOT min-max normalised — 0.0 when the fact has no embedding
+    )
+    keyword_hit: bool  # FTS5 matched the query text against this fact
+
+
+def deletable_ids(
+    matches: Sequence[RetrievalMatch], *, floor: float
+) -> tuple[int, ...]:
+    """The ids `forget` may delete: cosine at or above ``floor``, **or** a direct FTS5 hit (#257).
+
+    Pure policy, unit-tested, deliberately not in the adapter: *what is close enough to destroy*
+    is an application decision, and the index's job is to report facts rather than to decide them.
+
+    The rule is a disjunction because the two signals fail in opposite places. Without the floor,
+    `forget` deletes whatever the top-k happened to contain — on the M7 gate one call destroyed
+    five of six facts, matching at cosines a human would never call a match. Without the keyword
+    branch, forgetting by name breaks: MiniLM scores *"Ali prefers tea"* against a coffee fact at
+    0.57, and a proper noun like "Biscuit" embeds to something generic, which is precisely why
+    §7.7 unions FTS5 into retrieval in the first place.
+
+    Order is preserved from ``matches`` (the retriever hands them over best-first), so a caller
+    that also caps the count deletes the strongest matches rather than an arbitrary subset.
+    """
+    return tuple(m.fact_id for m in matches if m.relevance >= floor or m.keyword_hit)
+
+
 def recency_decay(age_days: float, half_life_days: float) -> float:
     """Exponential recency: ``0.5 ** (age_days / half_life_days)`` (§7.7, AC-4).
 

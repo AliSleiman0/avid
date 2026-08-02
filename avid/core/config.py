@@ -345,6 +345,14 @@ class MemoryConfig(_Section):
     # live fact becomes a candidate the text model judges; at most this many candidates are considered.
     supersession_threshold: float = 0.85
     supersession_k: int = 5
+    # §7.10 forget (#257): the cosine a fact must reach before `forget` may DELETE it, and the most
+    # it will consider. A fact below the floor is still deletable when FTS5 matched the query text
+    # directly — the proper-noun branch, which vectors are weak on (§7.7). Both bars exist because
+    # `forget` had neither: it deleted every id the top-k returned, and one call destroyed five of
+    # six facts on the M7 gate. The floor is calibrated against `assets/eval/supersession.json`,
+    # never guessed — see SDS §7.8 for the measured distribution behind the value.
+    forget_relevance_floor: float = 0.60
+    forget_k: int = 5
     # §6.7 pre-injection budget (#122): the top_facts block is cached instruction prefix, so it is capped
     # by BOTH a fact count (~10–15) and a token estimate (~600) — unbounded growth inflates every turn.
     top_facts_max: int = 15
