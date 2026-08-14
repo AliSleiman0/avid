@@ -13,11 +13,21 @@ handed across a port. All types are frozen/slotted/kw-only, matching the
 Minimal by design. Fields are the smallest set that types the ports and feeds
 the AVID-12/13 fakes; a fake or real adapter may carry richer detail behind the
 same port without changing this vocabulary.
+
+One member of that vocabulary — :class:`~avid.domain.vision.BBox` — is *defined*
+in ``avid/domain/vision.py`` and re-exported below rather than declared here.
+``vision.face_detected`` is a domain event that must name it to type its payload,
+and the ``layers`` contract puts ``core`` above ``domain``, so declaring it here
+would make that event the first ``domain -> core`` import in the project (P1).
+``avid.core.hal.BBox`` stays the spelling every port and adapter uses; only the
+declaration moved. Recorded in SDS §3.6.5 (ADR-013).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from avid.domain.vision import BBox
 
 # S16_LE, 2 bytes per sample per channel — the one PCM format every audio port
 # exchanges (see adapters/microphone.py, adapters/speaker.py). ``AudioChunk``
@@ -129,3 +139,18 @@ class Axis:
     channel: int
     min_deg: float
     max_deg: float
+
+
+# Explicit because ``BBox`` is a re-export (see the module docstring): without it,
+# ruff reads the import as unused and the vocabulary loses a member to a lint fix.
+__all__ = [
+    "SAMPLE_WIDTH_BYTES",
+    "AudioChunk",
+    "Axis",
+    "BBox",
+    "CameraCaps",
+    "DisplayFrame",
+    "Frame",
+    "frames_duration_ms",
+    "pcm_duration_ms",
+]
