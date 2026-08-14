@@ -29,6 +29,7 @@ from avid.adapters import (
     FakeDisplay,
     FakeEmbedder,
     FakeEpisodeStore,
+    FakeFaceDetector,
     FakeFactRepository,
     FakeMicrophone,
     FakeServiceNotifier,
@@ -62,6 +63,7 @@ from avid.core.ports import (
     Embedder,
     EpisodeStore,
     EventBus,
+    FaceDetector,
     FactRepository,
     Microphone,
     RealtimeClient,
@@ -301,6 +303,34 @@ def _build_vad(config: Config) -> VoiceActivityDetector:
             raise NotImplementedError(
                 f"vad adapter {other!r} is not available — only 'silero' and "
                 f"'fake' exist (AVID-77)"
+            )
+
+
+def _build_face_detector(config: Config) -> FaceDetector:
+    """Select the ``FaceDetector`` named by ``[adapters] face_detector`` (#220, ADR-013).
+
+    ``fake`` is the laptop/sim default — it reads ``FakeCamera``'s scripted presence flag out
+    of the frame bytes, so the pair compose into a complete simulator with no model and no
+    camera; ``yunet`` is the real YuNet ONNX detector (its ``onnxruntime``/``numpy`` imports
+    live lazily inside that adapter, the Pi-only ``pi`` extra, ADR-008 — so ``main.py`` still
+    imports off-Pi). Any other value fails loudly rather than silently doing nothing, which
+    matters more here than elsewhere: a detector that quietly reports nothing is
+    indistinguishable from an empty room.
+    """
+    match config.adapters.face_detector:
+        case "fake":
+            # No script: every frame reports the default confidence, so presence is driven
+            # entirely by FakeCamera.person_present. #223 drives a script.
+            return FakeFaceDetector()
+        case "yunet":  # pragma: no cover - needs the Pi (M8 gate #226)
+            raise NotImplementedError(
+                "the real YuNet face detector lands with #221 — until then set "
+                "[adapters] face_detector = 'fake' (ADR-013)"
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"face_detector adapter {other!r} is not available — only 'yunet' "
+                f"and 'fake' exist (#220)"
             )
 
 
@@ -692,6 +722,7 @@ async def _run(config: Config) -> int:
     microphone = _build_microphone(config)
     speaker = _build_speaker(config)
     vad = _build_vad(config)
+    face_detector = _build_face_detector(config)
     embedder = _build_embedder(config)
     fact_store = _build_fact_repository(config, clock=clock)
     episode_store = _build_episode_store(config, clock=clock)
@@ -716,6 +747,7 @@ async def _run(config: Config) -> int:
         "servo": True,
         "microphone": True,
         "speaker": True,
+        "face_detector": True,
         "embedder": True,
         "fact_store": True,
         "episode_store": True,
@@ -745,12 +777,14 @@ async def _run(config: Config) -> int:
         cues=cues,
         config=config,
     )
-    # ``camera`` and ``servo`` are still constructed only to realize the switch and appear in the health
-    # map: driving the camera is the vision service's job (M8) and moving the servo is MotionService's
-    # (M9) — both later issues. The store, embedder, retriever and text model are now **owned** by
-    # ``MemoryService`` (#122, wired above), so they are no longer held here. ``display`` (AVID-73) and
-    # ``microphone``/``speaker``/``vad`` (AVID-89) left this list earlier; their services own them.
+    # ``camera``, ``face_detector`` and ``servo`` are still constructed only to realize the switch and
+    # appear in the health map: driving the camera and the detector is ``PresenceService``'s job (#223,
+    # the next issue in M8) and moving the servo is MotionService's (M9). The store, embedder, retriever
+    # and text model are now **owned** by ``MemoryService`` (#122, wired above), so they are no longer
+    # held here. ``display`` (AVID-73) and ``microphone``/``speaker``/``vad`` (AVID-89) left this list
+    # earlier; their services own them.
     _ = camera
+    _ = face_detector
     _ = servo
     return await lifecycle.run(
         bus=bus,

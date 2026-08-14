@@ -7,9 +7,10 @@ these structurally; ``main.py`` alone wires which one (P2, P3).
 
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
 :class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
-:class:`Speaker`, :class:`VoiceActivityDetector`, :class:`RealtimeClient`,
-:class:`TurnSink`, :class:`FactRepository`, :class:`Embedder`, :class:`Retriever`,
-:class:`TextModel`, :class:`MemoryTools`, :class:`EpisodeStore`.
+:class:`Speaker`, :class:`VoiceActivityDetector`, :class:`FaceDetector`,
+:class:`RealtimeClient`, :class:`TurnSink`, :class:`FactRepository`,
+:class:`Embedder`, :class:`Retriever`, :class:`TextModel`, :class:`MemoryTools`,
+:class:`EpisodeStore`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -38,7 +39,14 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from avid.core.event_bus import E, Subscription
-from avid.core.hal import AudioChunk, Axis, CameraCaps, DisplayFrame, Frame
+from avid.core.hal import (
+    AudioChunk,
+    Axis,
+    CameraCaps,
+    Detection,
+    DisplayFrame,
+    Frame,
+)
 from avid.core.realtime import RealtimeEvent
 from avid.domain import Event, Fact, RetrievalMatch
 
@@ -263,6 +271,50 @@ class VoiceActivityDetector(Protocol):
         called on every frame — so a real detector runs inference in-process rather than
         blocking the loop (the sub-ms Silero cost stays under the 50 ms slow-callback gate,
         P8), and the caller (AudioService) invokes it inline, not via an executor."""
+        ...
+
+
+@runtime_checkable
+class FaceDetector(Protocol):
+    """What is in **this one frame** — the person-detection port (SDS §3.6.5, ADR-013).
+
+    Named after the sibling it most resembles: :class:`VoiceActivityDetector` is also a
+    model behind a port, also frame-by-frame, also ONNX underneath. The same inversion
+    applies — the port is defined by what ``PresenceService`` needs, one frame in and this
+    frame's faces out, never by what a detection library offers. Landmarks, keypoints,
+    tracking ids and identity embeddings all stay on the adapter's side of the boundary,
+    which is what makes swapping YuNet for something else one adapter rather than a ripple
+    (P2), and what makes the fake honest to write (P6).
+
+    **The port never promises "is a person present."** It reports what it saw in one frame;
+    presence is a *decision over time*, and it belongs to the pure hysteresis filter in
+    :mod:`avid.domain.vision` (SDS §9.1.3). This is the single most important line in the
+    milestone, so it is stated rather than implied: a port that answered "present?" would put
+    the debouncing behind a device boundary, where it can be neither unit-tested nor replayed
+    against a recorded hour — and M8's headline criterion is *no flapping*, which is exactly
+    the property that has to be replayable.
+
+    It also takes no view on **identity**. This is presence, not recognition (ADR-013, §13):
+    telling *who* someone is has materially different privacy consequences and is a different
+    problem, and nothing on this port could express it.
+    """
+
+    async def detect(self, frame: Frame) -> Sequence[Detection]:
+        """Every face in *frame*, best-first. Empty when there are none — not an error.
+
+        **Asynchronous**, unlike :meth:`VoiceActivityDetector.is_speech`, and the difference
+        is a budget rather than a style: Silero is sub-millisecond so it runs inline, while
+        face inference is tens of milliseconds and would breach the 50 ms slow-callback gate
+        (P8). So the adapter owns its own offload behind this method, exactly as
+        :meth:`Camera.capture` and :meth:`Servo.move_to` do — the caller awaits and is
+        promised only that the loop is never blocked.
+
+        The frame's own ``format``/``width``/``height`` are **honoured, not assumed**: an
+        adapter that cannot read a frame's format must say so rather than return an empty
+        sequence, because a detector that silently detects nothing is indistinguishable from
+        an empty room and would leave every downstream test green while the robot never
+        notices anyone.
+        """
         ...
 
 
