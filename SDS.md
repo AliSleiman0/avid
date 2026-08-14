@@ -64,6 +64,7 @@
  3.6.2 Component interaction diagram
  3.6.3 Dependency graph and enforcement
  3.6.4 Face rendering — ADR-012
+ 3.6.5 Person detection — ADR-013
 3.7 Runtime views (sequence diagrams)
  3.7.1 Cold boot to idle
  3.7.2 Wake → listen → respond turn
@@ -256,7 +257,7 @@ Out of scope (for v1): companion mobile application, multi-robot coordination, c
 - OpenAI Realtime API documentation
 - Raspberry Pi 5 datasheet and power requirements
 - PCA9685 datasheet (NXP)
-- MediaPipe Face Detection model card
+- YuNet face-detection model card (OpenCV Zoo, `face_detection_yunet_2023mar`) — ADR-013
 - *Clean Architecture*, Robert C. Martin — for the dependency rule
 - *Designing Data-Intensive Applications*, Kleppmann — for the memory/consistency reasoning in §7.8
 
@@ -446,7 +447,10 @@ Full text in Appendix A. Summary:
 | ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Accepted** — see §6.3, §6.10 |
 | ADR-008 | Python 3.13 on PC, system Python 3.11 + `--system-site-packages` on Pi | **Proposed** — see §3.11 |
 | ADR-009 | Pan+tilt (2 servo) target, 1-servo fallback; gesture engine is axis-agnostic | **Proposed** — needs your call |
+| ADR-010 | WebSocket transport for the Realtime session, not WebRTC | Accepted — see §6.2.1 |
+| ADR-011 | Semantic memory on local `all-MiniLM-L6-v2` via ONNX Runtime, 384-d | Accepted — see §7.4 |
 | ADR-012 | Faces compose to RGB888 bytes in the stdlib; no drawing-library dependency | Accepted — see §3.6.4 |
+| ADR-013 | Person detection is YuNet face detection on the ONNX Runtime we already ship | Accepted — see §3.6.5 |
 
 ## 3.4 Logical view — the layers
 
@@ -623,6 +627,39 @@ Consequences, accepted:
 
 *Rejected: Pygame.* Three concrete costs, none of them paid for a feature we need. It would run **headless** (`SDL_VIDEODRIVER=dummy`) as a pure off-screen buffer against today's framebuffer target — the whole windowing and event layer, inert. It has **no honest home in the dependency groups**: not the `pi` extra, since the future simulator wants faces off-Pi too; not the main dependencies, since it is one backend's implementation detail. And it needs a **mypy override** to join the unstubbed-import block. A `zlib`-sized amount of stdlib code avoids all three.
 
+### 3.6.5 Person detection — ADR-013
+
+**Person detection is face detection, running on ONNX Runtime — the inference runtime this project already ships.** The model is pinned, the way `[ai] model` is pinned to a dated snapshot:
+
+| | |
+|---|---|
+| Model | **YuNet**, `face_detection_yunet_2023mar.onnx` (OpenCV Zoo, libfacedetection) |
+| Size | ~337 KB — small enough to be an afterthought, large enough that it is **not committed** (§14.4's rule; `tools/fetch_face_model.py` provisions it to `/var/lib/robot/models/`) |
+| Input | `[1, 3, H, W]` NCHW float32, 0–255, **no mean subtraction and no scaling**, channel order BGR |
+| Output | 12 tensors — `cls_`/`obj_`/`bbox_`/`kps_` at strides 8, 16 and 32. We consume the first three and discard keypoints |
+| Expected cost | **≲40 ms per frame** at 640×480 single-threaded on a Cortex-A76 — an *expectation*, not a measurement. #221 replaces this line with the figure it measures on the rig |
+
+Against §2.7.1's budget — *"Vision must not exceed 1 core; run detection at ≤5 fps, not 30"* — a 5 fps loop has a 200 ms period, so even at double the expected cost the pipeline sits comfortably inside one core with capture on the same thread.
+
+**Why ONNX Runtime.** It adds **no new heavy dependency**: `onnxruntime` is already in the `pi` extra for `SileroVad` (§6.3) and `LocalMiniLmEmbedder` (§7.4, ADR-011). `tools/fetch_minilm.py` is an existing model-fetch pattern to mirror rather than invent — pinned revision, SHA-256 verified, atomic replace. And `SileroVad` already demonstrates the `SessionOptions` treatment the ≤1-core budget demands (§3.8.2), which matters more here than anywhere: the default is one *spin-waiting* thread per core, and this project has paid for that default twice.
+
+**640×480 is not an accident.** YuNet's strides are 8/16/32, so its input dimensions must be divisible by 32 — and the rig's negotiated capture geometry (`[camera] 640×480`, ov5647, contract-proven at M2) already is. **The adapter therefore performs no resize at all.** That removes a whole class of the failure mode this milestone fears most, where the detector silently detects nothing because a resample, a stride or a colour order was wrong and every downstream test still passes.
+
+**Rejected alternatives.** A rejection nobody wrote down gets re-proposed in month eight:
+
+| Option | Verdict |
+|---|---|
+| **MediaPipe Face Detection** | Rejected. Good out of the box, and it is what §1.5 used to reference — but it is a large new ARM dependency that duplicates an inference runtime we already ship, and it brings **its own threading** to tame against §2.7.1. Two thread pools to reason about instead of one, bought with a second model-distribution story. |
+| **OpenCV Haar cascade** | Rejected. Cheapest to wire and needs no model fetch, but it is unstable on non-frontal faces — and **instability is precisely what the gate forbids**. The hysteresis filter (§9.1.3) exists to absorb *reality*: occlusion, someone leaning out of frame. Spending it instead on a weak detector means the filter is compensating for us rather than for the room, and the windows would have to widen until the robot notices you slowly. |
+| **Motion / background subtraction** | Rejected. No ML, lightest possible, and wrong: it detects *movement*, not people. A curtain fires it and a still person does not — which is the exact population this robot faces, someone sitting at a desk reading. It also **cannot populate `vision.face_detected {count, largest_bbox}`**, which is normative in §9.1.3. |
+| **A full face *recognition* model** | Out of scope, and deliberately so — see below. |
+
+**This is presence, not identity.** The robot learns that *a person* is there, never *which* person. Face recognition is a §7.2 "Could" with materially different privacy consequences (§13), and the boundary is stated here so nothing later drifts across it by accident: no embeddings of faces are computed, none are stored, and the only thing that reaches the database is what the conversation put there. The committed artefacts of this milestone are bounding boxes and confidences — **never images** (§13, `assets/vision/README.md`).
+
+**What M8 delivers, and what it does not.** UC-04 (§2.5) reads *"user sits down; robot notices **and greets**."* Greeting means speaking first, which is `BehaviorService`, quiet hours and the interruption policy — **all of them M10** (§10), and §3.7.5 has no body yet for exactly that reason. M8 delivers the *notices* half, demonstrated by the `SLEEPING → IDLE` wake (§3.10.1). PMP §5.2's register line is amended to match, so this milestone is neither dragging a slice of M10 forward nor sealed against a criterion it knowingly does not meet.
+
+**A note on where `BBox` lives.** §3.9.1 lists it in the HAL vocabulary and `avid.core.hal.BBox` is the spelling every port, adapter and service uses — but the type is *defined* in `avid/domain/vision.py` and re-exported from `core/hal.py`. The reason is P1, mechanically: the layers contract puts `core` above `domain`, `vision.face_detected` is a domain event that must name `BBox` to type its payload, and defining it in `core` would make that event the first `domain → core` import in the project. Re-exporting costs nothing and keeps the dependency rule at zero exceptions — the same move `StateTransitioned` makes for a different reason (`domain/state.py`).
+
 ## 3.7 Runtime views
 
 ### 3.7.2 Wake → listen → respond (UC-01)
@@ -735,7 +772,7 @@ Blocking calls get a thread. Non-negotiable list:
 
 | Work | Why it blocks | Mechanism |
 |---|---|---|
-| `cv2` / MediaPipe inference | CPU-bound, releases GIL | `run_in_executor`, dedicated single-thread pool, ≤5 fps |
+| ONNX face-detection inference (`OnnxFaceDetector`, ADR-013) | CPU-bound, releases GIL | `run_in_executor`, dedicated single-thread pool, ≤5 fps |
 | Picamera2 capture | Blocking C call | Same pool as above |
 | Framebuffer write (`FramebufferDisplay`) | Blocking device write | `asyncio.to_thread` per `render`; XRGB8888 straight to `/dev/fbN` (AVID-55). *Composition is not on this list — `ExpressionService` builds frames in pure stdlib byte work (ADR-012, §3.6.4), so only the panel push offloads. The offload question is per-adapter: this panel is a DRM framebuffer with no `flip()` vsync to wait on, where an HDMI/SDL adapter would bring its own blocking present and earn its own row.* |
 | SQLite writes | Disk fsync on a slow SD card | `asyncio.to_thread`, serialized through one writer |
@@ -796,6 +833,13 @@ class Speaker(Protocol):
 
 class VoiceActivityDetector(Protocol):   # §6.3 / ADR-007 — the session gate
     def is_speech(self, frame: AudioChunk) -> bool: ...  # sync; MUST return <5 ms (§9.3)
+
+
+class FaceDetector(Protocol):            # §3.6.5 / ADR-013 — one frame in, detections out
+    async def detect(self, frame: Frame) -> Sequence[Detection]: ...
+    # async, not sync: inference is tens of ms, so the adapter offloads (cf. Embedder, not VAD).
+    # It answers "what did this ONE frame contain", never "is a person present" — presence is a
+    # decision over TIME and belongs to the pure hysteresis filter (§9.1.3, domain/vision.py).
 
 
 class RealtimeClient(Protocol):          # the vendor boundary (§6.2, R-10)
@@ -860,6 +904,8 @@ class TextModel(Protocol):               # the cheap off-turn-path text model fo
 `RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap). The tool *dispatch* is `ConversationService`'s (#125): it parses the call and runs it against the injected **`MemoryTools`** port — never the concrete `MemoryService` (P2/P5) — so the composition root injects the service and `ConvSvc` names only the port. The three tool *declarations* (`TOOL_SCHEMA`, §6.6) and the §7.6 capability instructions ship in `services/tools.py` and are seeded into the session's cached prefix by `main` (a `remember_fact` on a barge-in-approximate turn is declined — §6.2.4/§7.6). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
 
 The five **memory ports** are M7 (AVID-114). `FactRepository` (#117) is durable fact storage behind `SqliteFactRepo`; `Retriever` (#120) is the §7.7 read path + its §8.5 write-through numpy matrix behind `HybridRetriever`; `Embedder` (#118/#119, §9.3) is text→vector behind `LocalMiniLmEmbedder`; `TextModel` (#122) is the cheap off-turn-path supersession judge behind an OpenAI text adapter; `MemoryTools` (#125) is the tool surface `ConversationService` dispatches to. `MemoryService` is a *service*, so it names only these ports and the composition root injects the concretes (P2/P5) — the numpy matrix, the FTS5 shadow and the vendor HTTPS client all stay on the adapter side of the boundary. Every method is `async` (SQLite and model inference are blocking I/O offloaded off the loop, P8) and every signature is numpy-free (`bytes` BLOBs, `Sequence[float]` vectors, `int` ids), so `core`/`domain` never import numpy (ADR-012).
+
+**`FaceDetector` is M8 (#217, ADR-013), and it brings two types into the HAL vocabulary** beside `Frame`, `AudioChunk`, `DisplayFrame`, `CameraCaps` and `Axis`: **`BBox`** — a face's rectangle in **pixels of the frame that produced it**, top-left origin, `(x, y, w, h)` — and **`Detection {confidence: float, box: BBox}`**, one face seen once. Both are frozen/slotted/kw-only and stdlib-only like every other type in `core/hal.py`; no tensor, session handle or model detail crosses the port. The inversion is the usual one and it is worth naming here because it is easy to get backwards: the port is defined by **what `PresenceService` needs** — one frame in, this frame's faces out — never by what a detection library offers, which is why keypoints, landmarks, tracking ids and identity embeddings are all absent from a port sitting on top of a model that emits some of them. And it stops one step short on purpose: the port never answers *"is a person present."* That is a decision over time, it belongs to the pure hysteresis filter in `domain/vision.py` (§9.1.3), and a port that answered it would put the milestone's headline property behind a device boundary where it can be neither unit-tested nor replayed.
 
 Three details worth defending:
 
