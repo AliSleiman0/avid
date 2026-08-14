@@ -1,4 +1,4 @@
-"""Both ONNX adapters cap their thread pool — the #168 regression guard.
+"""Every ONNX adapter caps its thread pool — the #168 regression guard.
 
 ONNX Runtime defaults to one intra-op thread **per core** and spin-waits between inferences. On the
 4-core Pi that is a starvation bug wearing a performance costume: it violates P8 by *CPU monopoly*
@@ -12,11 +12,14 @@ failure: it stubs ``onnxruntime`` in :data:`sys.modules` — a hand-written reco
 (SDS §14.3) — builds each adapter's session, and asserts the four settings that bound the pool. No
 model blob, no Pi, no ONNX install required, so it runs on every leg.
 
-It deliberately pins the thread **counts**, which differ (2 for MiniLM, 1 for Silero) and are not
-interchangeable: Silero is a ~0.4 ms model where single-threading is nearly free, MiniLM a 90 MB
-transformer where it costs 340 ms/embed. Pasting one adapter's number into the other is the exact
-mistake this file exists to catch, so a change to either count has to be argued for here as well as
-measured on the device.
+It deliberately pins each adapter's thread **count**, because they are not interchangeable and the
+rule is *each number is measured on its own adapter*, never *all counts differ*. Silero is a ~0.4 ms
+model where single-threading is nearly free (1); MiniLM is a 90 MB transformer where it costs
+340 ms/embed (2); :class:`~avid.adapters.face_detector.OnnxFaceDetector` is a ~230 KB detector at
+5 fps where a second thread bought 17% latency for 70% more CPU against a **one-core budget**, so it
+measured its way back to 1 (SDS §2.7.1, #221). Two adapters landing on the same number is therefore
+correct and expected; pasting one into another without measuring is the mistake this file catches,
+so a change to any count has to be argued for here as well as measured on the device.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from typing import Any
 import pytest
 
 from avid.adapters.embedder import LocalMiniLmEmbedder
+from avid.adapters.face_detector import OnnxFaceDetector
 from avid.adapters.vad import SileroVad
 
 # The ONNX config key that stops the pool spin-waiting between inferences. Bounding the thread
@@ -57,14 +61,29 @@ class _RecordingSessionOptions:
 class _RecordingSession:
     """Stands in for ``onnxruntime.InferenceSession``; captures the options it was handed."""
 
-    def __init__(self, model_path: str, sess_options: Any = None) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        sess_options: Any = None,
+        providers: list[str] | None = None,
+    ) -> None:
         self.model_path = model_path
         self.sess_options = sess_options
+        # Recorded because pinning the execution provider is a real choice, not boilerplate:
+        # an ORT build that ships a GPU EP would otherwise pick it up silently, and this
+        # project's whole CPU budget (SDS §2.7.1) is written against the CPU one.
+        self.providers = providers
 
     def get_inputs(
         self,
     ) -> list[Any]:  # pragma: no cover - no inference runs in this suite
-        return []
+        return [_RecordingInput()]
+
+
+class _RecordingInput:
+    """A stand-in for one entry of ``session.get_inputs()`` — adapters read ``.name`` off it."""
+
+    name = "input"
 
 
 class _RecordingTokenizer:
@@ -130,6 +149,20 @@ def _build_vad_session(tmp_path: Path) -> _RecordingSessionOptions:
     return _options_of("SileroVad", vad._session)
 
 
+def _build_face_detector_session(tmp_path: Path) -> _RecordingSessionOptions:
+    """Drive ``OnnxFaceDetector._ensure_session`` and return the options it built."""
+    # This adapter checks the blob exists in its **constructor**, not at first use (#221 AC-5:
+    # a detector that silently detects nothing is indistinguishable from an empty room), so the
+    # file has to be on disk before the object exists. The stub session never reads it.
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    model = tmp_path / "face_detection_yunet_2026may.onnx"
+    model.write_bytes(b"")
+
+    detector = OnnxFaceDetector(model_path=model)
+    detector._ensure_session()
+    return _options_of("OnnxFaceDetector", detector._session)
+
+
 def _options_of(name: str, session: Any) -> _RecordingSessionOptions:
     """The options *name* handed to its ``InferenceSession`` — the no-options case named.
 
@@ -150,6 +183,9 @@ def _options_of(name: str, session: Any) -> _RecordingSessionOptions:
 _ADAPTERS = [
     pytest.param("LocalMiniLmEmbedder", _build_embedder_session, 2, id="embedder"),
     pytest.param("SileroVad", _build_vad_session, 1, id="vad"),
+    pytest.param(
+        "OnnxFaceDetector", _build_face_detector_session, 1, id="face_detector"
+    ),
 ]
 
 
@@ -183,8 +219,13 @@ def test_onnx_adapters_bound_their_thread_pool(
 
 
 @pytest.mark.usefixtures("onnx_stub")
-def test_the_two_adapters_do_not_share_a_thread_count(tmp_path: Path) -> None:
+def test_the_embedder_and_the_vad_do_not_share_a_thread_count(tmp_path: Path) -> None:
     """MiniLM gets two threads and Silero one — copying either number to the other is the bug.
+
+    ⚠️ Scoped to this pair on purpose, and **not** generalised to "every count differs". A third
+    ONNX adapter arrived at #221 and measured its way to 1, the same number Silero has — that is a
+    correct result, not a violation, and a test asserting all three differ would have failed a
+    correct change and taught the next author to copy rather than measure.
 
     Stated as its own assertion because the temptation runs both ways: #168 shipped by copying
     ONNX's default into the embedder, and the obvious fix — pasting ``vad.py``'s ``1`` — would have

@@ -41,6 +41,7 @@ from avid.adapters import (
     HealthServer,
     HybridRetriever,
     LocalMiniLmEmbedder,
+    OnnxFaceDetector,
     OpenAIRealtimeClient,
     OpenAiTextModel,
     Pca9685Servo,
@@ -323,10 +324,7 @@ def _build_face_detector(config: Config) -> FaceDetector:
             # entirely by FakeCamera.person_present. #223 drives a script.
             return FakeFaceDetector()
         case "yunet":  # pragma: no cover - needs the Pi (M8 gate #226)
-            raise NotImplementedError(
-                "the real YuNet face detector lands with #221 — until then set "
-                "[adapters] face_detector = 'fake' (ADR-013)"
-            )
+            return OnnxFaceDetector(scale=config.vision.detector_scale)
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
                 f"face_detector adapter {other!r} is not available — only 'yunet' "
