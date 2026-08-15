@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import contextmanager
@@ -130,6 +131,22 @@ async def _drive(service: PresenceService, clock: FakeClock, frames: int) -> Non
 async def _settle(turns: int = 50) -> None:
     for _ in range(turns):
         await asyncio.sleep(0)
+
+
+async def _until(predicate: Any, *, what: str, timeout_s: float = 5.0) -> None:
+    """Yield the real loop until *predicate* holds, or fail saying what never happened.
+
+    ``_settle``'s bare ``sleep(0)`` yields are enough for handlers that only touch memory, and
+    **not** enough for one that does I/O: ``ExpressionService`` writes a PNG, so its render
+    completes on a real timer rather than on the next loop turn. A fixed number of yields
+    passed on a slow Windows box and failed on CI, which is the definition of a flaky test —
+    so anything asserting on a side effect that leaves the loop waits for the effect itself.
+    """
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
+        await asyncio.sleep(0.001)
 
 
 # --- AC-2: it subscribes to nothing, and that is a statement ------------------
@@ -743,6 +760,12 @@ async def test_the_whole_wake_path_from_a_camera_flag_to_a_face_on_glass(
 
     async with bus:
         await _drive(service, clock, frames=20)
+        # The face is rendered by ExpressionService writing a PNG — real I/O on a real timer,
+        # so wait for the effect rather than for a guessed number of loop turns.
+        await _until(
+            lambda: display.frames_rendered >= 1,
+            what="ExpressionService to render the face the transition asked for",
+        )
 
     kinds = [type(e).__name__ for e in recorder.events]
     assert "VisionPresenceGained" in kinds
