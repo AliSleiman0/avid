@@ -60,6 +60,20 @@ An `error` row is **not** an absence row. A failure is not evidence that the roo
 and the replay skips those frames rather than feeding them to the filter as negatives — the
 same rule `PresenceService` follows live.
 
+## What is here
+
+**`desk_hour.jsonl`** — recorded 2026-08-15 13:45:13Z. 10800 frames, 60.2 min, **0 error
+frames**, at `detector_scale 1`, 3 fps, threshold 0.35, gain 1.2 s, lose 75 s. Ordinary desk
+work with **four real trips out of the room**, 4–8 minutes each. Replays to **8 decisions
+against a bound of 9**, with all seven in-window transitions matched to within **3.4 s** of a
+±6 s tolerance.
+
+⚠️ **It is an hour of someone working, which is the only kind that counts.** An earlier hour the
+same day had a single departure and could not seal anything: a trace with one transition passes
+a flapping bound trivially. The two defects this milestone shipped — a detector that saw nobody
+(#277) and a filter that lost a seated person three times in 17 minutes (#279) — were both found
+by pointing the rig at a real person, and neither was visible to any automated criterion.
+
 ## Ground truth
 
 `ground_truth.json` records the handful of times a human actually arrived or left, by
@@ -67,6 +81,19 @@ timestamp. **Without it "no flapping" is unfalsifiable**: a filter that reports 
 here* also never flaps. Annotating ~10 real transitions over an hour is minutes of work and it
 is the whole reason the test means anything, so the replay asserts **both** halves — agreement
 with ground truth *and* a bound on the total decision count. Either alone is trivially gameable.
+
+**Annotate live, never afterwards.** The matcher's tolerance is ±6 s, which nobody hits
+reconstructing an hour from memory — and reading the transitions back off the trace is circular,
+because the trace is exactly what ground truth exists to falsify. Log each event by keypress as
+it happens, with absolute timestamps, and convert against the trace's own `_meta.recorded_utc`.
+
+Two traps worth knowing before an hour is spent:
+
+- **Mark the moment you cross out of the camera's view**, not the moment you decide to leave. On
+  the first attempt the keypress led the actual departure by ~9 s and blew the ±6 s tolerance.
+- **A mark after the recorder stops is not evidence.** `desk_hour.jsonl` has a fifth arrival
+  logged 13.5 s past the last frame; it is deliberately omitted, because annotating a decision
+  the frames cannot contain would assert something the trace can neither confirm nor deny.
 
 ## Provenance
 

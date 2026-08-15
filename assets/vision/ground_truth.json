@@ -1,0 +1,40 @@
+{
+  "_README": [
+    "What actually happened, annotated BY A HUMAN, LIVE, while the trace was recording.",
+    "Without this file 'no flapping' is unfalsifiable: a filter that reports nobody was ever",
+    "here also never flaps (#225 AC-4), so the replay asserts both halves — agreement with",
+    "these transitions AND a bound on the total decision count.",
+    "",
+    "Times are SECONDS FROM THE START OF THE TRACE, matching the `t` field of its rows.",
+    "They were logged by keypress as each event happened and converted from absolute UTC",
+    "against the trace's own `_meta.recorded_utc`. They were NOT read back off the trace:",
+    "that would be circular, since the trace is precisely what these are here to falsify.",
+    "",
+    "`slack` is how many decisions beyond `len(arrivals) + len(departures)` the replay",
+    "tolerates. Raising it to make a run pass defeats the test — the bound IS the criterion",
+    "(#225 AC-7). Tune the filter windows against the trace instead, and record before/after."
+  ],
+  "desk_hour.jsonl": {
+    "_note": [
+      "Recorded 2026-08-15 13:45:13Z on the bring-up rig: ov5647 at 640x480, detector_scale 1,",
+      "3 fps, confidence_threshold 0.35, gain 1.2 s, lose 75 s. 10800 frames, 60.2 min, 0 error",
+      "frames. Ordinary desk work — reading, typing, turning to a second screen — with four real",
+      "trips out of the room lasting between 4 and 8 minutes.",
+      "",
+      "A FIFTH arrival was marked at t=3623.6, 13.5 s AFTER the recorder stopped at t=3610.1.",
+      "It is deliberately absent: an annotation outside the recorded window is not evidence",
+      "about this trace, and including it would assert a decision the frames cannot contain.",
+      "",
+      "Between t=1075 and t=1195 — inside the first away window — the detector produced a burst",
+      "of false positives on something in the upper-right of the empty room (81% across, 20%",
+      "down, avg confidence 0.42 against 0.68 for the real person, who sits at 57%/60%). They",
+      "are NOT annotated because nobody was there. The filter correctly ignores them at every",
+      "threshold from 0.35 to 0.60: they are scattered rather than sustained, so they never fill",
+      "the gain window. That is the hysteresis doing its job, and it is why this trace is worth",
+      "keeping even though it contains detector noise."
+    ],
+    "arrivals": [1427.4, 2474.6, 3044.1],
+    "departures": [955.4, 2078.0, 2814.3, 3520.4],
+    "slack": 2
+  }
+}
