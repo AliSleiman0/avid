@@ -38,7 +38,7 @@ about where an utterance ends, so the server answers fragments of sentences a pe
 speaking. That is why the tail is ugly — 1 turn in 10 over 2.7 s — and it is why M5 seals with P95
 unmet and honestly labelled rather than with the budget widened a second time to fit it.
 
-## 2026-08-15 — M8 It sees (built, not sealed)
+## 2026-08-15 — M8 It sees (built)
 
 Vision costs **a quarter of a core** — 0.25 against §2.7.1's budget of one, at 4.98 fps with zero
 dropped frames and no thermal throttling — and the per-thread breakdown is the part that matters:
@@ -64,3 +64,44 @@ forever in an empty room. It is **not sealed**, and deliberately: four criteria 
 the room, the harness reports them as `HUMAN` and exits non-zero while they are unrecorded, and it
 downgrades its own ≤1-core PASS to *recorded* when it notices the detector never saw a face. A
 0.25-core measurement of an empty room is a floor, not a result.
+
+## 2026-08-16 — M8 It sees (sealed)
+
+That last sentence was the most useful thing the milestone wrote, and it was truer than intended:
+the occupied room costs **0.524 cores against 0.26** — detection on a real face is exactly double
+an empty one, and every number this milestone was proud of had been measured against nobody. The
+robot was **blind**. `detector_scale = 2`, shipped and argued for in a cost table, found a seated
+person in **0 of ~75 frames** across three runs, never once clearing even the adapter's own 0.3
+floor, while scale 1 on the same frames scored 0.65 mean. It was not the decimation method —
+a box filter scored 0.054 against subsampling's 0.053, so #221's optimisation was exonerated by
+the same measurement that convicted the setting it enabled. The justifying claim, *"quality is flat
+at desk distance, peak 0.93 for a 120 px face"*, was quoted in **model-input pixels**: ~240 px at
+full resolution, about 2.5× closer than anyone sits. It was prose in a comment and prose in an SDS
+table, never an assertion, which is exactly why it survived a milestone. Fixing it cost the frame
+rate — scale 1 is 247 ms worst case against a 200 ms period — so **5 fps became 3**, and §2.7.1's
+"≤5 fps" turned out to be a ceiling worth having. Then, with the robot finally able to see, an hour
+of ordinary desk work showed it **losing a person sitting right there, three times in seventeen
+minutes**: at threshold 0.6 a working human clears the bar in only 32.6% of frames and goes up to
+**116 seconds** without a single one — they look down, they turn to the second monitor — against a
+20-second `lose_window`. The asymmetry had been designed and documented; the magnitude was guessed.
+Both defects were found within an hour of pointing the thing at a person, and **neither was visible
+to any automated criterion**, because CPU, fps, thermals and event counts are all satisfiable by a
+robot that detects nobody. That is §7.1's "a gate that can pass on silence" one level up: not a
+gate passing on no data, but a milestone's whole evidence base collected under conditions that
+never exercise the thing being graded. What sealed it was an hour a human actually sat through,
+marked live by keypress because ±6 s cannot be reconstructed from memory and reading the
+transitions off the trace would be circular — 8 decisions against a bound of 9, four real
+departures, worst match 3.4 s. The gate's last night also cost three defects in *neighbouring*
+subsystems, which is the sign of a real gate rather than a reason to withhold the tag: a
+framebuffer race (#266's stride hypothesis disproven — it is concurrent `to_thread` workers
+interleaving `seek(0)`/`write()` on a shared handle, and the bus swallowing it is why nobody
+noticed for two milestones), a Realtime `response.create` sent while one was already active, and
+the one that matters — **50 Hz mains hum defeating the voice gate**, because `EchoFloor` measures
+broadband and 25 dB of energy below 200 Hz cannot possibly be speech. The room was silent where
+speech lives (-49 dBFS) and read as -18. That is precisely the barge-in margin's trap, calibrated
+at −40 dBFS and silently failing when the room rose 20 dB, recurring in a second threshold before
+the first lesson was a fortnight old. Vision itself came through clean: 0.524 cores with one thread
+at 0.482 and nothing else above 0.013, 2.99 fps held with a face in frame, +0.0 °C over fifteen
+minutes, a conversation at **347 ms** median first-token against M5's 328 with **zero** slow-callback
+warnings, and a threshold that travels — 74.4% detected at night against 78.1% in the afternoon.
+Sealed with three defects open and named, none of them in the vision path.

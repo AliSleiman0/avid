@@ -282,6 +282,50 @@ The empty-room rate barely changes across thresholds (0.00% at 0.6, 0.07% at 0.3
 costs true positives and buys almost no false-positive protection. If you ever re-tune these,
 measure the *gap distribution while present*, not the hit rate.
 
+### The panel cannot be attached at the same time as the amp and servo
+
+The 40-pin header is occupied by the I2S amp and the I2C servo, so the ILI9486 SPI panel **cannot
+be fitted while the robot is otherwise wired**. `card0-SPI-1` still reports `connected` — SPI has
+no hotplug detect, so that line means "the overlay loaded", never "a screen is plugged in". Do not
+read it as evidence.
+
+The face is still fully observable, because `/dev/fb0` holds exactly what the panel would show.
+Two tools live in `~/bin/` on the Pi (`/tmp` does **not** survive a reboot; `~/bin` does):
+
+```sh
+sudo ~/bin/fbshot.py /tmp/face.png          # one PNG
+sudo ~/bin/facestream.py                    # live view, binds 127.0.0.1:8080 ONLY
+ssh -L 18080:127.0.0.1:8080 alisleiman0@AVID   # then http://127.0.0.1:18080/
+```
+
+⚠️ Bind **localhost only** and reach it through the tunnel: `SECURITY.md`'s rule is that localhost
+binding *is* the authentication, and a live view of the robot's screen deserves the same treatment
+as the control API. ⚠️ Laptop port **8080 is already in use** on this workstation — forward to
+18080. ⚠️ `np.fromfile("/dev/fb0")` returns **0 bytes**: a character device stats as empty, so read
+it with `open().read(w*h*4)` instead.
+
+**State this limit whenever citing framebuffer evidence:** it proves what the *application
+rendered*, not what a *panel displayed*. Orientation, backlight and SPI timing are out of its
+reach; those were verified separately at display bring-up.
+
+### Recording a long run: never paste a multi-line command
+
+A backslash-continued paste broke in the terminal and left a bare `python` prompt that *looked*
+like it was recording — caught only because the output file never appeared. Detach instead, and
+verify with the file and the device, never with `pgrep`:
+
+```sh
+cd /opt/avid && setsid nohup /opt/avid/.venv/bin/python tools/record_vision_trace.py \
+    --config /etc/robot/config.toml --minutes 60 --out assets/vision/x.jsonl --label "..." \
+    > /tmp/rec.log 2>&1 </dev/null &
+fuser /dev/video0        # who really holds the camera
+wc -l assets/vision/x.jsonl
+```
+
+**Before an hour of someone's time, prove the pipeline on 30 seconds.** A `--minutes 0.5` run
+costs nothing and catches a blind detector, a stale config or a broken paste while it is still
+cheap. That check is what found #277.
+
 **Before recording a trace or running the gate**, reprovision `/etc/robot/config.toml` — the
 `[vision]` block and `[adapters] face_detector` are new, and a key missing from the machine's
 copy falls back to a schema default **silently** (§3). Both `tools/record_vision_trace.py` and
