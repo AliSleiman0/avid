@@ -211,6 +211,58 @@ A third ONNX adapter should sweep the counts on the Pi, not copy either number.
 
 ---
 
+## 5a. Vision (M8)
+
+**The model is `face_detection_yunet_2026may.onnx`, and the `2023mar` files beside it in the
+same OpenCV Zoo directory will not work.** They are statically shaped `[1, 3, 640, 640]` and
+reject the rig's 640×480 with `INVALID_ARGUMENT` — as do 320×320 and 256×320, and so do both
+int8 variants. Only the `2026may` export declares dynamic spatial axes. `tools/fetch_face_model.py`
+pins the right one; it is recorded here because the directory listing makes the wrong choice look
+like the obvious one.
+
+⚠️ **OpenCV Zoo stores models in git-lfs**, so a `raw.githubusercontent.com` URL returns a
+**131-byte pointer file**, not the model — and ONNX Runtime's error for that is an opaque
+protobuf parse failure. Use `media.githubusercontent.com/media/...`. The fetch script checks
+size before digest so this reports as *"expected 229738 bytes, got 131"* rather than a hash
+mismatch that says nothing about the cause.
+
+**Measured costs on this rig** (Pi 5, ov5647 at 640×480, one intra-op thread, 200 ms period):
+
+| | |
+|---|---|
+| `Picamera2Camera.capture()` | **81.9 ms** — the *dominant* term, larger than inference |
+| `detect()` at `detector_scale = 2` (320×256) | **47.8 ms** |
+| combined, serialised on the one thread | **125.9 ms median / 140.6 ms max — 63% of the period** |
+| `detect()` at full 640×480 | 163 ms — 82% *before* capture, so scale 1 is not viable here |
+
+Capture being the bigger half was the surprise. `Picamera2Camera` uses
+`create_still_configuration`, which is optimised for one-shot quality rather than repeated
+grabs; a video configuration is the obvious lead if the budget ever needs more room, and it is
+M2's adapter rather than M8's.
+
+⚠️ **The first frame takes ~1.3 s** — the one-time ONNX session build. Every subsequent frame
+measured 202–203 ms against a 200 ms period. Do not read that spike as a stall; it is the same
+one-time model load #130 carved out of the P8 gate, and any harness averaging over it will
+overstate the steady-state cost.
+
+**Two preprocessing findings worth not rediscovering.** A textbook 2×2 box-filter downscale
+costs **49.6 ms** on this hardware — *more than the inference it feeds* — against **1.3 ms** for
+plain subsampling, and scored across five face sizes from 200 px down to 30 px the detector
+cannot tell them apart. And the **BGR channel swap is the highest-risk line in the vision path**:
+fed the identical image with channels reversed, YuNet returns **8 detections against 57**, at
+entirely plausible confidences. It does not fail — it quietly loses most of the robot's eyesight,
+which is the failure mode this whole milestone is written around.
+
+**Before recording a trace or running the gate**, reprovision `/etc/robot/config.toml` — the
+`[vision]` block and `[adapters] face_detector` are new, and a key missing from the machine's
+copy falls back to a schema default **silently** (§3). Both `tools/record_vision_trace.py` and
+`docs/demos/vision_pi.py` print every value they loaded before doing anything, and both **refuse
+to run against the fakes**: `FakeCamera` + `FakeFaceDetector` compose into a convincing simulator
+that consumes no CPU and never mis-detects, so measuring *that* and calling it a ≤1-core result
+is the exact failure the AC-0 guard exists to prevent.
+
+---
+
 ## 6. Shell & SSH traps
 
 **`pkill -f <pattern>` kills its own SSH session** when the pattern appears in the remote command
