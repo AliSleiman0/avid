@@ -16,6 +16,7 @@ display    = "fake"
 microphone = "fake"
 speaker    = "fake"
 vad        = "fake"             # real silero flips on with mic/speaker at the M4 gate (AVID-91)
+face_detector = "fake"  # real yunet flips on at the M8 gate (#226)
 realtime   = "replay"           # replay recorded sessions — no OpenAI connection
 notifier   = "systemd"          # ← sd_notify to $NOTIFY_SOCKET (§3.11.3, AVID-38)
 
@@ -127,6 +128,17 @@ ignore_streak_limit        = 3
 
 [vision]
 fps = 5                         # §2.7.1: ≤1 core
+detector_scale = 2              # 2x downscale before inference: 47.8 ms/frame vs 163 at 1:1
+                                # (measured on the Pi, #221). Capture is the bigger term at
+                                # 81.9 ms; combined 126 ms against a 200 ms period.
+confidence_threshold = 0.6      # YuNet scores a desk-distance face 0.90-0.95 (#221); 0.6 clears
+                                # a real face and rejects background texture. ⚠️ measured under
+                                # office light — a threshold is only valid where it was measured.
+gain_window_s = 0.6             # 3-4 frames: notice someone promptly, but not on one blip
+lose_window_s = 20.0            # ⚠️ 33x the gain window ON PURPOSE. Someone who looks away or
+                                # leans out of frame has not left the room; an early
+                                # presence_lost naps the robot on a person sitting right there.
+nap_after_s = 600.0             # §3.10.1's "+10 min" sustained absence -> SLEEPING (#224)
 
 [motion]
 axes = ["pan"]                  # ADR-009 — 1 or 2. Capability-negotiated (§3.9.3).

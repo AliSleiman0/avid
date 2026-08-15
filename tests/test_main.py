@@ -12,6 +12,7 @@ would pass the second and fail the first.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,7 @@ from avid.services import (
     CueBank,
     EpisodeRecorder,
     MemoryService,
+    PresenceService,
 )
 
 # The exact subscriber graph the composition root is expected to build (SDS §9.1.3). Spelled
@@ -99,6 +101,9 @@ _EXPECTED_SUBSCRIPTIONS = {
     "EpisodeRecorder.user_transcribed",
     "EpisodeRecorder.assistant_responded",
     "EpisodeRecorder.turn_ended",
+    # PresenceService (#223) subscribes to NOTHING — it is the only clock-driven service
+    # (§3.6.1, "polls camera port"), so it contributes no edge to this graph. Its absence
+    # here is the assertion; tests/services/test_presence.py asserts it from the other side.
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -355,14 +360,16 @@ def test_main_wires_and_delegates_to_lifecycle(
     assert captured["watchdog_interval_s"] == 15.0
     # The lifecycle-managed services — the ones that own a task: MemoryService (boot rebuild +
     # store close, started first so the index is ready), AudioService's mic loop,
-    # ConversationService's per-session pump/mic/idle, and EpisodeRecorder's prune loop + store
-    # close (#123) — are handed to the lifecycle to start/stop; the reactive services (the two
+    # ConversationService's per-session pump/mic/idle, EpisodeRecorder's prune loop + store
+    # close (#123), and PresenceService's capture loop + the vision thread pool it drains
+    # (#223) — are handed to the lifecycle to start/stop; the reactive services (the two
     # faces, the cost meter) are not. See ``_wire_services``.
     assert [type(s) for s in captured["services"]] == [
         MemoryService,
         AudioService,
         ConversationService,
         EpisodeRecorder,
+        PresenceService,
     ]
 
 
@@ -457,6 +464,9 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         ),
         speaker=FakeSpeaker(),
         vad=FakeVoiceActivityDetector(),
+        camera=FakeCamera(width=32, height=24, fps=5),
+        face_detector=FakeFaceDetector(),
+        vision_pool=ThreadPoolExecutor(max_workers=1),
         realtime=ReplayRealtimeClient(clock=clock, timeline=()),
         embedder=embedder,
         text_model=FakeTextModel(),
@@ -466,9 +476,13 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
         config=config,
     )
-    memory, _audio, conversation, _episode = services
+    memory, _audio, conversation, _episode, presence = services
     assert isinstance(memory, MemoryService)
     assert isinstance(conversation, ConversationService)
+    # PresenceService owns a loop, so it is returned for the lifecycle to start/stop — the
+    # same reason AudioService is (#223, SDS §9.2). Asserted positionally here because the
+    # tuple's shape is the contract lifecycle.run consumes.
+    assert isinstance(presence, PresenceService)
     # the ConversationService names the port; the concrete injected is the wired MemoryService
     assert conversation._memory is memory
 
@@ -529,6 +543,9 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         ),
         speaker=FakeSpeaker(out_dir=tmp_path),
         vad=FakeVoiceActivityDetector(),
+        camera=FakeCamera(width=32, height=24, fps=5),
+        face_detector=FakeFaceDetector(),
+        vision_pool=ThreadPoolExecutor(max_workers=1),
         realtime=ReplayRealtimeClient(clock=clock, timeline=()),
         embedder=embedder,
         text_model=FakeTextModel(),

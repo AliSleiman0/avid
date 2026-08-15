@@ -417,6 +417,40 @@ class VisionConfig(_Section):
     # period. Injected so #226 can trade it against reach on the real rig.
     detector_scale: int = Field(default=2, ge=1, le=8)
 
+    # --- the §9.1.3 hysteresis filter's tunables (#222/#223), injected not hard-coded ------
+    #
+    # ⚠️ These defaults were chosen at an afternoon desk under office light with the ov5647 at
+    # 640x480, and **a margin is only valid at the conditions it was measured under**. The
+    # barge-in threshold was calibrated at a -40 dBFS noise floor and silently stopped working
+    # when the room rose ~20 dB — no error, nothing wrong in the code. Lighting is the visual
+    # equivalent, which is why #226 checks a second condition deliberately.
+
+    # A frame counts as "someone is there" only at or above this. YuNet's sqrt(cls*obj) for a
+    # face at desk distance measures 0.90-0.95 across every size from 200 px down to 30 px
+    # (#221), so 0.6 sits well clear of a real face while rejecting background texture; the
+    # OpenCV demo's 0.9 would reject a head turned away, which is most of desk time. The
+    # detector's own floor (0.3) is deliberately lower — bounding NMS work is the adapter's
+    # job, deciding presence is this filter's.
+    confidence_threshold: float = Field(default=0.6, gt=0.0, lt=1.0)
+
+    # Sustained presence before the robot says "you are here". 0.6 s is 3-4 frames at 5 fps;
+    # with one capture+detect cycle on top the wake lands under ~1 s, which reads as instant.
+    # One frame would flap on a lone false positive; four is the shortest run a single spurious
+    # detection and its neighbour cannot fake.
+    gain_window_s: float = Field(default=0.6, gt=0.0)
+
+    # Sustained absence before the robot says "you have gone" — 100 frames at 5 fps. This is
+    # the "leaned out of frame / turned to the second monitor / went for coffee" window, and it
+    # is 33x the gain window on purpose: **the asymmetry is the design.** The costs are
+    # asymmetric too. A late presence_lost only delays a nap that needs ten more minutes
+    # anyway; an early one is a robot falling asleep on someone sitting right in front of it.
+    lose_window_s: float = Field(default=20.0, gt=0.0)
+
+    # §3.10.1's "+10 min" nap: sustained absence after which IDLE -> SLEEPING (#224). Injected
+    # rather than a literal in the state layer, so a test drives it with a fake clock instead
+    # of waiting ten real minutes.
+    nap_after_s: float = Field(default=600.0, gt=0.0)
+
 
 class MotionConfig(_Section):
     """Servo axes, capability-negotiated (ADR-009, SDS §3.9.3)."""
@@ -535,6 +569,42 @@ class Config(_Section):
                 f"gate.session_idle_close_s ({self.gate.session_idle_close_s}): the idle close "
                 f"cancels the think timer and drives no transition, so a think timeout at or "
                 f"past it never fires and the robot wedges in THINKING (SDS §6.9)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _presence_windows_stay_asymmetric(self) -> Config:
+        # The asymmetry between the two windows IS the design (#222, SDS §9.1.3), not a tuning
+        # residue: entering presence is fast because the robot should notice you promptly, and
+        # leaving is slow because a person who looks away or leans out of frame has not left
+        # the room. Swapped — which is one transposed line in a TOML — the robot would take 20
+        # seconds to notice you and half a second to forget you, and nothing would error. It
+        # would simply behave like a bad robot, on a bench, at the gate.
+        if self.vision.gain_window_s >= self.vision.lose_window_s:
+            raise ValueError(
+                f"vision.gain_window_s ({self.vision.gain_window_s}) must be < "
+                f"vision.lose_window_s ({self.vision.lose_window_s}): the asymmetry is the "
+                f"design — noticing someone should be fast, concluding they left should be "
+                f"slow, because a person who looks away has not left the room (SDS §9.1.3)."
+            )
+        # The nap follows *sustained* absence, and absence is not concluded until the exit
+        # window closes (#224). A nap timer shorter than that window would be armed by an
+        # event that cannot arrive before it expires — an unreachable row wearing a config.
+        if self.vision.lose_window_s >= self.vision.nap_after_s:
+            raise ValueError(
+                f"vision.lose_window_s ({self.vision.lose_window_s}) must be < "
+                f"vision.nap_after_s ({self.vision.nap_after_s}): the nap is armed by "
+                f"presence_lost, which cannot fire before the exit window closes (SDS §3.10.1)."
+            )
+        # Detection cannot outrun capture. §2.7.1 caps vision at ≤5 fps and the camera's own
+        # caps are what the adapter was built with, so a [vision] fps above [camera] fps asks
+        # the loop for frames the sensor was never configured to produce — it would simply
+        # re-read the last one and report a rate it is not achieving.
+        if self.vision.fps > self.camera.fps:
+            raise ValueError(
+                f"vision.fps ({self.vision.fps}) must be <= camera.fps "
+                f"({self.camera.fps}): the capture loop cannot sample faster than the sensor "
+                f"is configured to deliver (SDS §2.7.1, §3.9.3)."
             )
         return self
 
