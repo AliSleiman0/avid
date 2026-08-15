@@ -207,3 +207,47 @@ def test_both_shipped_profiles_carry_the_measured_margin() -> None:
             config.gate.silence_hold_ms - config.ai.turn_detection.silence_duration_ms
         )
         assert margin >= 400, f"{profile.name} ships a margin of only {margin} ms"
+
+
+# --- the [vision] cross-field invariants (#223, SDS §9.1.3, §3.10.1) ---------
+
+
+def test_swapping_the_presence_windows_is_rejected_at_load() -> None:
+    """**The asymmetry is the design, and it is one transposed line away from inverted.**
+
+    Swapped, the robot would take twenty seconds to notice you and half a second to forget
+    you — and nothing would error. It would simply behave like a bad robot, on a bench, at the
+    gate. Loud at load, like ``api.bind``: this is the class of failure that is invisible until
+    someone is standing in front of it.
+    """
+    with pytest.raises(ValidationError, match="asymmetry is the design"):
+        Config.model_validate({"vision": {"gain_window_s": 20.0, "lose_window_s": 0.6}})
+
+
+def test_a_nap_shorter_than_the_exit_window_is_rejected() -> None:
+    """The nap is armed *by* ``presence_lost``, which cannot fire before the exit window
+    closes (#224). A nap timer shorter than that window is an unreachable row wearing a
+    config — the exact shape ``THINK_TIMEOUT`` had before AVID-171, and the bench paid 54
+    seconds for that one."""
+    with pytest.raises(ValidationError, match="cannot fire before the exit window"):
+        Config.model_validate(
+            {"vision": {"lose_window_s": 900.0, "nap_after_s": 600.0}}
+        )
+
+
+def test_vision_fps_above_the_cameras_is_rejected() -> None:
+    """The loop cannot sample faster than the sensor is configured to deliver — it would
+    re-read the last frame and report a rate it is not achieving, which is precisely the
+    "quietly lower the number" failure #226 AC-2 forbids."""
+    with pytest.raises(ValidationError, match="cannot sample faster"):
+        Config.model_validate({"vision": {"fps": 30}, "camera": {"fps": 5}})
+
+
+def test_the_shipped_vision_defaults_satisfy_their_own_invariants() -> None:
+    """A default that violates the rule it is shipped with would fail every load, and the
+    schema defaults are what a key missing from ``/etc/robot/config.toml`` silently falls back
+    to (``deploy/PI_OPERATIONS.md`` §3)."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        vision = load_config(profile).vision
+        assert vision.gain_window_s < vision.lose_window_s < vision.nap_after_s
+        assert 0.0 < vision.confidence_threshold < 1.0

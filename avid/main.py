@@ -14,7 +14,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
+from concurrent.futures import Executor, ThreadPoolExecutor
 from pathlib import Path
 
 from avid import __version__
@@ -78,6 +79,7 @@ from avid.core.ports import (
 )
 from avid.core.state_manager import StateManager
 from avid.domain import ScoreWeights
+from avid.domain.vision import PresenceParams
 from avid.services import (
     CAPABILITY_INSTRUCTIONS,
     TOOL_SCHEMAS,
@@ -89,6 +91,7 @@ from avid.services import (
     EpisodeRecorder,
     ExpressionService,
     MemoryService,
+    PresenceService,
 )
 
 _log = logging.getLogger(__name__)
@@ -307,7 +310,9 @@ def _build_vad(config: Config) -> VoiceActivityDetector:
             )
 
 
-def _build_face_detector(config: Config) -> FaceDetector:
+def _build_face_detector(
+    config: Config, *, executor: Executor | None = None
+) -> FaceDetector:
     """Select the ``FaceDetector`` named by ``[adapters] face_detector`` (#220, ADR-013).
 
     ``fake`` is the laptop/sim default — it reads ``FakeCamera``'s scripted presence flag out
@@ -324,7 +329,12 @@ def _build_face_detector(config: Config) -> FaceDetector:
             # entirely by FakeCamera.person_present. #223 drives a script.
             return FakeFaceDetector()
         case "yunet":  # pragma: no cover - needs the Pi (M8 gate #226)
-            return OnnxFaceDetector(scale=config.vision.detector_scale)
+            # The executor is PresenceService's single-thread pool, shared with capture
+            # (§3.8.2). Passing none falls back to asyncio.to_thread, which is right for a
+            # probe or a one-shot script and wrong for the running robot.
+            return OnnxFaceDetector(
+                scale=config.vision.detector_scale, executor=executor
+            )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
                 f"face_detector adapter {other!r} is not available — only 'yunet' "
@@ -563,6 +573,9 @@ def _wire_services(
     microphone: Microphone,
     speaker: Speaker,
     vad: VoiceActivityDetector,
+    camera: Camera,
+    face_detector: FaceDetector,
+    vision_pool: Executor,
     realtime: RealtimeClient,
     embedder: Embedder,
     text_model: TextModel,
@@ -571,6 +584,7 @@ def _wire_services(
     episode_store: EpisodeStore,
     cues: CueBank,
     config: Config,
+    adapter_health: MutableMapping[str, bool] | None = None,
 ) -> Sequence[Service]:
     """Construct the services, register what they *declared*, return the ones with an owned task.
 
@@ -681,6 +695,27 @@ def _wire_services(
         prune_interval_s=config.memory.episode_prune_interval_s,
         prune_batch=config.memory.episode_prune_batch,
     )
+    # The presence service (#223, SDS §3.6.1): the only clock-driven service in the system, so its
+    # subscriptions() is empty and it appears in the loop below only for uniformity. It is handed the
+    # camera and detector as **ports** (P2) plus the one single-thread executor both of them and it
+    # share (§3.8.2 — two pools is two cores), and it owns that pool's shutdown. The [vision] filter
+    # knobs are injected (P7); the filter itself is a pure domain function so #225 can replay a real
+    # recorded hour through the identical code path in CI.
+    presence = PresenceService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        camera=camera,
+        detector=face_detector,
+        executor=vision_pool,
+        fps=config.vision.fps,
+        params=PresenceParams(
+            confidence_threshold=config.vision.confidence_threshold,
+            gain_window_s=config.vision.gain_window_s,
+            lose_window_s=config.vision.lose_window_s,
+        ),
+        health=adapter_health,
+    )
     for service in (
         affect,
         expression,
@@ -689,6 +724,7 @@ def _wire_services(
         cost_meter,
         memory,
         episode_recorder,
+        presence,
     ):
         for sub in service.subscriptions():
             bus.subscribe(
@@ -703,7 +739,7 @@ def _wire_services(
     # loop + store close. Memory is started first so the index is ready before a session ever asks for
     # top_facts. The reactive services (the two faces, the cost meter) own no task and are kept alive by
     # their bound-method subscriptions above.
-    return (memory, audio, conversation, episode_recorder)
+    return (memory, audio, conversation, episode_recorder, presence)
 
 
 async def _run(config: Config) -> int:
@@ -720,7 +756,14 @@ async def _run(config: Config) -> int:
     microphone = _build_microphone(config)
     speaker = _build_speaker(config)
     vad = _build_vad(config)
-    face_detector = _build_face_detector(config)
+    # ONE thread for capture AND inference (SDS §3.8.2, §2.7.1). Built here because P3 governs
+    # *construction* and the two adapters that need it are built here too; owned by
+    # PresenceService, because it is that service's lifetime that bounds it and its stop() that
+    # drains it. A ThreadPoolExecutor is a stdlib resource, not an adapter, so this is not a P2
+    # or P3 exception. Two pools would be two cores, and asyncio.to_thread's default pool is
+    # sized to the CPU count — which is how a ≤1-core budget is lost without anyone noticing.
+    vision_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
+    face_detector = _build_face_detector(config, executor=vision_pool)
     embedder = _build_embedder(config)
     fact_store = _build_fact_repository(config, clock=clock)
     episode_store = _build_episode_store(config, clock=clock)
@@ -763,6 +806,9 @@ async def _run(config: Config) -> int:
         clock=clock,
         state=state,
         display=display,
+        camera=camera,
+        face_detector=face_detector,
+        vision_pool=vision_pool,
         microphone=microphone,
         speaker=speaker,
         vad=vad,
@@ -774,15 +820,13 @@ async def _run(config: Config) -> int:
         episode_store=episode_store,
         cues=cues,
         config=config,
+        adapter_health=adapter_health,
     )
-    # ``camera``, ``face_detector`` and ``servo`` are still constructed only to realize the switch and
-    # appear in the health map: driving the camera and the detector is ``PresenceService``'s job (#223,
-    # the next issue in M8) and moving the servo is MotionService's (M9). The store, embedder, retriever
-    # and text model are now **owned** by ``MemoryService`` (#122, wired above), so they are no longer
-    # held here. ``display`` (AVID-73) and ``microphone``/``speaker``/``vad`` (AVID-89) left this list
-    # earlier; their services own them.
-    _ = camera
-    _ = face_detector
+    # ``servo`` is the last adapter still constructed only to realize the switch and appear in the
+    # health map — moving it is MotionService's job (M9). ``camera`` and ``face_detector`` left this
+    # list at #223: ``PresenceService`` drives them now, which is what the comment here used to
+    # promise. The store, embedder, retriever and text model are owned by ``MemoryService`` (#122);
+    # ``display`` (AVID-73) and ``microphone``/``speaker``/``vad`` (AVID-89) left earlier.
     _ = servo
     return await lifecycle.run(
         bus=bus,
