@@ -29,10 +29,11 @@ runtime dependency set stays at just ``pydantic``.
 from __future__ import annotations
 
 import asyncio
+import os
 import struct
+import threading
 import zlib
 from pathlib import Path
-from typing import IO
 
 from avid.core.hal import DisplayFrame
 
@@ -113,6 +114,10 @@ class FakeDisplay:
         # *which* cached frame was pushed, and comparing decoded pixels would both be slower
         # and drift into the visual assertions SDS §14.8 rules out (AVID-72).
         self.rendered: list[DisplayFrame] = []
+        # Serialises render(), so a concurrent pair cannot claim the same sequence number
+        # (AVID-266). An asyncio.Lock, not a threading one: the contention is between two bus
+        # worker *tasks* on one loop, and only the write itself goes to a thread.
+        self._render_lock = asyncio.Lock()
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -127,17 +132,25 @@ class FakeDisplay:
     async def render(self, frame: DisplayFrame) -> None:
         """Write ``frame`` to the next numbered PNG.
 
-        The sequence number is read synchronously (single event loop, so no interleave),
-        then the encode-and-write runs on a worker thread: file I/O is blocking and must
-        never touch the loop (P8, ADR-002) — which is also exactly what the real spidev
-        adapter will do.
+        The encode-and-write runs on a worker thread: file I/O is blocking and must never touch
+        the loop (P8, ADR-002) — which is also exactly what the real framebuffer adapter does.
+
+        Serialised by a lock, for the same reason the real adapter is (AVID-266). The sequence
+        number used to be read before the ``await`` and the path appended after it, on the
+        reasoning that one event loop cannot interleave. It can: ``ExpressionService``'s two
+        subscriptions are dispatched by two bus workers, so both renders read the *same* ``seq``,
+        the second silently overwrote the first's PNG, and ``frames`` grew a duplicate path. The
+        real adapter's version of that bug was ``ENOSPC``; a fake that keeps the bug the real one
+        just lost is a fake that has drifted (P6), and this one is what almost every test asserts
+        against.
         """
-        seq = len(self.frames)
-        path = self._out_dir / f"frame_{seq:05d}.png"
-        png = _encode_png(frame)
-        await asyncio.to_thread(path.write_bytes, png)
-        self.frames.append(path)
-        self.rendered.append(frame)
+        async with self._render_lock:
+            seq = len(self.frames)
+            path = self._out_dir / f"frame_{seq:05d}.png"
+            png = _encode_png(frame)
+            await asyncio.to_thread(path.write_bytes, png)
+            self.frames.append(path)
+            self.rendered.append(frame)
 
 
 def _to_xrgb8888(frame: DisplayFrame) -> bytes:
@@ -178,6 +191,22 @@ class FramebufferDisplay:
     worker thread on first render and cached: constructing the adapter touches no hardware (so
     the module imports off-Pi), a display is always open, and the port has no ``stop`` to close
     it.
+
+    **Concurrency (AVID-266).** ``render`` is re-entrant and *is* called concurrently, so this
+    adapter owns its own serialisation — the caller cannot provide it. ``ExpressionService``
+    declares two subscriptions (``affect.changed`` and ``state.transitioned``) that both end in
+    ``render``, and the bus gives every subscriber its own worker task by design (CLAUDE.md §4),
+    so a single state change routinely puts two renders in flight at once. Two things follow:
+
+    * A :class:`threading.Lock` guards the write, so the seek and the write it belongs to are one
+      critical section. The previous ``seek(0); write(); flush()`` on a shared handle produced
+      ``ENOSPC`` on a device with no room past ``stride * height``: thread A advanced the offset to
+      EOF between thread B's seek and its write. The lock also removes *tearing* — two full-panel
+      writes interleaving byte-for-byte would show half of each face — which is why it is held
+      across the write rather than only around the open. ``AlsaSpeaker`` holds its device lock the
+      same way, for the same reason.
+    * The same lock guards the lazy open, which was a second, quieter check-then-act: two worker
+      threads could both find ``None``, both open the device, and leak every fd but the last.
     """
 
     def __init__(self, *, device: str, width: int, height: int) -> None:
@@ -186,7 +215,10 @@ class FramebufferDisplay:
         self._width = width
         self._height = height
         self._stride = width * 4  # 32bpp XRGB8888
-        self._fb: IO[bytes] | None = None
+        self._fd: int | None = None
+        # Guards the lazy open and the panel write. A threading.Lock, not an asyncio one: it is
+        # taken on the worker thread inside asyncio.to_thread, never on the event loop.
+        self._device_lock = threading.Lock()
         # The assertable record of how many frames the panel was handed.
         self.frames_rendered = 0
 
@@ -232,15 +264,51 @@ class FramebufferDisplay:
         return bytes(panel)
 
     def _write_blocking(self, buf: bytes) -> None:
-        """Write a full-panel XRGB8888 buffer to the framebuffer (blocking; worker thread)."""
-        fb = self._ensure_open()
-        fb.seek(0)
-        fb.write(buf)
-        fb.flush()
+        """Write a full-panel XRGB8888 buffer to the framebuffer (blocking; worker thread).
 
-    def _ensure_open(self) -> IO[bytes]:
-        # Opened lazily on the worker thread (mirrors AlsaSpeaker/Picamera2Camera): "r+b"
-        # overwrites the existing device in place, never truncating it as "wb" would.
-        if self._fb is None:
-            self._fb = open(self._device, "r+b")
-        return self._fb
+        The seek and the write are one critical section, so no other render can move the offset
+        between them — which is the whole of AVID-266 (see the class docstring).
+
+        ⚠️ **Why not ``os.pwrite``**, which needs no lock at all because it takes the offset as an
+        argument: it is Unix-only, and this module must import *and be tested* on the Windows dev
+        box. Making it conditional would leave the two halves of a platform branch covered by
+        different machines — the Pi exercising one, CI and the dev box the other — for a guarantee
+        the lock already has to provide anyway, since ``pwrite`` prevents corruption but not the
+        *tearing* of two full-panel writes interleaving. One path, tested identically everywhere,
+        beats a portable-looking one that is really two.
+
+        The loop is for ``write``'s documented right to accept fewer bytes than offered; on a
+        framebuffer it should always complete in one call, which is exactly why the partial case
+        is worth writing down rather than discovering."""
+        with self._device_lock:
+            fd = self._ensure_open_locked()
+            os.lseek(fd, 0, os.SEEK_SET)
+            view = memoryview(buf)
+            written = 0
+            while written < len(buf):
+                sent = os.write(fd, view[written:])
+                if sent <= 0:
+                    raise OSError(
+                        f"framebuffer {self._device} accepted {written} of {len(buf)} bytes "
+                        f"then stopped making progress"
+                    )
+                written += sent
+
+    def _ensure_open_locked(self) -> int:
+        """Open the device once, caching the raw fd. Caller must hold :attr:`_device_lock`.
+
+        A raw ``os.open`` rather than ``open(device, "r+b")``: the buffered object exists only to
+        manage a file position, and a position shared across worker threads is the whole of
+        AVID-266. ``O_RDWR`` (not ``O_WRONLY|O_CREAT``) overwrites the existing device in place
+        and never truncates it, which is what the old ``"r+b"`` was choosing too.
+
+        ⚠️ ``O_BINARY`` is not decoration, and it is not Pi-irrelevant. ``os.open`` on Windows
+        defaults to **text mode**, which expands every ``0x0A`` byte to ``\\r\\n`` on write — and
+        a framebuffer is full of ``0x0A``s the moment any pixel channel happens to equal 10. The
+        ``"b"`` in the old ``"r+b"`` was carrying this; dropping to the raw fd dropped it too. The
+        flag is absent on POSIX, hence the ``getattr``. Found by the concurrency test overrunning
+        the panel by exactly 460800 bytes — the ``0x0A`` count of one frame — which is a better
+        argument for running the real adapter's write path off-Pi than any amount of reasoning."""
+        if self._fd is None:
+            self._fd = os.open(self._device, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        return self._fd
