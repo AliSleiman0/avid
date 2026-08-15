@@ -287,10 +287,13 @@ sudo python tools/fetch_face_model.py
 
 | AC | | |
 |---|---|---|
-| AC-1 | ✅ | **0.25 cores** sustained against a ≤1 budget — busiest thread 0.212, everything else ≤0.009 |
-| AC-2 | ✅ | **4.98 fps** against a configured 5; 1499 frames, 0 failures |
-| AC-3 | ✅ | 42.3 → 45.7 °C, peak 47.7, `throttled=0x0` |
-| AC-4 | ···· | 0 events over 5 min — correct for an empty room, and therefore not evidence about flapping |
+| AC-1 | ···· | **0.26 cores** sustained over 15 min against a ≤1 budget — busiest thread 0.212, everything else ≤0.009. *Recorded, not passed*: see the floor caveat below |
+| AC-2 | ✅ | **4.98 fps** against a configured 5; 4499 frames, **0 failures** |
+| AC-3 | ✅ | 44.3 → 48.2 °C, peak 49.6, `throttled=0x0` |
+| AC-4 | ···· | 0 events over 15 min — correct for an empty room, and therefore not evidence about flapping |
+
+Evidence: `docs/demos/m8_evidence/resources_15min.json`. A 5-minute run agreed
+(0.248 cores, 4.98 fps), so the number is a steady state rather than a warm-up artifact.
 | AC-5 | ⏸ | the robot wakes when someone sits down — **needs a human** |
 | AC-6 | ⏸ | returning inside the nap window does not nap it — **needs a human** |
 | AC-7 | ⏸ | a conversation with vision live — **needs a human** |
