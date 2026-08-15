@@ -17,6 +17,7 @@ from avid.domain.audio import (
     AudioSpeechEnded,
     AudioSpeechStarted,
     EchoFloor,
+    HighPass,
     rms_dbfs,
 )
 from avid.domain.conversation import (
@@ -85,6 +86,7 @@ __all__ = [
     "AudioSpeechEnded",
     "AudioSpeechStarted",
     "EchoFloor",
+    "HighPass",
     "rms_dbfs",
     # conversation.* events + TokenUsage value (#99)
     "ConversationAssistantResponded",

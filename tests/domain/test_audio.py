@@ -4,6 +4,7 @@ level arithmetic (AVID-159)."""
 from __future__ import annotations
 
 import dataclasses
+import math
 from array import array
 from uuid import UUID, uuid4
 
@@ -17,6 +18,7 @@ from avid.domain import (
     AudioSpeechStarted,
     EchoFloor,
     Event,
+    HighPass,
     rms_dbfs,
 )
 from avid.domain.audio import SILENCE_DBFS
@@ -203,6 +205,145 @@ def test_an_odd_trailing_byte_is_ignored_rather_than_raising() -> None:
     """A half sample is not a level. A truncated frame is the device's business; killing the
     mic loop over one stray byte is not the right response (``frombytes`` would raise)."""
     assert rms_dbfs(_square(16384) + b"\x7f") == pytest.approx(-6.02, abs=0.01)
+
+
+# --- HighPass: the energy that cannot be speech (AVID-283) ------------------
+
+_RATE = 16_000
+_FRAME_SAMPLES = 320  # 20 ms at 16 kHz, the shipped [microphone] chunk_ms
+
+
+def _sine(freq_hz: float, *, samples: int, amplitude: int = 8000) -> bytes:
+    """A pure tone as S16_LE PCM, for measuring what a filter does to one frequency."""
+    wave = array(
+        "h",
+        [
+            int(amplitude * math.sin(2.0 * math.pi * freq_hz * n / _RATE))
+            for n in range(samples)
+        ],
+    )
+    return wave.tobytes()
+
+
+def _settled_dbfs(filt: HighPass, tone: bytes, *, frames: int = 25) -> float:
+    """Level of *tone* after the filter has reached steady state.
+
+    An IIR needs a few time constants before its output means anything, so the first frames are
+    fed and discarded and only the last is measured. Measuring frame 1 would grade the filter's
+    startup transient instead of its response — a number that looks like an answer and is not.
+    """
+    last = b""
+    for _ in range(frames):
+        last = filt.apply(tone)
+    return rms_dbfs(last)
+
+
+def test_a_50_hz_tone_is_attenuated_by_at_least_20_db() -> None:
+    """The defect, in one number. The rig's empty room read −18.4 dBFS broadband with 50 Hz
+    dominant, against −49.1 dBFS in the speech band — so the filter has to remove tens of dB at
+    the hum, not a token few."""
+    tone = _sine(50.0, samples=_FRAME_SAMPLES)
+    raw = rms_dbfs(tone)
+    filtered = _settled_dbfs(
+        HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3), tone
+    )
+    assert raw - filtered >= 20.0
+
+
+def test_the_speech_band_survives_the_filter() -> None:
+    """The half that stops this being a filter that "improves" the floor by going deaf.
+
+    A gate can always be made to look better by attenuating everything; the M8 lesson is that a
+    metric satisfiable by detecting nobody is not a metric. So the loss at 1 kHz — squarely
+    inside the 300–3400 Hz band speech lives in — is graded too, and it must be small."""
+    tone = _sine(1000.0, samples=_FRAME_SAMPLES)
+    raw = rms_dbfs(tone)
+    filtered = _settled_dbfs(
+        HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3), tone
+    )
+    assert raw - filtered <= 3.0
+
+
+def test_the_bottom_of_the_speech_band_is_not_gutted() -> None:
+    """300 Hz is the lowest frequency §6.3 counts as speech, and it is only an octave above the
+    cutoff — the place a cascade is most likely to cost more than intended."""
+    tone = _sine(300.0, samples=_FRAME_SAMPLES)
+    raw = rms_dbfs(tone)
+    filtered = _settled_dbfs(
+        HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3), tone
+    )
+    assert raw - filtered <= 6.0
+
+
+def test_each_extra_section_buys_more_rejection_at_the_hum() -> None:
+    """Why the order is a real parameter and not decoration: one pole is 6 dB/octave, which at
+    a 150 Hz cutoff leaves roughly 10 dB at 50 Hz — far short of the ~25 dB measured. This
+    asserts the cascade is monotone, so choosing the order against a recording is meaningful."""
+    tone = _sine(50.0, samples=_FRAME_SAMPLES)
+    levels = [
+        _settled_dbfs(HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=n), tone)
+        for n in (1, 2, 3)
+    ]
+    assert levels[0] > levels[1] > levels[2]
+
+
+def test_state_persists_across_frames() -> None:
+    """The reason this is a class. A filter rebuilt every frame restarts its transient every 20 ms,
+    letting through at the frame rate exactly the low-frequency energy it exists to remove."""
+    tone = _sine(50.0, samples=_FRAME_SAMPLES)
+    stateful = HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3)
+    settled = _settled_dbfs(stateful, tone)
+    restarted = rms_dbfs(
+        HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3).apply(tone)
+    )
+    assert settled < restarted
+
+
+def test_digital_silence_stays_silent() -> None:
+    """A filter that manufactures energy from silence would raise the floor it exists to lower."""
+    filt = HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3)
+    assert rms_dbfs(filt.apply(b"\x00" * (_FRAME_SAMPLES * 2))) == SILENCE_DBFS
+
+
+def test_an_empty_frame_returns_empty_rather_than_raising() -> None:
+    filt = HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3)
+    assert filt.apply(b"") == b""
+
+
+def test_an_odd_trailing_byte_is_dropped_like_rms_dbfs_drops_it() -> None:
+    """Same rule as the level meter beside it, so the two never disagree about what a frame is."""
+    filt = HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=1)
+    assert len(filt.apply(_square(16384) + b"\x7f")) == len(_square(16384))
+
+
+def test_a_full_scale_input_cannot_overflow_the_output() -> None:
+    """A high-pass overshoots on a step, so a filtered sample can leave the range its input came
+    from. Saturating keeps a loud transient loud; wrapping would turn it into a sign flip, and
+    letting ``array("h")`` raise would kill the mic loop over one sample."""
+    filt = HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3)
+    step = array("h", [-32768] * 160 + [32767] * 160).tobytes()
+    out = array("h")
+    out.frombytes(filt.apply(step))
+    assert all(-32768 <= sample <= 32767 for sample in out)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cutoff_hz": 0.0, "sample_rate": _RATE},
+        {"cutoff_hz": -10.0, "sample_rate": _RATE},
+        {"cutoff_hz": 9000.0, "sample_rate": _RATE},  # above Nyquist
+        {"cutoff_hz": 150.0, "sample_rate": 0},
+        {"cutoff_hz": 150.0, "sample_rate": _RATE, "order": 0},
+    ],
+)
+def test_a_nonsense_configuration_raises_at_construction(
+    kwargs: dict[str, float],
+) -> None:
+    """Loud and early. A silently-clamped cutoff would be drift with a delay fuse: the config
+    key would say one thing and the filter do another, and nothing would ever say so."""
+    with pytest.raises(ValueError):
+        HighPass(**kwargs)  # type: ignore[arg-type]
 
 
 # --- EchoFloor: whose speech is this? ---------------------------------------

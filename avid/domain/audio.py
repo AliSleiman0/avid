@@ -190,6 +190,101 @@ def rms_dbfs(pcm: bytes) -> float:
     return max(SILENCE_DBFS, 20.0 * math.log10(math.sqrt(mean_square) / _FULL_SCALE))
 
 
+def _clamp_i16(value: float) -> int:
+    """Round to the nearest signed 16-bit sample, saturating rather than wrapping.
+
+    A high-pass overshoots on a step, so a filtered sample can land outside the range its input
+    came from. Saturating is what an audio path should do with that; wrapping would turn a loud
+    transient into a full-scale sign flip, and letting ``array("h")`` raise would kill the mic
+    loop over one sample."""
+    return int(max(-_FULL_SCALE, min(_FULL_SCALE - 1.0, round(value))))
+
+
+class HighPass:
+    """A cascaded one-pole high-pass filter over S16_LE PCM (AVID-283).
+
+    **Why this exists.** Level was measured broadband, and broadband energy is not the same
+    question as *is this the user*. Measured on the rig in an empty, silent room: the mic read
+    **−18.4 dBFS**, of which 46% sat below 100 Hz with a dominant 50 Hz component — mains hum.
+    In the band speech actually occupies (300–3400 Hz) the same room read **−49.1 dBFS**. So the
+    gate was handed a floor 25–30 dB louder than the thing it was trying to detect, and a robot
+    that stops hearing you because a charger is plugged in nearby is not shippable.
+
+    **Why stdlib arithmetic and not scipy.** This is ``domain/`` — P1 forbids third-party imports
+    beyond pydantic, enforced by both ``.importlinter`` and the purity test. That is a feature
+    here rather than a constraint to work around: the filter stays a pure, unit-testable value
+    with no I/O and no clock, exactly like :func:`rms_dbfs` beside it.
+
+    **Why cascaded, and why the order is not decoration.** A single pole rolls off at only
+    6 dB/octave, which at a 150 Hz cutoff buys about 10 dB at 50 Hz — well short of the ~25 dB
+    the measurement says is needed. Each additional section adds another 6 dB/octave at the
+    hum while costing well under a dB across the speech band, so the order is what converts this
+    from a gesture into a fix. Choose it against a recording, not by taste.
+
+    ``sample_rate`` is injected rather than assumed, following :class:`AudioPreRoll`'s
+    ``bytes_per_ms``: nothing in ``domain/`` may import :class:`~avid.core.hal.AudioChunk`, so a
+    rate-aware primitive here has to be told the rate.
+
+    State (one ``(x[n-1], y[n-1])`` pair per section) persists **across frames**, which is the
+    whole reason this is a class and not a function. A stateless per-frame filter would restart
+    every 20 ms and let a fresh step through on each one — reintroducing at the frame rate the
+    low-frequency energy it exists to remove.
+    """
+
+    def __init__(self, *, cutoff_hz: float, sample_rate: int, order: int = 1) -> None:
+        if sample_rate <= 0:
+            raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+        if not 0.0 < cutoff_hz < sample_rate / 2.0:
+            raise ValueError(
+                f"cutoff_hz must be between 0 and the {sample_rate / 2.0:g} Hz Nyquist "
+                f"frequency, got {cutoff_hz}"
+            )
+        if order < 1:
+            raise ValueError(f"order must be at least 1, got {order}")
+        # One-pole RC high-pass: y[n] = a * (y[n-1] + x[n] - x[n-1]), with a = RC/(RC + dt),
+        # RC = 1/(2*pi*fc) and dt = 1/fs. Written as the closed form so no division by dt is
+        # needed and the coefficient is computed once, not per sample.
+        self._alpha = 1.0 / (1.0 + 2.0 * math.pi * cutoff_hz / sample_rate)
+        self._cutoff_hz = cutoff_hz
+        self._sample_rate = sample_rate
+        self._order = order
+        self._state: list[tuple[float, float]] = [(0.0, 0.0)] * order
+
+    @property
+    def cutoff_hz(self) -> float:
+        """The −3 dB corner of a single section, in Hz."""
+        return self._cutoff_hz
+
+    @property
+    def order(self) -> int:
+        """How many one-pole sections are cascaded."""
+        return self._order
+
+    def apply(self, pcm: bytes) -> bytes:
+        """Filter one frame of S16_LE *pcm*, returning S16_LE *pcm*.
+
+        Bytes in, bytes out, so this composes directly with :func:`rms_dbfs` and with anything
+        else that speaks the microphone's own format. An odd trailing byte is dropped, for the
+        same reason :func:`rms_dbfs` ignores one: half a sample is not a sample.
+        """
+        samples = array("h")
+        usable = len(pcm) - (len(pcm) % samples.itemsize)
+        samples.frombytes(pcm[:usable])
+        if not samples:
+            return b""
+
+        signal = [float(sample) for sample in samples]
+        alpha = self._alpha
+        for section, (x_prev, y_prev) in enumerate(self._state):
+            for index, x in enumerate(signal):
+                y_prev = alpha * (y_prev + x - x_prev)
+                x_prev = x
+                signal[index] = y_prev
+            self._state[section] = (x_prev, y_prev)
+
+        return array("h", [_clamp_i16(value) for value in signal]).tobytes()
+
+
 class EchoFloor:
     """A running estimate of how loud the microphone hears the room (SDS §6.2.4, AVID-159).
 
