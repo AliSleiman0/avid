@@ -52,6 +52,10 @@ from avid.core.realtime import (
 # path is resolved from the repo root, not a tests/ subtree.
 _SESSIONS = Path(__file__).resolve().parents[2] / "assets" / "sessions"
 
+# Ceiling on any wait a test makes on a real ``asyncio`` primitive — a failure should surface as a
+# named timeout, never as a hung suite. Generous: nothing here waits on wall-clock work.
+_WAIT_S = 2.0
+
 
 def _live_enabled() -> bool:
     """Whether the network-gated ``"real"`` leg runs: an ``OPENAI_API_KEY`` **and** an explicit
@@ -448,6 +452,45 @@ class _FakeWs:
 
     async def send(self, raw: str) -> None:  # pragma: no cover - unused by these tests
         return None
+
+
+class _DuplexWs(_CapturingWs):
+    """Both directions on one object: records what we send **and** delivers frames we push.
+
+    ``_FakeWs`` and ``_CapturingWs`` cover one direction each, and every test so far needed only
+    one at a time — swapping ``client._ws`` between them. #284 cannot be written that way: the
+    defect is a client event racing a *server* frame, so the send under test happens while the
+    reader is still live, and swapping the socket mid-call would send into the wrong half.
+
+    Frames are pushed rather than scripted because the point is *when* they arrive relative to the
+    send. ``close_stream`` ends the iteration so the reader task exits instead of parking."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent_event = asyncio.Event()
+        self._frames: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def send(self, raw: str) -> None:
+        await super().send(raw)
+        self.sent_event.set()
+
+    def push(self, frame: dict[str, object]) -> None:
+        self._frames.put_nowait(json.dumps(frame))
+
+    def close_stream(self) -> None:
+        self._frames.put_nowait(None)
+
+    async def close(self) -> None:
+        self.close_stream()
+
+    def __aiter__(self) -> _DuplexWs:
+        return self
+
+    async def __anext__(self) -> str:
+        frame = await self._frames.get()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
 
 
 def _stub_websockets(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
@@ -990,6 +1033,131 @@ async def test_send_tool_output_returns_the_result_then_requests_a_response() ->
         "call_id": "call_0",
         "output": '{"facts": ["Lisbon"]}',
     }
+
+
+async def test_the_tool_output_waits_for_the_in_flight_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#284 AC-1/AC-3: our one ``response.create`` must not race the response that asked for it.
+
+    On the 2026-08-15 rig run this fired twice in 17 turns::
+
+        realtime error #1: type='invalid_request_error'
+          code='conversation_already_has_active_response'
+
+    The mechanism is a frame-ordering race, not "a new turn arrived": a tool call reaches us on
+    ``response.output_item.done``, which the API emits **before** the ``response.done`` that ends
+    that same response. So the assertion that matters is the *intermediate* one below — that only
+    ``conversation.item.create`` is on the wire while the response is live. Asserting the final
+    order alone would pass with the guard removed, since the order is the same either way; it is
+    the timing that is the defect."""
+    _stub_websockets(monkeypatch)
+    ws = _DuplexWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+    stream = client.events()
+
+    # A transcript rides behind response.created purely as a sequencing proof: receiving it means
+    # the reader has already walked both frames, so _track_response has run. No sleeps.
+    ws.push({"type": "response.created", "response": {"id": "resp_1"}})
+    ws.push(
+        {
+            "type": "response.output_audio_transcript.done",
+            "transcript": "let me check",
+            "item_id": "item_1",
+        }
+    )
+    await asyncio.wait_for(anext(stream), _WAIT_S)
+    assert client._active_response == "resp_1"
+
+    task = asyncio.create_task(
+        client.send_tool_output("call_0", '{"facts": ["Lisbon"]}')
+    )
+    await asyncio.wait_for(ws.sent_event.wait(), _WAIT_S)
+
+    assert [m["type"] for m in ws.sent] == ["conversation.item.create"], (
+        "response.create went out while resp_1 was still in flight — this is #284"
+    )
+
+    ws.push({"type": "response.done", "response": {"id": "resp_1"}})
+    await asyncio.wait_for(task, _WAIT_S)
+
+    assert [m["type"] for m in ws.sent] == [
+        "conversation.item.create",
+        "response.create",
+    ], "the tool output was never followed by a response.create — §6.6's step-5 trap"
+
+    await client.aclose()
+    await stream.aclose()
+
+
+async def test_the_tool_output_is_sent_anyway_when_the_response_never_ends(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The wait is bounded, and the bound fails *open*.
+
+    A response that never terminates is a different defect, and swallowing the tool output to
+    avoid it would trade a logged vendor error for a silent one: the user waited on that turn and
+    would simply never get it. So the create still goes out, and the give-up is logged."""
+    _stub_websockets(monkeypatch)
+    monkeypatch.setattr(rt, "_RESPONSE_IDLE_TIMEOUT_S", 0.01)
+    ws = _DuplexWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+    stream = client.events()
+
+    ws.push({"type": "response.created", "response": {"id": "resp_stuck"}})
+    ws.push(
+        {
+            "type": "response.output_audio_transcript.done",
+            "transcript": "…",
+            "item_id": "item_1",
+        }
+    )
+    await asyncio.wait_for(anext(stream), _WAIT_S)
+
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        await asyncio.wait_for(client.send_tool_output("call_0", "{}"), _WAIT_S)
+
+    assert [m["type"] for m in ws.sent] == [
+        "conversation.item.create",
+        "response.create",
+    ], "the tool output was dropped — the user's turn silently went nowhere"
+    assert "resp_stuck" in caplog.text
+    assert "still active" in caplog.text
+
+    await client.aclose()
+    await stream.aclose()
+
+
+def test_an_invalid_request_error_is_louder_than_a_vendor_complaint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#284 AC-4: ``invalid_request_error`` says *we* sent something malformed — a defect report
+    filed by the vendor against us — and it is the one error type that should not read like the
+    routine ones. #284 sat unnoticed in a journal full of WARNINGs for exactly that reason.
+
+    Both stay non-fatal: the socket, not an error frame, is the authority on a live session."""
+    client = _openai()
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        client._note_error(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "conversation_already_has_active_response",
+                    "event_id": "avid_9_response_create",
+                },
+            }
+        )
+        client._note_error(
+            {"type": "error", "error": {"type": "server_error", "code": "overloaded"}}
+        )
+
+    by_code = {r.levelno for r in caplog.records if "already_has_active" in r.message}
+    assert by_code == {logging.ERROR}
+    by_code = {r.levelno for r in caplog.records if "overloaded" in r.message}
+    assert by_code == {logging.WARNING}
 
 
 async def test_tool_call_fixture_replays_the_recorded_exchange() -> None:

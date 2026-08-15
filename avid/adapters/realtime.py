@@ -83,6 +83,14 @@ _NS_PER_MS = 1_000_000
 # caused them — see :func:`_format_error_frame` for why that is a security bound, not tidiness.
 _MAX_ERROR_CHARS = 200
 
+# How long :meth:`OpenAIRealtimeClient.send_tool_output` will wait for an in-flight response to
+# finish before sending ``response.create`` anyway (#284). Not a config knob on purpose: it is a
+# protocol-liveness bound, not something a bench tunes, and the only value that matters is that it
+# is far longer than the gap it guards (the ``response.output_item.done`` → ``response.done`` trip,
+# tens of ms on the run that found the defect) and far shorter than a user's patience. Reaching it
+# means the response never terminated, which is a different defect and gets its own WARNING.
+_RESPONSE_IDLE_TIMEOUT_S = 5.0
+
 _T = TypeVar("_T")
 
 
@@ -493,6 +501,12 @@ class OpenAIRealtimeClient:
         # state: AVID-158 established it is set on the user transcript, which arrives after the
         # assistant's audio and sometimes after the turn has ended.
         self._active_response: str | None = None
+        # The same fact as ``_active_response``, in awaitable form (#284). ``send_tool_output``
+        # needs to *wait* for the in-flight response to finish, and polling a ``str | None`` on
+        # the audio path is exactly the busy-wait P8 exists to forbid. Set == nothing in flight,
+        # so the common case (no response active) costs one already-set ``wait()``.
+        self._response_idle = asyncio.Event()
+        self._response_idle.set()
         # Neutral events read from the socket, awaiting the consumer (AVID-182). Unbounded on
         # purpose: this queue REPLACES the vendor library's own read buffer rather than adding a
         # second one, so bounding it would drop assistant audio the previous design simply held.
@@ -631,6 +645,7 @@ class OpenAIRealtimeClient:
         self._sent_seq = 0
         self._error_count = 0
         self._active_response = None
+        self._response_idle.set()
         # The O1 marks belong to ONE session's turn and must not survive a reconnect. On the
         # 2026-08-01 AC-4 run a cold open timed out, and the marks left over from before the
         # retry produced `response.created nan ms` and a 233 ms "total" for a turn whose
@@ -786,13 +801,20 @@ class OpenAIRealtimeClient:
 
         Kept out of :func:`_translate`, which is pure and stateless by contract — this is state,
         and it belongs on the client. ``response.done`` covers a *cancelled* response too, so the
-        flag clears on every terminal path rather than only the happy one."""
+        flag clears on every terminal path rather than only the happy one.
+
+        Two readers now, not one (#284): :meth:`cancel` asks *is anything in flight*, and
+        :meth:`send_tool_output` waits until nothing is. The `Event` is maintained in lockstep with
+        the `str | None` rather than replacing it, because the two answer different questions — the
+        id is what a log line needs, the event is what an `await` needs."""
         kind = msg.get("type")
         if kind == "response.created":
             response = msg.get("response") or {}
             self._active_response = str(response.get("id", "")) or "active"
+            self._response_idle.clear()
         elif kind == "response.done":
             self._active_response = None
+            self._response_idle.set()
 
     def _note_first_token_timing(self, msg: dict[str, Any]) -> None:
         """Log where O1 actually goes, once per reply (#106 AC-4, SDS §2.8.1).
@@ -873,7 +895,19 @@ class OpenAIRealtimeClient:
         a user whose connection was fine.
         """
         self._error_count += 1
-        _log.warning("%s", _format_error_frame(msg, count=self._error_count))
+        # ERROR for ``invalid_request_error``, WARNING for everything else (#284 AC-4). The
+        # distinction is who is at fault, and it is the only distinction that matters at a bench:
+        # the API declining something reasonable is news about the vendor, but
+        # ``invalid_request_error`` says *we* sent something malformed — a defect report filed by
+        # the vendor against us, and #284 sat unnoticed in a journal full of WARNINGs precisely
+        # because it did not look different from one. Still never fatal: the socket remains the
+        # authority on whether the session is alive.
+        level = (
+            logging.ERROR
+            if (msg.get("error") or {}).get("type") == "invalid_request_error"
+            else logging.WARNING
+        )
+        _log.log(level, "%s", _format_error_frame(msg, count=self._error_count))
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): tell the model the user cut ``item_id`` off at
@@ -925,7 +959,31 @@ class OpenAIRealtimeClient:
         ``function_call_output`` (``call_id`` echoed, ``output`` a string), **then**
         ``response.create``. The second is not optional — without it the model silently swallows
         the turn (§6.6's step-5 trap, the number-one Realtime tool-integration bug). Non-blocking
-        (P8)."""
+        (P8).
+
+        **The wait between them is #284.** This is the only ``response.create`` we ever send —
+        every other response is created by the server, because ``turn_detection.create_response``
+        is on — and it was unguarded, so on the 2026-08-15 rig run it raced::
+
+            realtime error #1: type='invalid_request_error'
+              code='conversation_already_has_active_response'
+              message='Conversation already has an active response in progress: resp_ED…'
+
+        The race is not "a new turn arrived mid-reply". A tool call reaches us on
+        ``response.output_item.done``, which the API emits **before** the ``response.done`` that
+        terminates the very response that requested the tool. So we answer while that response is
+        still finalising, and whether we lose depends on which frame wins the trip — twice in 17
+        turns on the run that found it.
+
+        **Waiting is the right semantics here, and cancelling would be wrong**: the in-flight
+        response *is* the one that asked for this tool, so ``response.cancel`` would discard the
+        call we are in the middle of answering. That is the opposite of the barge-in case
+        (§6.2.4 step 5), where a *user* interrupting a reply they no longer want should cancel —
+        and does. Same guard, two situations, two answers.
+
+        On timeout we send anyway. A dropped tool output is a turn the user waited for and never
+        got, which is indistinguishable from the robot ignoring them; a rejected one at least
+        surfaces as an ERROR naming our event id."""
         await self._send(
             {
                 "type": "conversation.item.create",
@@ -936,6 +994,18 @@ class OpenAIRealtimeClient:
                 },
             }
         )
+        if not self._response_idle.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._response_idle.wait(), _RESPONSE_IDLE_TIMEOUT_S
+                )
+            except TimeoutError:
+                _log.warning(
+                    "response %s still active after %.1fs — sending response.create anyway "
+                    "(#284); expect conversation_already_has_active_response",
+                    self._active_response,
+                    _RESPONSE_IDLE_TIMEOUT_S,
+                )
         await self._send(
             {"type": "response.create"}
         )  # step 5 — or the model just sits (§6.6)
