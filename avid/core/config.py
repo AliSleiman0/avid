@@ -400,22 +400,37 @@ class BehaviorConfig(_Section):
 class VisionConfig(_Section):
     """Vision pipeline (SDS §2.7.1: ≤1 core)."""
 
-    fps: int = 5
-    # Integer downscale applied to each frame before inference, and the single number that
-    # buys the ≤1-core budget (#221, ADR-013). Measured on the Pi at 1 intra-op thread, the
-    # rig's 640x480 through the real camera and the real detector:
+    # 3, not 5, because detection needs `detector_scale = 1` (see below) and one capture+detect
+    # cycle does not fit in a 200 ms period. Measured on the Pi with a person in frame
+    # (2026-08-15, #277), capture and detect serialised on the one thread (§3.8.2):
     #
-    #   scale  model input  end-to-end detect()  of a 200 ms frame period
-    #   1      640x480          163.0 ms          82%
-    #   2      320x256           47.8 ms          24%   <- shipped
-    #   3      224x160           18.9 ms           9%
+    #   fps  period   scale=1 combined (median / max)   verdict
+    #   5    200 ms          184 / 247 ms               OVERRUNS — max is 124% of the period
+    #   4    250 ms          184 / 247 ms               fits, but max is 99% — no headroom
+    #   3    333 ms          184 / 247 ms               fits — median 55%, max 74%   <- shipped
     #
-    # Detection quality is flat across all three at desk distance (peak confidence 0.93 / 0.93
-    # / 0.93 for a 120 px face); what falls away with scale is the *small* faces, which is the
-    # far side of the room rather than the person at the desk. 2 leaves room for the 81.9 ms
-    # capture that shares the same thread (§3.8.2) — measured combined: 125.9 ms, 63% of the
-    # period. Injected so #226 can trade it against reach on the real rig.
-    detector_scale: int = Field(default=2, ge=1, le=8)
+    # §2.7.1 budgets "≤1 core at ≤5 fps", so sampling slower stays inside it. The cost is
+    # reaction time, and the gain window below absorbs it.
+    fps: int = 3
+    # Integer downscale applied to each frame before inference. Measured on the Pi at 1 intra-op
+    # thread, the rig's 640x480 through the real camera and the real detector:
+    #
+    #   scale  model input  end-to-end detect()  frames detecting a seated person at 0.6
+    #   1      640x480          157.3 ms          84%   <- shipped
+    #   2      320x256           42.6 ms           0%
+    #
+    # ⚠️ **2 was shipped and could not see anyone** (#277). The same person, well framed at
+    # 93x116 px in ordinary office light, scored 0.65 mean / 0.80 peak at scale 1 and 0.07 mean
+    # / 0.14 peak at scale 2 — not one frame in three runs cleared even the adapter's own 0.3
+    # floor. The regression is the input resolution itself, not the decimation method: a 2x2 box
+    # filter over the identical frames scored 0.054 against subsampling's 0.053, so #221's
+    # measurement retiring the box filter still holds and is not the cause.
+    #
+    # The earlier claim that quality was "flat across all three at desk distance" was quoted in
+    # **model-input** pixels, not frame pixels: a 120 px face in a 320x256 input needs ~240 px at
+    # full res, which is ~2.5x closer than anyone sits. It was prose, not a test, which is
+    # exactly why it survived — `tests/adapters/test_face_detector_sees_a_face.py` now asserts it.
+    detector_scale: int = Field(default=1, ge=1, le=8)
 
     # --- the §9.1.3 hysteresis filter's tunables (#222/#223), injected not hard-coded ------
     #
@@ -425,21 +440,26 @@ class VisionConfig(_Section):
     # when the room rose ~20 dB — no error, nothing wrong in the code. Lighting is the visual
     # equivalent, which is why #226 checks a second condition deliberately.
 
-    # A frame counts as "someone is there" only at or above this. YuNet's sqrt(cls*obj) for a
-    # face at desk distance measures 0.90-0.95 across every size from 200 px down to 30 px
-    # (#221), so 0.6 sits well clear of a real face while rejecting background texture; the
+    # A frame counts as "someone is there" only at or above this. Measured on the rig with a
+    # person at an ordinary desk distance and `detector_scale = 1`: mean 0.65, peak 0.80, and 84%
+    # of frames at or above this threshold (#277). ⚠️ An earlier note here claimed 0.90-0.95
+    # "across every size from 200 px down to 30 px"; that was prose rather than a measurement in
+    # these units, and the figures above replace it. 0.6 clears a real face while rejecting
+    # background texture; the
     # OpenCV demo's 0.9 would reject a head turned away, which is most of desk time. The
     # detector's own floor (0.3) is deliberately lower — bounding NMS work is the adapter's
     # job, deciding presence is this filter's.
     confidence_threshold: float = Field(default=0.6, gt=0.0, lt=1.0)
 
-    # Sustained presence before the robot says "you are here". 0.6 s is 3-4 frames at 5 fps;
-    # with one capture+detect cycle on top the wake lands under ~1 s, which reads as instant.
-    # One frame would flap on a lone false positive; four is the shortest run a single spurious
-    # detection and its neighbour cannot fake.
-    gain_window_s: float = Field(default=0.6, gt=0.0)
+    # Sustained presence before the robot says "you are here". **Stated in seconds, but the
+    # property that matters is frames**: one frame would flap on a lone false positive, and 3-4
+    # is the shortest run a single spurious detection and its neighbour cannot fake. 0.6 s was
+    # 3-4 frames at 5 fps; at 3 fps it is 1.8, which is below that floor — so it moves with the
+    # rate (#277). 1.2 s is 3.6 frames at 3 fps, and with one capture+detect cycle on top the
+    # wake lands under ~1.5 s.
+    gain_window_s: float = Field(default=1.2, gt=0.0)
 
-    # Sustained absence before the robot says "you have gone" — 100 frames at 5 fps. This is
+    # Sustained absence before the robot says "you have gone" — 60 frames at 3 fps. This is
     # the "leaned out of frame / turned to the second monitor / went for coffee" window, and it
     # is 33x the gain window on purpose: **the asymmetry is the design.** The costs are
     # asymmetric too. A late presence_lost only delays a nap that needs ten more minutes

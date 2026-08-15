@@ -127,14 +127,20 @@ ambient_speech_threshold_s = 60
 ignore_streak_limit        = 3
 
 [vision]
-fps = 5                         # §2.7.1: ≤1 core
-detector_scale = 2              # 2x downscale before inference: 47.8 ms/frame vs 163 at 1:1
-                                # (measured on the Pi, #221). Capture is the bigger term at
-                                # 81.9 ms; combined 126 ms against a 200 ms period.
-confidence_threshold = 0.6      # YuNet scores a desk-distance face 0.90-0.95 (#221); 0.6 clears
-                                # a real face and rejects background texture. ⚠️ measured under
-                                # office light — a threshold is only valid where it was measured.
-gain_window_s = 0.6             # 3-4 frames: notice someone promptly, but not on one blip
+fps = 3                         # §2.7.1: ≤1 core, and scale=1 does NOT fit a 200 ms period —
+                                # 184 ms median / 247 ms max per capture+detect (#277). At 3 fps
+                                # (333 ms) that is 55% median / 74% max. 4 fps peaks at 99%.
+detector_scale = 1              # ⚠️ was 2, and at 2 the robot could not see anyone: 0 of ~75
+                                # frames cleared even the adapter's 0.3 floor against a person
+                                # framed at 93x116 px (#277). At 1: 84% of frames >= 0.6.
+                                # NOT the decimation method — a box filter scored 0.054 vs
+                                # subsampling's 0.053 on the same frames, so #221 still holds.
+confidence_threshold = 0.6      # measured with a person at desk distance at scale=1: mean 0.65,
+                                # peak 0.80, 84% of frames at or above 0.6 (#277). ⚠️ measured
+                                # under office light — a threshold is only valid where it was
+                                # measured.
+gain_window_s = 1.2             # 3-4 frames at 3 fps. Moves WITH fps: 0.6 s was 3-4 frames at
+                                # 5 fps but only 1.8 at 3, below the anti-flap floor (#277).
 lose_window_s = 20.0            # ⚠️ 33x the gain window ON PURPOSE. Someone who looks away or
                                 # leans out of frame has not left the room; an early
                                 # presence_lost naps the robot on a person sitting right there.
