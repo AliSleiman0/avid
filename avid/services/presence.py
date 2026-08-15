@@ -19,6 +19,12 @@ Measured on the Pi at the shipped settings: capture 81.9 ms, detect 47.8 ms, **c
 ms median / 140.6 ms max against a 200 ms period** — 63%, serialised on one thread by
 construction, because there is only one thread to serialise on.
 
+**It drives the two state rows that have existed since M0 with nothing able to reach them**
+(#224): ``SLEEPING -> IDLE`` when someone sits down, and ``IDLE -> SLEEPING`` after ten minutes
+of sustained absence. Both by **direct awaited call**, never by an event — losing a state
+change would be a correctness bug and the bus is explicitly at-most-once (§9.1.4) — and by
+necessity rather than preference, since AC-2 forbids this service from subscribing at all.
+
 **Failures degrade, they never accumulate as absence.** A frame whose capture or detection
 raises is *skipped*, not fed to the filter as a negative detection. That distinction is not
 pedantry: a failure is not evidence that nobody is there, and twenty seconds of a throwing
@@ -46,6 +52,7 @@ from avid.core.hal import Detection
 from avid.core.ports import Camera, Clock, EventBus, FaceDetector
 from avid.core.state_manager import StateManager
 from avid.core.tasks import spawn
+from avid.domain import RobotState, Trigger
 from avid.domain.vision import (
     PresenceGained,
     PresenceLost,
@@ -97,6 +104,7 @@ class PresenceService:
         executor: Executor,
         fps: int,
         params: PresenceParams,
+        nap_after_s: float,
         health: MutableMapping[str, bool] | None = None,
     ) -> None:
         self._bus = bus
@@ -107,9 +115,11 @@ class PresenceService:
         self._executor = executor
         self._period_s = 1.0 / fps if fps > 0 else 0.2
         self._params = params
+        self._nap_after_s = nap_after_s
         self._health = health
         self._filter = PresenceState()
         self._loop_task: asyncio.Task[None] | None = None
+        self._nap_task: asyncio.Task[None] | None = None
         # Public and assertable: how many frames were judged, and how many in a row failed.
         # The second is what makes a sustained fault visible rather than silent (AC-6).
         self.frames = 0
@@ -148,6 +158,10 @@ class PresenceService:
         non-daemon thread for the interpreter's ``atexit`` to join, which is a shutdown hang
         waiting to happen.
         """
+        # The pending nap is cancelled and **abandoned, never fired**: a shutdown is not a nap,
+        # and driving IDLE -> SLEEPING mid-teardown would publish state.transitioned into a
+        # closing bus. Cancelled first so nothing can fire while the loop unwinds.
+        self._cancel_nap()
         task = self._loop_task
         self._loop_task = None
         if task is not None and not task.done():
@@ -237,7 +251,13 @@ class PresenceService:
         detections: Sequence[Detection],
         correlation_id: UUID,
     ) -> None:
-        """Publish the arrival, and the one frame of evidence behind it."""
+        """Cancel any pending nap, publish the arrival, and wake the robot (#224).
+
+        **Cancel first, publish second.** #226 AC-6 is "leave and come back inside ten minutes
+        and confirm the robot did *not* nap", and cancelling before the awaits means that case
+        cannot race: the timer is gone before anything else can be scheduled.
+        """
+        self._cancel_nap()
         await self._bus.publish(
             VisionPresenceGained(
                 **envelope(
@@ -262,8 +282,25 @@ class PresenceService:
                     largest_bbox=largest.box,
                 )
             )
+        # SLEEPING -> IDLE. Called **unconditionally**, without checking the current state
+        # first: the table is the single source of truth, and a `if state is SLEEPING` guard
+        # here would be a second copy of it — exactly the papering-over #224 AC-5 forbids.
+        # StateManager already logs-and-ignores the other six states at WARNING (§3.10.3), and
+        # the noise is bounded to one line per *decision* because the hysteresis filter already
+        # collapsed the edges. Six self-loop rows would be worse: each would publish a spurious
+        # state.transitioned to every subscriber.
+        await self._state.transition(
+            Trigger.VISION_PRESENCE_GAINED, correlation_id=correlation_id
+        )
 
     async def _on_lost(self, decision: PresenceLost, correlation_id: UUID) -> None:
+        """Publish the departure and arm the nap (#224).
+
+        The timer is *armed by the edge*, not polled — §3.10.1's nap follows **sustained**
+        absence, and the filter has already established that. The same ``correlation_id``
+        threads the event and the transition ten minutes later, so one grep shows "person left
+        at 14:02 → robot napped at 14:12".
+        """
         await self._bus.publish(
             VisionPresenceLost(
                 **envelope(
@@ -272,6 +309,57 @@ class PresenceService:
                 absent_for_s=decision.absent_for_s,
             )
         )
+        self._arm_nap(correlation_id=correlation_id)
+
+    # --- the 10-minute nap (§3.10.1, #224) -------------------------------------------------
+
+    def _arm_nap(self, *, correlation_id: UUID) -> None:
+        """Start the sustained-absence timer, replacing any pending one.
+
+        Cancel-then-arm is belt and braces: the filter's edge idempotence makes ``lost`` →
+        ``lost`` inexpressible without an intervening ``gained`` (which cancels), so there
+        should never be a timer to replace. It is one line, and a test asserts at most one nap
+        task exists at a time.
+        """
+        self._cancel_nap()
+        self._nap_task = spawn(self._nap(correlation_id), name="PresenceService.nap")
+
+    def _cancel_nap(self) -> None:
+        """Drop any pending nap. Synchronous — the capture loop calls it and must not stall."""
+        task = self._nap_task
+        self._nap_task = None
+        if task is not None and not task.done():
+            # spawn()'s done-callback ignores CancelledError, so a cancelled nap is a clean
+            # teardown rather than a reported death.
+            task.cancel()
+
+    async def _nap(self, correlation_id: UUID) -> None:
+        """Sleep out the absence, then drive ``IDLE -> SLEEPING`` — retrying if it was ignored.
+
+        ⚠️ **The retry is why this is a loop, and it is not the poll AC-2 forbids.** The nap
+        can come due in a state that has no row: someone leaves at 14:02, a noise opens a
+        session at 14:05, and at 14:12 the trigger arrives in SPEAKING, where it is illegal.
+        ``StateManager`` logs and ignores it — correctly — and without this loop **nothing
+        would ever re-arm it**, leaving the robot awake indefinitely in an empty room. That is
+        the `THINK_TIMEOUT` shape that cost the bench 54 seconds (AVID-171), and #224 exists
+        partly to not repeat it.
+
+        Re-arming waits the *full* interval again rather than retrying immediately, because a
+        conversation is itself evidence that someone was there — napping three seconds after
+        the robot stops speaking would be worse than not napping at all. Presence stays
+        edge-driven throughout: nothing here asks "is anyone here", it only retries **one
+        transition** that a busy state refused.
+
+        Sleeps on the injected :class:`~avid.core.ports.Clock`, so the ten minutes are a
+        millisecond in a test.
+        """
+        while True:
+            await self._clock.sleep(self._nap_after_s)
+            reached = await self._state.transition(
+                Trigger.PRESENCE_LOST_TIMEOUT, correlation_id=correlation_id
+            )
+            if reached is RobotState.SLEEPING:
+                return
 
     # --- failure handling (AC-6) ----------------------------------------------------------
 
