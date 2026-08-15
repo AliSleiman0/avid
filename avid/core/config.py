@@ -440,16 +440,31 @@ class VisionConfig(_Section):
     # when the room rose ~20 dB — no error, nothing wrong in the code. Lighting is the visual
     # equivalent, which is why #226 checks a second condition deliberately.
 
-    # A frame counts as "someone is there" only at or above this. Measured on the rig with a
-    # person at an ordinary desk distance and `detector_scale = 1`: mean 0.65, peak 0.80, and 84%
-    # of frames at or above this threshold (#277). ⚠️ An earlier note here claimed 0.90-0.95
-    # "across every size from 200 px down to 30 px"; that was prose rather than a measurement in
-    # these units, and the figures above replace it. 0.6 clears a real face while rejecting
-    # background texture; the
-    # OpenCV demo's 0.9 would reject a head turned away, which is most of desk time. The
-    # detector's own floor (0.3) is deliberately lower — bounding NMS work is the adapter's
-    # job, deciding presence is this filter's.
-    confidence_threshold: float = Field(default=0.6, gt=0.0, lt=1.0)
+    # A frame counts as "someone is there" only at or above this.
+    #
+    # **0.35, and the number came from an hour of someone working, not from someone posing.**
+    # Measured over #225's first real desk recording (2026-08-15, 10800 frames): 17.5 occupied
+    # minutes against 41.8 settled-empty ones, at `detector_scale = 1`.
+    #
+    #   threshold  occupied  empty    longest gap while present
+    #   0.30        83.8%    0.13%     22.4 s
+    #   0.35        78.1%    0.07%     46.1 s     <- shipped
+    #   0.40        70.6%    0.03%     62.5 s
+    #   0.60        32.6%    0.00%    116.3 s     <- was shipped, and lost the person 3x/17 min
+    #
+    # Detection separates occupied from empty by roughly **600:1 at every threshold**, so a high
+    # bar buys almost no false-positive protection and costs most of the true positives: 0.00%
+    # vs 0.07% empty-room rate is not worth 32.6% vs 78.1% occupied (#279). A working person
+    # looks down, turns to a second monitor and goes to profile; confidence follows the pose.
+    #
+    # It stays **above** the adapter's own `_SCORE_FLOOR = 0.3` on purpose. Collapsing the two
+    # onto each other would make "any detection at all" mean presence and erase the §3.9.1 split
+    # — the floor bounds NMS work, this decides presence. (The OpenCV demo's 0.9 would reject a
+    # head turned away, which is most of desk time.)
+    #
+    # ⚠️ One hour, one person, one lighting condition. #226 AC-8's second-light check should
+    # re-derive this table rather than assume it travels.
+    confidence_threshold: float = Field(default=0.35, gt=0.0, lt=1.0)
 
     # Sustained presence before the robot says "you are here". **Stated in seconds, but the
     # property that matters is frames**: one frame would flap on a lone false positive, and 3-4
@@ -459,16 +474,28 @@ class VisionConfig(_Section):
     # wake lands under ~1.5 s.
     gain_window_s: float = Field(default=1.2, gt=0.0)
 
-    # Sustained absence before the robot says "you have gone" — 60 frames at 3 fps. This is
-    # the "leaned out of frame / turned to the second monitor / went for coffee" window, and it
-    # is 33x the gain window on purpose: **the asymmetry is the design.** The costs are
-    # asymmetric too. A late presence_lost only delays a nap that needs ten more minutes
-    # anyway; an early one is a robot falling asleep on someone sitting right in front of it.
-    lose_window_s: float = Field(default=20.0, gt=0.0)
+    # Sustained absence before the robot says "you have gone" — 225 frames at 3 fps. This is the
+    # "leaned out of frame / turned to the second monitor / went for coffee" window, and it is
+    # 62x the gain window on purpose: **the asymmetry is the design.** The costs are asymmetric
+    # too. A late presence_lost only delays a nap that needs ten more minutes anyway; an early one
+    # is a robot falling asleep on someone sitting right in front of it.
+    #
+    # **The asymmetry was designed; the magnitude was guessed, and 20 s was wrong** (#279). At the
+    # old 0.6 threshold a seated person went up to **116 s** without one qualifying frame, so the
+    # filter announced three departures in 17 minutes for someone who never moved. 75 s is
+    # **1.63x** the 46.1 s worst gap measured at the shipped 0.35 — a margin over a measurement,
+    # not the value that made one trace pass. (0.30/45, 0.35/60 and 0.40/90 all replay to the
+    # same 2 decisions, so this is not knife-edge.)
+    lose_window_s: float = Field(default=75.0, gt=0.0)
 
     # §3.10.1's "+10 min" nap: sustained absence after which IDLE -> SLEEPING (#224). Injected
     # rather than a literal in the state layer, so a test drives it with a fake clock instead
     # of waiting ten real minutes.
+    #
+    # Note this is armed by `presence_lost`, so wall-clock time from someone actually leaving to
+    # the robot sleeping is `lose_window_s + nap_after_s` — 11.25 min since #279 widened the
+    # window, not 10. §3.10.1 says "+10 min" of *sustained absence*, which is what this measures;
+    # the extra 75 s is the time spent establishing that the absence is real (#279 AC-4).
     nap_after_s: float = Field(default=600.0, gt=0.0)
 
 
