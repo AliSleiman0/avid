@@ -401,6 +401,21 @@ class VisionConfig(_Section):
     """Vision pipeline (SDS §2.7.1: ≤1 core)."""
 
     fps: int = 5
+    # Integer downscale applied to each frame before inference, and the single number that
+    # buys the ≤1-core budget (#221, ADR-013). Measured on the Pi at 1 intra-op thread, the
+    # rig's 640x480 through the real camera and the real detector:
+    #
+    #   scale  model input  end-to-end detect()  of a 200 ms frame period
+    #   1      640x480          163.0 ms          82%
+    #   2      320x256           47.8 ms          24%   <- shipped
+    #   3      224x160           18.9 ms           9%
+    #
+    # Detection quality is flat across all three at desk distance (peak confidence 0.93 / 0.93
+    # / 0.93 for a 120 px face); what falls away with scale is the *small* faces, which is the
+    # far side of the room rather than the person at the desk. 2 leaves room for the 81.9 ms
+    # capture that shares the same thread (§3.8.2) — measured combined: 125.9 ms, 63% of the
+    # period. Injected so #226 can trade it against reach on the real rig.
+    detector_scale: int = Field(default=2, ge=1, le=8)
 
 
 class MotionConfig(_Section):

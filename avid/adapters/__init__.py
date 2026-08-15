@@ -14,7 +14,7 @@ from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay, FramebufferDisplay
 from avid.adapters.embedder import FakeEmbedder, LocalMiniLmEmbedder
 from avid.adapters.episode_store import FakeEpisodeStore, SqliteEpisodeStore
-from avid.adapters.face_detector import FakeFaceDetector
+from avid.adapters.face_detector import FakeFaceDetector, OnnxFaceDetector
 from avid.adapters.fact_repository import FakeFactRepository, SqliteFactRepo
 from avid.adapters.health import HealthServer
 from avid.adapters.microphone import AlsaMicrophone, FakeMicrophone
@@ -54,6 +54,7 @@ __all__ = [
     "SileroVad",
     # FaceDetector (#220 fake, #221 real) — ADR-013, presence not identity
     "FakeFaceDetector",
+    "OnnxFaceDetector",
     # TurnSink (#100) — real adapter lands with the AudioService seam (#103)
     "FakeTurnSink",
     # RealtimeClient — replay fake (#101), real openai WSS client + capture decorator (#105)

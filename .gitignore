@@ -25,6 +25,12 @@ htmlcov/
 .artifacts/
 docs/demos/hal_pi_out/
 
+# ONNX model blobs (#119, #221). The real destination is /var/lib/robot/models on the
+# device; this covers `tools/fetch_*.py --dest ./models`, the local dry run. Never
+# committed: the largest tracked file here is 566 KB, there is no LFS, and MiniLM alone
+# is 86 MB. The fetch scripts pin a revision and verify a SHA-256 instead.
+models/
+
 # Databases (on-device memory — never committed)
 *.db
 *.db-wal
