@@ -240,12 +240,27 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M5** ✅ | **It talks** | 5 | Full UC-01. Two-minute conversation. Barge-in works. Latency histogram meets O1. Cost meter shows projected monthly spend meeting O7. Survives a Wi-Fi unplug and recovers. | **13** | **L** | 50 |
 | **M6** | **It has a personality** | 6 | Same question asked in two personality configs yields recognizably different responses. Affect inferred from response drives the face without `ai` importing `display`. | **5** | M | 55 |
 | **M7** | **It remembers** | 7 | Full UC-02 + UC-05. Tell it 20 facts, restart the process, recall all 20. Semantic query returns the right fact. Contradictory fact supersedes correctly. "Forget that" deletes. | **13** | **L** | 68 |
-| **M8** | **It sees** | 8 | Presence detection with hysteresis, no flapping over a 1-hour desk recording. ≤1 core, ≤5 fps, thermals stable. The robot wakes from SLEEPING when someone sits down.[^m8-uc04] | **8** | M | 76 |
+| **M8** ✅ | **It sees** | 8 | Presence detection with hysteresis, no flapping over a 1-hour desk recording. ≤1 core, ≤5 fps, thermals stable. The robot wakes from SLEEPING when someone sits down.[^m8-uc04] | **8** | M | 76 |
 | **M9** | **It moves** | 9 | Affect drives gesture. Nod, turn, idle micro-motion. No brown-out under stall. Servo relaxes when idle (no buzz). Gesture preemption works. | **5** | M | 81 |
 | **M10** | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
 | **M11** | **It's a product** | 11 | 30-day unattended soak. O5 met. Runbook written. v1.0.0 tagged. | **13** | M | 107 |
 
-✅ = sealed and tagged. **M5 sealed 2026-08-01 as `v0.M5.0` with two gaps recorded rather than closed**, because a milestone marker that hides what it did not reach is worth nothing: **O1's P95 is not met** (P50 1530 ms passes the provisional ceiling, but 1 turn in 10 exceeds 2700 ms where a P95 allows 1 in 20 — cause is AVID-194, two VADs disagreeing about where an utterance ends, written up in `docs/enhancement-single-turn-authority.md`), and **AC-7's 60-second recorded demo was deferred**. AVID-188 and AVID-189 are also open from the same gate. The tail is the part a person notices, so AVID-194 opens M6's list.
+✅ = sealed and tagged. **M8 sealed 2026-08-16 as `v0.M8.0`, measured with a person actually in
+frame** — 0.524 cores against §2.7.1's one (the empty-room 0.26 was a floor: detection on a real
+face costs **double**), 2.99 fps held at `detector_scale = 1`, +0.0 °C over 15 min, `throttled=0x0`,
+one thread at 0.482 with nothing else above 0.013. No flapping over a real desk hour: **8 decisions
+against a bound of 9**, all seven in-window transitions matched to within 3.4 s of a ±6 s tolerance.
+Wake and nap confirmed by log *and* by eye; threshold travels across lighting (74.4% at night vs
+78.1% afternoon). **Two defects the gate caught first were in the robot, both fixed before the tag**
+(#277 — the shipped `detector_scale = 2` was blind, 0 of ~75 frames; #279 — the filter lost a seated
+person three times in seventeen minutes). **Sealed with three defects open and named, none in the
+vision path**: #266 (framebuffer handle race), #283 (**50 Hz mains hum defeats the voice gate** —
+`prio:must`, and a shipping blocker for the product even though it blocks no M8 criterion), #284
+(Realtime `response.create` while a response is active). #283 degraded M8's AC-7 conversation with
+9 dropped turns; vision was measured innocent — 347 ms median first-token against M5's 328, with
+zero P8 slow-callback warnings.
+
+**M5 sealed 2026-08-01 as `v0.M5.0` with two gaps recorded rather than closed**, because a milestone marker that hides what it did not reach is worth nothing: **O1's P95 is not met** (P50 1530 ms passes the provisional ceiling, but 1 turn in 10 exceeds 2700 ms where a P95 allows 1 in 20 — cause is AVID-194, two VADs disagreeing about where an utterance ends, written up in `docs/enhancement-single-turn-authority.md`), and **AC-7's 60-second recorded demo was deferred**. AVID-188 and AVID-189 are also open from the same gate. The tail is the part a person notices, so AVID-194 opens M6's list.
 
 [^m8-uc04]: **This row used to read "Full UC-04", and it over-claimed** (#218, ADR-013). UC-04
     (SDS §2.5) is *"user sits down; robot notices **and greets**"* — and greeting means speaking
