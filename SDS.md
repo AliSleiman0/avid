@@ -1433,6 +1433,17 @@ Declaration is at session level in `session.update`, as JSON Schema. Static for 
 
 Step 5 is the trap. Returning the tool output does **not** cause the model to speak. Without an explicit `response.create` the robot silently swallows the turn and just sits there. This is the number-one "why is it doing nothing" bug in Realtime tool integration.
 
+**Step 5 waits for step 2's response to finish (AVID-284).** Step 2 arrives on `response.output_item.done`, which the API emits *before* the `response.done` that terminates the response requesting the tool — so sending `response.create` the moment we have the output races it, and loses often enough to matter (twice in 17 turns on the 2026-08-15 rig run):
+
+```
+error: invalid_request_error / conversation_already_has_active_response
+       "Conversation already has an active response in progress: resp_… "
+```
+
+This is the **only** `response.create` the client ever sends; every other response is created by the server, because `turn_detection.create_response` is on (§6.2.2). The adapter therefore waits on its own response-in-flight state — the same state §6.2.4 step 5's cancel guard reads — before sending, and sends anyway after a bounded wait rather than dropping the turn.
+
+⚠️ **Waiting, not cancelling, and the distinction is semantic, not stylistic.** The in-flight response here *is* the one that asked for the tool, so `response.cancel` would discard the call being answered. The opposite holds in §6.2.4: there the user is interrupting a reply they no longer want, and cancelling is right. One piece of state, two situations, two answers — and the reason AVID-284's acceptance criteria demanded the choice be made deliberately rather than raced.
+
 **Async function calling is native to `gpt-realtime`.** Long-running calls no longer block the conversation — the model emits tuned placeholders ("still looking that up") rather than dead air. This is why `recall` can afford to do real work (§7.7's ~50 ms budget has headroom) without the user hearing a stall.
 
 ## 6.7 Memory injection strategy

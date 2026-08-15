@@ -80,6 +80,7 @@ import contextlib
 import logging
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -368,6 +369,23 @@ def _diverged(turn: _Turn) -> bool:
     return turn.played_ms - turn.elapsed_ms > allowed
 
 
+class _ProtocolErrorCollector(logging.Handler):
+    """Count ERROR records from the realtime adapter so the harness can report them (#284 AC-4).
+
+    An ``invalid_request_error`` is the API saying *we* sent something malformed. #284 fired twice
+    in a 17-turn run and was found only because someone read the journal afterwards — every number
+    the harness printed was silent about it. A protocol error is not a latency result and does not
+    gate O1, but a gate summary that cannot mention it is a summary that grades one quantity while
+    a different one is broken underneath (CLAUDE.md §7.1)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
 def _report_conversation(
     turns_seen: list[_Turn],
     *,
@@ -382,6 +400,7 @@ def _report_conversation(
     server_vad_ms: float = 0.0,
     barge_ins: int = 0,
     recovery: _Recovery | None = None,
+    protocol_errors: Sequence[str] = (),
 ) -> int:
     """Print the per-turn table, the O1 histogram and the O7 projection; return the exit code.
 
@@ -500,11 +519,31 @@ def _report_conversation(
     # means the local VAD never cut the speaker -- which IS the AC-3 failure, read by a human.
     print(f"AC-3 barge-ins observed (playback truncated by local VAD): {barge_ins}")
 
+    # Reported unconditionally, including the zero (#284 AC-4). "No line printed" and "no errors
+    # occurred" have to be distinguishable, or the absence of a warning becomes evidence of nothing.
+    print(
+        f"realtime protocol errors (our request rejected as invalid): {len(protocol_errors)}"
+    )
+    for message in protocol_errors:
+        print(f"  {message}")
+
     # Every criterion reports before any verdict is decided (AVID-182). Returning on the first
     # failure meant a run that demonstrably passed AC-6 printed no recovery numbers at all,
     # because an unrelated O1 pairing check aborted first. A gate that hides a PASSING criterion
     # behind an unrelated failure is the sibling of one that can pass on silence.
     failures: list[str] = []
+
+    # A protocol error fails the run (#284 AC-4). It is tempting to keep this advisory — it breaks
+    # no latency number — but the rejected event was a turn the user waited on, and from their
+    # chair a rejection that "continues the session" is indistinguishable from being ignored. The
+    # error type is specifically the API telling us OUR request was malformed, so there is no
+    # vendor-flakiness reading of it to be generous about.
+    if protocol_errors:
+        print(
+            f"FAIL: {len(protocol_errors)} realtime request(s) rejected as invalid — "
+            f"a turn may have gone nowhere"
+        )
+        failures.append("realtime-protocol")
 
     # Playback integrity first: it is the one that can invalidate every number above it.
     silent = [i for i, turn in enumerate(turns_seen, start=1) if turn.played_ms == 0]
@@ -646,6 +685,11 @@ async def _run_conversation(
     require_recovery: bool,
 ) -> int:
     """Drive a live conversation, print the O1/O7 report, return 0 iff every gate passes."""
+    # Attached for the whole run, detached in the `finally` below, so a rejected client event is
+    # counted whenever it happens rather than only while some narrower scope is open (#284 AC-4).
+    protocol_errors = _ProtocolErrorCollector()
+    logging.getLogger("avid.adapters.realtime").addHandler(protocol_errors)
+
     bus = AsyncioEventBus(clock=clock)
     # Boot has reached IDLE before services start (the lifecycle drives BOOTING→IDLE), so the
     # first speech_started is a legal transition — exactly as the running robot does.
@@ -745,6 +789,7 @@ async def _run_conversation(
             await audio.stop()
             if memory_stop is not None:
                 await memory_stop()
+            logging.getLogger("avid.adapters.realtime").removeHandler(protocol_errors)
 
     return _report_conversation(
         collector.turns,
@@ -759,6 +804,7 @@ async def _run_conversation(
         live=live,
         barge_ins=collector.barge_ins,
         recovery=collector.recovery if require_recovery else None,
+        protocol_errors=protocol_errors.messages,
     )
 
 
