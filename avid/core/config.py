@@ -55,6 +55,11 @@ class AdaptersConfig(_Section):
     # (the Pi-only ``pi`` extra, imported lazily inside the adapter); ``fake`` is the
     # scripted-timeline simulator and the laptop default.
     vad: Literal["silero", "fake"] = "fake"
+    # The person detector (#220/#221, ADR-013). ``yunet`` runs the YuNet ONNX model via
+    # onnxruntime (the Pi-only ``pi`` extra, imported lazily inside the adapter); ``fake``
+    # reads ``FakeCamera``'s scripted presence flag out of the frame bytes and is the laptop
+    # default. It is presence, never identity — no face is ever recognised or stored (§13).
+    face_detector: Literal["yunet", "fake"] = "fake"
     # The embedding model (#118). This is the fake-vs-real toggle — ``fake`` is the stdlib,
     # dependency-free laptop default; ``local_minilm`` is the ONNX all-MiniLM-L6-v2 adapter
     # (a later issue). It is a *different* axis from ``[memory] embedder`` (``local_minilm`` |

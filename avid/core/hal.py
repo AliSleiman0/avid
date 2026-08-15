@@ -97,6 +97,28 @@ class Frame:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Detection:
+    """One face, seen once (SDS §3.9.1, ADR-013).
+
+    What :meth:`~avid.core.ports.FaceDetector.detect` returns, per face, for the
+    frame it was handed. Two fields and no more: everything a detection library
+    additionally offers — landmarks, keypoints, tracking ids, identity embeddings
+    — stays on the adapter's side of the port, because the application does not
+    need it and a port shaped by the model's output would be the inversion
+    (§3.9.1) running backwards.
+
+    ``confidence`` is this **frame's** score for this face, in ``[0, 1]``. It is
+    not a decision and carries no notion of presence: whether a person *is here*
+    is a judgement over time, made by the pure filter in
+    :mod:`avid.domain.vision`, and comparing this number against a threshold is
+    that filter's business rather than the detector's.
+    """
+
+    confidence: float
+    box: BBox
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DisplayFrame:
     """A rendered face, ready to push to a screen (SDS §3.9.1).
 
@@ -149,6 +171,7 @@ __all__ = [
     "Axis",
     "BBox",
     "CameraCaps",
+    "Detection",
     "DisplayFrame",
     "Frame",
     "frames_duration_ms",

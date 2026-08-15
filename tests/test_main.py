@@ -23,6 +23,7 @@ from avid.adapters import (
     FakeDisplay,
     FakeEmbedder,
     FakeEpisodeStore,
+    FakeFaceDetector,
     FakeFactRepository,
     FakeMicrophone,
     FakeServiceNotifier,
@@ -60,6 +61,7 @@ from avid.main import (
     _build_display,
     _build_embedder,
     _build_episode_store,
+    _build_face_detector,
     _build_fact_repository,
     _build_microphone,
     _build_notifier,
@@ -142,6 +144,13 @@ def test_build_vad_selects_fake() -> None:
     # model and is proven by the on-hardware M4 gate (AVID-77 / #91).
     config = load_config(_SIM_TOML)
     assert isinstance(_build_vad(config), FakeVoiceActivityDetector)
+
+
+def test_build_face_detector_selects_fake() -> None:
+    # sim.toml (and pi.toml) set face_detector = "fake"; the yunet branch needs the Pi's
+    # onnxruntime and a provisioned model blob, and is proven by the M8 gate (#221 / #226).
+    config = load_config(_SIM_TOML)
+    assert isinstance(_build_face_detector(config), FakeFaceDetector)
 
 
 def test_build_embedder_selects_fake_at_the_configured_dimension() -> None:
@@ -330,6 +339,7 @@ def test_main_wires_and_delegates_to_lifecycle(
         "servo": True,
         "microphone": True,
         "speaker": True,
+        "face_detector": True,
         "embedder": True,
         "fact_store": True,
         "episode_store": True,
