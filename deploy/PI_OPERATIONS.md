@@ -226,19 +226,36 @@ protobuf parse failure. Use `media.githubusercontent.com/media/...`. The fetch s
 size before digest so this reports as *"expected 229738 bytes, got 131"* rather than a hash
 mismatch that says nothing about the cause.
 
-**Measured costs on this rig** (Pi 5, ov5647 at 640×480, one intra-op thread, 200 ms period):
+⚠️ **`detector_scale = 2` was shipped and is BLIND — do not restore it (#277).** Against a person
+sitting at the desk, well framed at 93×116 px in ordinary office light, scale 2 detected them in
+**0 of ~75 frames across three runs**, never clearing even the adapter's own 0.3 floor. Scale 1 on
+the identical frames: 84% of frames at or above the 0.6 threshold, 0.65 mean / 0.80 peak. This is
+not a degradation to tune around; at scale 2 the robot cannot see anyone at all.
 
-| | |
-|---|---|
-| `Picamera2Camera.capture()` | **81.9 ms** — the *dominant* term, larger than inference |
-| `detect()` at `detector_scale = 2` (320×256) | **47.8 ms** |
-| combined, serialised on the one thread | **125.9 ms median / 140.6 ms max — 63% of the period** |
-| `detect()` at full 640×480 | 163 ms — 82% *before* capture, so scale 1 is not viable here |
+The cause is the **absolute** face size reaching the model, not the decimation method — a 2×2 box
+filter scored 0.054 against subsampling's 0.053 on the same frames, so #221's optimisation is
+exonerated. The old "quality is flat down to a 120 px face" claim was in *model-input* pixels,
+i.e. ~240 px at full res, ~2.5× closer than anyone sits.
 
-Capture being the bigger half was the surprise. `Picamera2Camera` uses
-`create_still_configuration`, which is optimised for one-shot quality rather than repeated
-grabs; a video configuration is the obvious lead if the budget ever needs more room, and it is
-M2's adapter rather than M8's.
+**Measured costs on this rig** (Pi 5, ov5647 at 640×480, one intra-op thread), re-measured 2026-08-15:
+
+| | `detector_scale = 1` (**ships**) | `detector_scale = 2` (blind) |
+|---|---|---|
+| `Picamera2Camera.capture()` | 26.8 ms | 49.4 ms |
+| `detect()` | 157.3 ms | 42.6 ms |
+| combined, serialised on the one thread | **184 ms median / 247 ms max** | 92 ms median |
+| detects a seated person | **84% of frames** | **0%** |
+
+247 ms does not fit a 200 ms period, which is why **`[vision] fps` is 3, not 5** (333 ms period,
+74% at worst case; 4 fps peaks at 99% and leaves no headroom). §2.7.1 budgets "≤1 core at ≤5 fps",
+so sampling slower stays inside it.
+
+⚠️ The earlier **81.9 ms** capture figure — quoted here for weeks as "the dominant term, larger
+than inference" — did not reproduce: capture measured 26.8 ms at scale 1 and 49.4 ms at scale 2.
+It was taken at 5 fps under a different duty cycle. Re-confirm it before building an argument on
+it. `Picamera2Camera` does use `create_still_configuration`, which is optimised for one-shot
+quality rather than repeated grabs, so a video configuration remains the obvious lead if the
+budget ever needs more room — that is M2's adapter, not M8's.
 
 ⚠️ **The first frame takes ~1.3 s** — the one-time ONNX session build. Every subsequent frame
 measured 202–203 ms against a 200 ms period. Do not read that spike as a stall; it is the same

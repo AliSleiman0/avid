@@ -638,19 +638,25 @@ Consequences, accepted:
 | Size | ~230 KB — small enough to be an afterthought, large enough that it is **not committed** (§14.4's rule; `tools/fetch_face_model.py` provisions it to `/var/lib/robot/models/`) |
 | Input | `[1, 3, height, width]` NCHW float32, 0–255, **no mean subtraction and no scaling**, channel order **BGR**. Both dimensions must be multiples of 32 |
 | Output | 12 tensors — `cls_`/`obj_`/`bbox_`/`kps_` at strides 8, 16 and 32, each `[1, anchors, C]`. We consume the first three and discard keypoints |
-| Measured cost | **47.8 ms** end-to-end per frame at 320×256, one intra-op thread, on the Pi (#221) |
+| Measured cost | **157.3 ms** end-to-end per frame at 640×480, one intra-op thread, on the Pi (#221, revised by #277 — 320×256 costs 42.6 ms but detects nobody) |
 
 **⚠️ The `2026may` export specifically, and the distinction is not cosmetic.** The `2023mar` files sitting beside it in the same directory — including the int8 variants — are statically shaped `[1, 3, 640, 640]` and **reject any other geometry outright** (measured: `INVALID_ARGUMENT` on 640×480, 320×320 and 256×320 alike). Only `2026may` declares dynamic spatial axes. An earlier draft of this ADR pinned `2023mar` and argued that 640×480 needs no resize because it is already stride-aligned; that was true of the geometry and false of the artifact, and #221 found it by loading the file rather than by reading about it.
 
 Against §2.7.1's budget — *"Vision must not exceed 1 core; run detection at ≤5 fps, not 30"* — the 5 fps period is 200 ms, and the measured numbers are:
 
-| input | inference | end-to-end `detect()` | share of the period |
-|---|---|---|---|
-| 640×480 (native) | 152.1 ms | 163.0 ms | 82% |
-| 320×256 (**shipped**, `[vision] detector_scale = 2`) | 30.2 ms | 47.8 ms | 24% |
-| 224×160 | 13.7 ms | 18.9 ms | 9% |
+| input | inference | end-to-end `detect()` | share of a 200 ms period | detects a seated person |
+|---|---|---|---|---|
+| 640×480 (native, **shipped**, `detector_scale = 1`) | 152.1 ms | 157.3 ms | 79% | **84% of frames ≥ 0.6** |
+| 320×256 (`detector_scale = 2`) | 30.2 ms | 42.6 ms | 21% | **0% — never** |
+| 224×160 | 13.7 ms | 18.9 ms | 9% | not retested |
 
-**Capture is the larger term, and that is the finding that decides the resolution.** `Picamera2Camera.capture()` measures **81.9 ms** on this rig, on the same dedicated thread (§3.8.2), so the loop's real per-frame cost is **125.9 ms median / 140.6 ms max — 63% of the period.** At full resolution it would be 245 ms and the loop could not hold 5 fps at all. Detection quality is flat across the three rows at desk distance (peak confidence 0.93 for a 120 px face in every case); what a smaller input costs is *small, distant* faces, which is the far side of the room rather than the person at the desk.
+⚠️ **The final column was added by #277, and it reverses this ADR's original conclusion.** `detector_scale = 2` shipped on the strength of the cost columns alone. Measured against a person actually sitting at the desk — well framed at 93×116 px, ordinary office light — it detected them in **0 of ~75 frames across three runs**, never once clearing even the adapter's own 0.3 floor, while `scale = 1` on the identical frames scored 0.65 mean / 0.80 peak. The earlier claim that *"detection quality is flat across the three rows at desk distance (peak confidence 0.93 for a 120 px face)"* was quoted in **model-input** pixels: 120 px at the model input is ~240 px at full resolution, roughly 2.5× closer than anyone sits. It was prose in a table, never an assertion, which is why it survived being wrong for a milestone.
+
+**The decimation method was not the cause, and #221's finding on it stands.** Re-tested on live frames through identical downstream code, a 2×2 box filter scored **0.054** against subsampling's **0.053** — indistinguishable, exactly as measured. What fails at half resolution is the *absolute* face size reaching the model, not the detail lost in decimating.
+
+**Capture is no longer the larger term.** Re-measured at `scale = 1`: capture **26.8 ms**, detect **157.3 ms**, combined **184 ms median / 247 ms max**. (The 81.9 ms capture figure was taken at 5 fps under a different duty cycle; it should be re-confirmed rather than carried forward.) 247 ms does not fit a 200 ms period, so **`[vision] fps` drops to 3** — a 333 ms period the worst case fills to 74%. §2.7.1 budgets "≤1 core at **≤5 fps**", so sampling slower stays inside the budget; what it costs is reaction time, which `gain_window_s` absorbs (1.2 s, still 3–4 frames).
+
+**The lesson this ADR now carries.** Every automated M8 criterion — CPU, fps, thermals, event counts — is satisfiable by a robot that detects nobody, and the resource run behind them was recorded in an empty room. A cost table with no accuracy column is a measurement of the wrong thing, and `tests/core/test_vision_config_is_usable.py` now asserts the relationship rather than describing it.
 
 **Threads: one.** Measured at 320×256: 1 thread → 30.2 ms at 1.00 core; 2 threads → 25.0 ms at 1.70 cores. Seventeen percent of latency for seventy percent more CPU is a bad trade against a one-core budget with 85% of the period idle. `SileroVad` also uses 1 and `LocalMiniLmEmbedder` uses 2 — the rule is that each adapter measures its own number, never that the numbers differ.
 
@@ -660,7 +666,7 @@ Against §2.7.1's budget — *"Vision must not exceed 1 core; run detection at �
 
 Two of the three cost more than they looked:
 
-- **The downscale is plain subsampling, not a box filter.** The obvious implementation — a 2×2 box mean, three lines of numpy — costs **49.6 ms on the Pi, more than the inference it feeds**, against **1.3 ms** for subsampling. Scored across five face sizes from 200 px down to 30 px the detector could not tell them apart (peak confidence within ±0.005, above-threshold anchor counts inside run-to-run noise): faces are low-frequency structure, so the aliasing a box filter suppresses is not aliasing this model was reading. Dropping it took `detect()` from 95.1 ms to 47.8 ms.
+- **The downscale is plain subsampling, not a box filter.** The obvious implementation — a 2×2 box mean, three lines of numpy — costs **49.6 ms on the Pi, more than the inference it feeds**, against **1.3 ms** for subsampling. Scored across five face sizes the detector could not tell them apart (peak confidence within ±0.005): faces are low-frequency structure, so the aliasing a box filter suppresses is not aliasing this model was reading. **Independently re-confirmed by #277** on live frames with a person present — box filter 0.054 vs subsampling 0.053 — which is what cleared decimation as the cause of that defect. At `detector_scale = 1` the step is a no-op anyway; it applies whenever a future rig negotiates a larger capture geometry.
 - **The channel swap is the highest-risk line in the milestone.** YuNet trains through OpenCV's `blobFromImage` on BGR with `scalefactor=1.0`, so the swap *is* the normalisation. Fed the identical image with the channels reversed the model returns **8 detections against 57**, at entirely plausible confidences — it does not fail, it quietly loses most of its eyesight. That is exactly the failure mode this milestone fears most, where the detector sees almost nothing and every downstream test still passes, so the order is pinned by an assertion on the tensor rather than by a comment.
 
 **Rejected alternatives.** A rejection nobody wrote down gets re-proposed in month eight:
