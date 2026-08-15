@@ -240,12 +240,23 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M5** ✅ | **It talks** | 5 | Full UC-01. Two-minute conversation. Barge-in works. Latency histogram meets O1. Cost meter shows projected monthly spend meeting O7. Survives a Wi-Fi unplug and recovers. | **13** | **L** | 50 |
 | **M6** | **It has a personality** | 6 | Same question asked in two personality configs yields recognizably different responses. Affect inferred from response drives the face without `ai` importing `display`. | **5** | M | 55 |
 | **M7** | **It remembers** | 7 | Full UC-02 + UC-05. Tell it 20 facts, restart the process, recall all 20. Semantic query returns the right fact. Contradictory fact supersedes correctly. "Forget that" deletes. | **13** | **L** | 68 |
-| **M8** | **It sees** | 8 | Full UC-04. Presence detection with hysteresis, no flapping over a 1-hour desk recording. ≤1 core, ≤5 fps, thermals stable. | **8** | M | 76 |
+| **M8** | **It sees** | 8 | Presence detection with hysteresis, no flapping over a 1-hour desk recording. ≤1 core, ≤5 fps, thermals stable. The robot wakes from SLEEPING when someone sits down.[^m8-uc04] | **8** | M | 76 |
 | **M9** | **It moves** | 9 | Affect drives gesture. Nod, turn, idle micro-motion. No brown-out under stall. Servo relaxes when idle (no buzz). Gesture preemption works. | **5** | M | 81 |
 | **M10** | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
 | **M11** | **It's a product** | 11 | 30-day unattended soak. O5 met. Runbook written. v1.0.0 tagged. | **13** | M | 107 |
 
 ✅ = sealed and tagged. **M5 sealed 2026-08-01 as `v0.M5.0` with two gaps recorded rather than closed**, because a milestone marker that hides what it did not reach is worth nothing: **O1's P95 is not met** (P50 1530 ms passes the provisional ceiling, but 1 turn in 10 exceeds 2700 ms where a P95 allows 1 in 20 — cause is AVID-194, two VADs disagreeing about where an utterance ends, written up in `docs/enhancement-single-turn-authority.md`), and **AC-7's 60-second recorded demo was deferred**. AVID-188 and AVID-189 are also open from the same gate. The tail is the part a person notices, so AVID-194 opens M6's list.
+
+[^m8-uc04]: **This row used to read "Full UC-04", and it over-claimed** (#218, ADR-013). UC-04
+    (SDS §2.5) is *"user sits down; robot notices **and greets**"* — and greeting means speaking
+    first, which is `BehaviorService`, quiet hours and the interruption policy: **all of them
+    M10**. SDS §3.7.5 ("presence detected → greeting") is a table-of-contents entry with no body
+    for exactly that reason. Left unamended this row would either drag a slice of M10 forward or
+    seal M8 against a criterion it knowingly does not meet; neither is acceptable, so the row
+    changed rather than the milestone. M8 delivers the **notices** half, demonstrated by the
+    `SLEEPING → IDLE` wake (SDS §3.10.1) — the two state-table rows that have existed since M0
+    with nothing able to reach them. Settled on the issue before the run, per the M2/M4 lesson
+    that a gate AC written before the design settled can be unsatisfiable.
 
 [^m3-affect-count]: **"7 affects" counts 4 Tier-1 + 3 Tier-2** — IDLE, LISTENING, THINKING,
     SPEAKING, plus HAPPY, SAD, CONFUSED. `Affect` also has an **eighth** member, `SLEEPING`
