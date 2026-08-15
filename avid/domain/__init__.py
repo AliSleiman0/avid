@@ -5,8 +5,8 @@ No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``Event`` envelope (AVID-6), ``RobotState`` + the transition table (AVID-7),
 ``Affect`` (AVID-8), the ``audio.*`` events + pre-roll ring buffer (#86), the
 degraded-mode cue vocabulary ``Cue`` (AVID-80), the ``conversation.*`` events +
-``TokenUsage`` value (#99), and the ``Fact`` value + ``memory.*`` events + §7.7 scoring
-(#116).
+``TokenUsage`` value (#99), the ``Fact`` value + ``memory.*`` events + §7.7 scoring
+(#116), and ``BBox`` + the ``vision.*`` events (#219).
 """
 
 from avid.domain.affect import Affect, AffectChanged, AffectTier
@@ -66,6 +66,12 @@ from avid.domain.state import (
     Trigger,
     next_state,
 )
+from avid.domain.vision import (
+    BBox,
+    VisionFaceDetected,
+    VisionPresenceGained,
+    VisionPresenceLost,
+)
 
 __all__ = [
     # Affect (AVID-8)
@@ -124,4 +130,10 @@ __all__ = [
     "StateTransitioned",
     "Trigger",
     "next_state",
+    # BBox + vision.* events (#219). BBox is re-exported by core/hal.py, which is
+    # the spelling ports and adapters use — see that module's docstring for why.
+    "BBox",
+    "VisionFaceDetected",
+    "VisionPresenceGained",
+    "VisionPresenceLost",
 ]
