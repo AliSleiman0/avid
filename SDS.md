@@ -257,7 +257,7 @@ Out of scope (for v1): companion mobile application, multi-robot coordination, c
 - OpenAI Realtime API documentation
 - Raspberry Pi 5 datasheet and power requirements
 - PCA9685 datasheet (NXP)
-- YuNet face-detection model card (OpenCV Zoo, `face_detection_yunet_2023mar`) — ADR-013
+- YuNet face-detection model card (OpenCV Zoo, `face_detection_yunet_2026may`) — ADR-013
 - *Clean Architecture*, Robert C. Martin — for the dependency rule
 - *Designing Data-Intensive Applications*, Kleppmann — for the memory/consistency reasoning in §7.8
 
@@ -633,17 +633,35 @@ Consequences, accepted:
 
 | | |
 |---|---|
-| Model | **YuNet**, `face_detection_yunet_2023mar.onnx` (OpenCV Zoo, libfacedetection) |
-| Size | ~337 KB — small enough to be an afterthought, large enough that it is **not committed** (§14.4's rule; `tools/fetch_face_model.py` provisions it to `/var/lib/robot/models/`) |
-| Input | `[1, 3, H, W]` NCHW float32, 0–255, **no mean subtraction and no scaling**, channel order BGR |
-| Output | 12 tensors — `cls_`/`obj_`/`bbox_`/`kps_` at strides 8, 16 and 32. We consume the first three and discard keypoints |
-| Expected cost | **≲40 ms per frame** at 640×480 single-threaded on a Cortex-A76 — an *expectation*, not a measurement. #221 replaces this line with the figure it measures on the rig |
+| Model | **YuNet**, `face_detection_yunet_2026may.onnx` (OpenCV Zoo, libfacedetection), pinned at revision `26cc381e` |
+| Licence | MIT (Shiqi Yu et al.) |
+| Size | ~230 KB — small enough to be an afterthought, large enough that it is **not committed** (§14.4's rule; `tools/fetch_face_model.py` provisions it to `/var/lib/robot/models/`) |
+| Input | `[1, 3, height, width]` NCHW float32, 0–255, **no mean subtraction and no scaling**, channel order **BGR**. Both dimensions must be multiples of 32 |
+| Output | 12 tensors — `cls_`/`obj_`/`bbox_`/`kps_` at strides 8, 16 and 32, each `[1, anchors, C]`. We consume the first three and discard keypoints |
+| Measured cost | **47.8 ms** end-to-end per frame at 320×256, one intra-op thread, on the Pi (#221) |
 
-Against §2.7.1's budget — *"Vision must not exceed 1 core; run detection at ≤5 fps, not 30"* — a 5 fps loop has a 200 ms period, so even at double the expected cost the pipeline sits comfortably inside one core with capture on the same thread.
+**⚠️ The `2026may` export specifically, and the distinction is not cosmetic.** The `2023mar` files sitting beside it in the same directory — including the int8 variants — are statically shaped `[1, 3, 640, 640]` and **reject any other geometry outright** (measured: `INVALID_ARGUMENT` on 640×480, 320×320 and 256×320 alike). Only `2026may` declares dynamic spatial axes. An earlier draft of this ADR pinned `2023mar` and argued that 640×480 needs no resize because it is already stride-aligned; that was true of the geometry and false of the artifact, and #221 found it by loading the file rather than by reading about it.
+
+Against §2.7.1's budget — *"Vision must not exceed 1 core; run detection at ≤5 fps, not 30"* — the 5 fps period is 200 ms, and the measured numbers are:
+
+| input | inference | end-to-end `detect()` | share of the period |
+|---|---|---|---|
+| 640×480 (native) | 152.1 ms | 163.0 ms | 82% |
+| 320×256 (**shipped**, `[vision] detector_scale = 2`) | 30.2 ms | 47.8 ms | 24% |
+| 224×160 | 13.7 ms | 18.9 ms | 9% |
+
+**Capture is the larger term, and that is the finding that decides the resolution.** `Picamera2Camera.capture()` measures **81.9 ms** on this rig, on the same dedicated thread (§3.8.2), so the loop's real per-frame cost is **125.9 ms median / 140.6 ms max — 63% of the period.** At full resolution it would be 245 ms and the loop could not hold 5 fps at all. Detection quality is flat across the three rows at desk distance (peak confidence 0.93 for a 120 px face in every case); what a smaller input costs is *small, distant* faces, which is the far side of the room rather than the person at the desk.
+
+**Threads: one.** Measured at 320×256: 1 thread → 30.2 ms at 1.00 core; 2 threads → 25.0 ms at 1.70 cores. Seventeen percent of latency for seventy percent more CPU is a bad trade against a one-core budget with 85% of the period idle. `SileroVad` also uses 1 and `LocalMiniLmEmbedder` uses 2 — the rule is that each adapter measures its own number, never that the numbers differ.
 
 **Why ONNX Runtime.** It adds **no new heavy dependency**: `onnxruntime` is already in the `pi` extra for `SileroVad` (§6.3) and `LocalMiniLmEmbedder` (§7.4, ADR-011). `tools/fetch_minilm.py` is an existing model-fetch pattern to mirror rather than invent — pinned revision, SHA-256 verified, atomic replace. And `SileroVad` already demonstrates the `SessionOptions` treatment the ≤1-core budget demands (§3.8.2), which matters more here than anywhere: the default is one *spin-waiting* thread per core, and this project has paid for that default twice.
 
-**640×480 is not an accident.** YuNet's strides are 8/16/32, so its input dimensions must be divisible by 32 — and the rig's negotiated capture geometry (`[camera] 640×480`, ov5647, contract-proven at M2) already is. **The adapter therefore performs no resize at all.** That removes a whole class of the failure mode this milestone fears most, where the detector silently detects nothing because a resample, a stride or a colour order was wrong and every downstream test still passes.
+**The preprocessing is three steps and every one of them was measured rather than reasoned.** YuNet's strides are 8/16/32, so both input dimensions must be divisible by 32 — and the rig's negotiated capture geometry (`[camera] 640×480`, ov5647, contract-proven at M2) already is, which is why the *decimation factor is an integer* and the inverse coordinate map is a single multiply with no rounding, no interpolation kernel and no half-pixel convention to get wrong. Padding to the stride goes on the right and bottom only, never centred, for the same reason: no offset to forget.
+
+Two of the three cost more than they looked:
+
+- **The downscale is plain subsampling, not a box filter.** The obvious implementation — a 2×2 box mean, three lines of numpy — costs **49.6 ms on the Pi, more than the inference it feeds**, against **1.3 ms** for subsampling. Scored across five face sizes from 200 px down to 30 px the detector could not tell them apart (peak confidence within ±0.005, above-threshold anchor counts inside run-to-run noise): faces are low-frequency structure, so the aliasing a box filter suppresses is not aliasing this model was reading. Dropping it took `detect()` from 95.1 ms to 47.8 ms.
+- **The channel swap is the highest-risk line in the milestone.** YuNet trains through OpenCV's `blobFromImage` on BGR with `scalefactor=1.0`, so the swap *is* the normalisation. Fed the identical image with the channels reversed the model returns **8 detections against 57**, at entirely plausible confidences — it does not fail, it quietly loses most of its eyesight. That is exactly the failure mode this milestone fears most, where the detector sees almost nothing and every downstream test still passes, so the order is pinned by an assertion on the tensor rather than by a comment.
 
 **Rejected alternatives.** A rejection nobody wrote down gets re-proposed in month eight:
 
