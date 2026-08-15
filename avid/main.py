@@ -714,6 +714,7 @@ def _wire_services(
             gain_window_s=config.vision.gain_window_s,
             lose_window_s=config.vision.lose_window_s,
         ),
+        nap_after_s=config.vision.nap_after_s,
         health=adapter_health,
     )
     for service in (

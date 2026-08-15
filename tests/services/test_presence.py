@@ -15,23 +15,27 @@ import random
 from collections.abc import Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
 from avid.adapters.camera import FakeCamera
 from avid.adapters.clock import FakeClock
+from avid.adapters.display import FakeDisplay
 from avid.adapters.face_detector import FakeFaceDetector
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import BBox, Detection, Frame
 from avid.core.state_manager import StateManager
-from avid.domain import Event, RobotState
+from avid.domain import Event, RobotState, StateTransitioned, Trigger
 from avid.domain.vision import (
     PresenceParams,
     VisionFaceDetected,
     VisionPresenceGained,
     VisionPresenceLost,
 )
+from avid.services.expression import ExpressionService
 from avid.services.presence import PresenceService
 
 _FPS = 5
@@ -103,6 +107,7 @@ def _service(
         else ThreadPoolExecutor(max_workers=1),
         fps=_FPS,
         params=params,
+        nap_after_s=600.0,
         health=health,
     )
 
@@ -438,18 +443,314 @@ async def test_a_frame_that_overruns_its_period_says_so_rather_than_absorbing_it
 
 
 @contextmanager
+def _state_warnings() -> Iterator[list[str]]:
+    """Capture ``avid.state``'s WARNING lines — where illegal transitions are recorded."""
+    with _warnings_from("avid.state") as records:
+        yield records
+
+
+@contextmanager
 def _presence_warnings() -> Iterator[list[str]]:
     """Capture ``avid.services.presence``'s WARNING lines as plain strings."""
+    with _warnings_from("avid.services.presence") as records:
+        yield records
+
+
+@contextmanager
+def _warnings_from(logger_name: str) -> Iterator[list[str]]:
+    """Collect *logger_name*'s WARNING-and-above messages, formatted."""
     records: list[str] = []
 
     class _Handler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             records.append(record.getMessage())
 
-    logger = logging.getLogger("avid.services.presence")
+    logger = logging.getLogger(logger_name)
     handler = _Handler(level=logging.WARNING)
     logger.addHandler(handler)
     try:
         yield records
     finally:
         logger.removeHandler(handler)
+
+
+# --- #224: the two rows that were unreachable since M0 ------------------------
+
+
+def _wired(
+    detector: Any,
+    *,
+    bus: AsyncioEventBus,
+    clock: FakeClock,
+    initial: RobotState = RobotState.IDLE,
+    nap_after_s: float = 600.0,
+) -> tuple[PresenceService, StateManager]:
+    state = StateManager(bus=bus, clock=clock, initial=initial)
+    service = PresenceService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        camera=FakeCamera(width=_W, height=_H, fps=_FPS),
+        detector=detector,
+        executor=ThreadPoolExecutor(max_workers=1),
+        fps=_FPS,
+        params=_PARAMS,
+        nap_after_s=nap_after_s,
+        health=None,
+    )
+    return service, state
+
+
+async def test_presence_wakes_the_robot_from_sleeping() -> None:
+    """AC-1, and the demonstrable half of UC-04 that M8 owns: someone sits down in front of a
+    sleeping robot and it notices. The row ``(SLEEPING, VISION_PRESENCE_GAINED) -> IDLE`` has
+    existed since M0 with nothing able to reach it; this is the first thing that reaches it."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    service, state = _wired(
+        _ScriptedDetector([(True, 0.9)] * 20),
+        bus=bus,
+        clock=clock,
+        initial=RobotState.SLEEPING,
+    )
+    async with bus:
+        await _drive(service, clock, frames=20)
+
+    assert state.state is RobotState.IDLE
+
+
+async def test_sustained_absence_naps_the_robot_after_the_configured_interval() -> None:
+    """AC-2/AC-3. The timer is armed by the ``presence_lost`` **edge**, not polled, and it
+    sleeps on the injected clock — so ten minutes is a millisecond here and no test waits."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    script = [(True, 0.9)] * 20 + [(False, 0.0)] * 40
+    service, state = _wired(
+        _ScriptedDetector(script), bus=bus, clock=clock, nap_after_s=600.0
+    )
+    async with bus:
+        await service.start()
+        for _ in range(len(script)):
+            await clock.advance(_PERIOD)
+        await _settle()
+        assert state.state is RobotState.IDLE  # lost fired; the nap has not come due
+        await clock.advance(600.0)
+        await _settle()
+        assert state.state is RobotState.SLEEPING
+        await service.stop()
+
+
+async def test_coming_back_inside_the_window_cancels_the_nap() -> None:
+    """AC-2's other half, and #226 AC-6 in miniature: *leave and come back inside 10 minutes
+    and confirm the robot did not nap*. A ``presence_gained`` must **cancel** the pending
+    timer, not merely be ignored when it fires — and the service cancels *before* it publishes,
+    so the case cannot race."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    script = [(True, 0.9)] * 10 + [(False, 0.0)] * 40 + [(True, 0.9)] * 10
+    service, state = _wired(
+        _ScriptedDetector(script), bus=bus, clock=clock, nap_after_s=600.0
+    )
+    async with bus:
+        await service.start()
+        for _ in range(len(script)):
+            await clock.advance(_PERIOD)
+        await _settle()
+        # Well past the nap interval — if the timer had merely been left to fire and be
+        # ignored, this is where the robot would have fallen asleep on a person sitting there.
+        await clock.advance(3600.0)
+        await _settle()
+        assert state.state is RobotState.IDLE
+        await service.stop()
+
+
+async def test_only_one_nap_task_exists_at_a_time() -> None:
+    """Belt and braces on an invariant the filter already provides — its edge idempotence makes
+    ``lost`` then ``lost`` inexpressible without an intervening ``gained``, which cancels.
+    Asserted anyway because a leaked timer would fire much later, in an unrelated state, and
+    look like a ghost."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    script = ([(True, 0.9)] * 10 + [(False, 0.0)] * 40) * 3
+    service, _state = _wired(_ScriptedDetector(script), bus=bus, clock=clock)
+    async with bus:
+        await service.start()
+        for _ in range(len(script)):
+            await clock.advance(_PERIOD)
+            live = [
+                task
+                for task in asyncio.all_tasks()
+                if task.get_name() == "PresenceService.nap" and not task.done()
+            ]
+            assert len(live) <= 1
+        await service.stop()
+
+
+async def test_a_nap_due_mid_conversation_re_arms_instead_of_being_lost() -> None:
+    """The ``THINK_TIMEOUT``-shaped bug this issue exists to not repeat.
+
+    Someone leaves at 14:02, a noise opens a session at 14:05, and the nap comes due at 14:12
+    in THINKING — where ``PRESENCE_LOST_TIMEOUT`` has no row. ``StateManager`` logs and ignores
+    it, correctly. Without a re-arm **nothing would ever try again**, and the robot would stay
+    awake indefinitely in an empty room: the row would exist, nothing could reach it, and the
+    bench would pay for the difference exactly as it did for AVID-171's 54 seconds in THINKING.
+
+    The re-arm waits the full interval again rather than retrying at once, because a
+    conversation is itself evidence someone was there. This is a retry of **one transition**,
+    not a poll of "is anyone here" — presence stays edge-driven throughout.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    script = [(True, 0.9)] * 10 + [(False, 0.0)] * 40
+    service, state = _wired(
+        _ScriptedDetector(script), bus=bus, clock=clock, nap_after_s=600.0
+    )
+    async with bus:
+        await service.start()
+        for _ in range(len(script)):
+            await clock.advance(_PERIOD)
+        await _settle()
+
+        # A conversation is in flight when the nap comes due.
+        await state.transition(Trigger.AUDIO_SPEECH_STARTED, correlation_id=uuid4())
+        await state.transition(Trigger.AUDIO_SPEECH_ENDED, correlation_id=uuid4())
+        assert state.state is RobotState.THINKING
+        await clock.advance(600.0)
+        await _settle()
+        assert state.state is RobotState.THINKING  # ignored, as the table says
+
+        # The conversation ends, and the NEXT interval naps the robot. Without the re-arm the
+        # timer would be gone for good and the robot would never sleep again this run.
+        await state.transition(Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=uuid4())
+        assert state.state is RobotState.IDLE
+        await clock.advance(600.0)
+        await _settle()
+        assert state.state is RobotState.SLEEPING
+        await service.stop()
+
+
+async def test_a_pending_nap_is_abandoned_on_shutdown_never_fired() -> None:
+    """A shutdown is not a nap. Driving ``IDLE -> SLEEPING`` mid-teardown would publish
+    ``state.transitioned`` into a closing bus, and would tell an operator the robot went to
+    sleep when in fact it was stopped."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    script = [(True, 0.9)] * 10 + [(False, 0.0)] * 40
+    service, state = _wired(
+        _ScriptedDetector(script), bus=bus, clock=clock, nap_after_s=600.0
+    )
+    async with bus:
+        await service.start()
+        for _ in range(len(script)):
+            await clock.advance(_PERIOD)
+        await _settle()
+        await service.stop()
+        await clock.advance(3600.0)
+        await _settle()
+
+    assert state.state is RobotState.IDLE
+
+
+@pytest.mark.parametrize(
+    "start_state", [s for s in RobotState if s is not RobotState.SLEEPING]
+)
+async def test_presence_in_a_state_with_no_row_is_a_logged_no_op(
+    start_state: RobotState,
+) -> None:
+    """AC-4/AC-5: **the whole row set, checked rather than assumed.**
+
+    ``VISION_PRESENCE_GAINED`` has exactly one row. Someone walking past mid-conversation must
+    not crash and must not move the machine — and it must not *publish* either, because six
+    self-loop rows would have sent a spurious ``state.transitioned`` to every subscriber for a
+    fact that changed nothing. The service calls ``transition()`` unconditionally and lets the
+    table decide; the alternative — an ``if state is SLEEPING`` guard in the service — would be
+    a second copy of the table, which is the papering-over AC-5 forbids.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    recorder = _Recorder()
+    bus.subscribe(StateTransitioned, recorder.handle, name="test.transitioned")
+    service, state = _wired(
+        _ScriptedDetector([(True, 0.9)] * 20), bus=bus, clock=clock, initial=start_state
+    )
+    with _state_warnings() as logged:
+        async with bus:
+            await _drive(service, clock, frames=20)
+
+    assert state.state is start_state
+    assert recorder.events == []
+    # AC-4 says the attempt is **logged** and ignored, so the log is asserted rather than the
+    # silence — and asserting it is also what pins the design. A service that guarded on
+    # ``state is SLEEPING`` itself would be behaviourally identical (same state, same empty
+    # bus) and would simply never attempt the transition, so nothing else here could tell the
+    # two apart. That guard is the second copy of the table AC-5 forbids; this is the
+    # assertion that notices if someone adds one.
+    assert any("ignored illegal transition" in message for message in logged)
+    assert any("VISION_PRESENCE_GAINED" in message for message in logged)
+
+
+async def test_the_whole_wake_path_from_a_camera_flag_to_a_face_on_glass(
+    tmp_path: Path,
+) -> None:
+    """AC-7: the demonstrable half of UC-04, end to end, with no hardware.
+
+    A scripted ``FakeCamera`` and ``FakeFaceDetector`` -> ``PresenceService`` ->
+    ``vision.presence_gained`` -> ``StateTransitioned(SLEEPING -> IDLE)`` -> the face changes.
+    Every hop is the real component: the real bus, the real state manager, the real
+    ``ExpressionService``, the real filter. Only the two devices are fakes, and they are the
+    fakes that *are* the simulator (§3.9.2) — which is the whole reason this milestone's
+    headline behaviour can be proven in CI on a laptop.
+
+    ⚠️ The affect ``SLEEPING`` and the operational state ``SLEEPING`` are different things and
+    an import-linter contract keeps them uncoupled (§3.10.1). This test asserts the *state*
+    moved and that a frame was rendered as a consequence; it does not assert which face,
+    because ``ExpressionService`` renders the Tier-1 baseline from the transition and that
+    mapping is M3's, not this issue's.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    display = FakeDisplay(out_dir=tmp_path, resolution=(64, 48))
+    expression = ExpressionService(bus=bus, display=display, clock=clock)
+    for sub in expression.subscriptions():
+        bus.subscribe(
+            sub.event_type,
+            sub.handler,
+            name=sub.name,
+            policy=sub.policy,
+            maxsize=sub.maxsize,
+        )
+
+    # The camera drives presence, exactly as a behaviour test is meant to: flip the flag, the
+    # frame bytes change, and the detector reads them. Nothing here scripts the detector.
+    camera = FakeCamera(width=_W, height=_H, fps=_FPS)
+    camera.person_present = True
+    state = StateManager(bus=bus, clock=clock, initial=RobotState.SLEEPING)
+    service = PresenceService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        camera=camera,
+        detector=FakeFaceDetector(),
+        executor=ThreadPoolExecutor(max_workers=1),
+        fps=_FPS,
+        params=_PARAMS,
+        nap_after_s=600.0,
+    )
+
+    recorder = _Recorder()
+    bus.subscribe(VisionPresenceGained, recorder.handle, name="test.gained")
+    bus.subscribe(StateTransitioned, recorder.handle, name="test.transitioned")
+
+    async with bus:
+        await _drive(service, clock, frames=20)
+
+    kinds = [type(e).__name__ for e in recorder.events]
+    assert "VisionPresenceGained" in kinds
+    transitions = [e for e in recorder.events if isinstance(e, StateTransitioned)]
+    assert len(transitions) == 1
+    assert transitions[0].from_ is RobotState.SLEEPING
+    assert transitions[0].to is RobotState.IDLE
+    assert transitions[0].trigger is Trigger.VISION_PRESENCE_GAINED
+    # ...and the face followed, because ExpressionService heard the transition. It never heard
+    # of vision, presence or a camera — that is the fan-out the bus exists for (§3.5.1).
+    assert display.frames_rendered >= 1
