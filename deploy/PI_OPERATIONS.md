@@ -270,6 +270,18 @@ fed the identical image with channels reversed, YuNet returns **8 detections aga
 entirely plausible confidences. It does not fail — it quietly loses most of the robot's eyesight,
 which is the failure mode this whole milestone is written around.
 
+⚠️ **A working person is not a posing person, and the filter windows must be set for the former
+(#279).** Measured over the first real desk hour: at `confidence_threshold = 0.6` only **32.6%**
+of frames qualify while someone is sitting there, and the longest stretch with *no* qualifying
+frame is **116 s** — looking down at the keyboard, turning to a second monitor, going to profile.
+Against `lose_window_s = 20` that produced three "you have left" decisions in 17 minutes for a
+person who never moved. Now `0.35 / 75 s`: 78.1% of frames qualify, worst gap 46.1 s.
+
+The empty-room rate barely changes across thresholds (0.00% at 0.6, 0.07% at 0.35, 0.13% at 0.3)
+— detection separates occupied from empty by roughly **600:1 everywhere**, so a high threshold
+costs true positives and buys almost no false-positive protection. If you ever re-tune these,
+measure the *gap distribution while present*, not the hit rate.
+
 **Before recording a trace or running the gate**, reprovision `/etc/robot/config.toml` — the
 `[vision]` block and `[adapters] face_detector` are new, and a key missing from the machine's
 copy falls back to a schema default **silently** (§3). Both `tools/record_vision_trace.py` and
