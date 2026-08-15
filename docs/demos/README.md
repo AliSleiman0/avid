@@ -265,3 +265,48 @@ calibrated, the room's floor rose ~20 dB (−40 dBFS to −18 dBFS; a bare mic r
 dBFS RMS with nobody speaking) and the robot stopped detecting speech entirely — no session, no
 reply, no error. Nothing was wrong with the code. **Record the floor alongside the margin**, and
 suspect the room before the robot when it goes quiet.
+
+---
+
+## M8 — It sees
+
+**Not sealed.** The harness and every laptop-provable criterion are done; four criteria need a
+person in the room and are recorded as such rather than scored from an empty one. That distinction
+is the whole reason this section exists — a milestone marked done in the one file whose job is
+proving milestones are done is exactly what M3's gate caught.
+
+```sh
+# On the Pi. Stop the service first (PI_OPERATIONS §1) and REPROVISION /etc/robot/config.toml —
+# [vision] and [adapters] face_detector are new, and a missing key falls back to a schema
+# default silently.
+sudo systemctl stop robot
+sudo python tools/fetch_face_model.py
+/opt/avid/.venv/bin/python docs/demos/vision_pi.py --config /etc/robot/config.toml \
+    --minutes 20 --json docs/demos/m8_evidence/gate.json
+```
+
+| AC | | |
+|---|---|---|
+| AC-1 | ✅ | **0.25 cores** sustained against a ≤1 budget — busiest thread 0.212, everything else ≤0.009 |
+| AC-2 | ✅ | **4.98 fps** against a configured 5; 1499 frames, 0 failures |
+| AC-3 | ✅ | 42.3 → 45.7 °C, peak 47.7, `throttled=0x0` |
+| AC-4 | ···· | 0 events over 5 min — correct for an empty room, and therefore not evidence about flapping |
+| AC-5 | ⏸ | the robot wakes when someone sits down — **needs a human** |
+| AC-6 | ⏸ | returning inside the nap window does not nap it — **needs a human** |
+| AC-7 | ⏸ | a conversation with vision live — **needs a human** |
+| AC-8 | ⏸ | a check under different light — **needs a human** |
+
+**The 0.25-core result is the one worth reading twice.** §2.7.1 budgets one core and the project
+has failed that default twice — Silero pegged 3 of 4 and the robot went deaf; the MiniLM embedder
+still pegs 3.92 (#168). The per-thread breakdown is what proves the SessionOptions treatment
+actually took: **one** thread at 0.212 cores and nothing else above 0.009. A spinning ONNX pool
+would have put four threads at ~0.9 each and the process total would have been unmissable.
+
+⚠️ **It was measured on a room the detector never saw a face in, which makes it a floor rather
+than the occupied-room cost** — an empty frame gives NMS and the box decode almost nothing to do.
+The harness detects this and downgrades AC-1 from PASS to *recorded* on its own, so a run against
+an empty room cannot be mistaken for a sealed criterion. Re-measure with someone present.
+
+The four ⏸ criteria are reported as `HUMAN` and the harness **exits non-zero while any of them is
+unrecorded**. A gate that scored "the robot wakes when you sit down" from an empty room would be
+M4's lesson repeating: *a gate that can pass on silence is not a gate.*

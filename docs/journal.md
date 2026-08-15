@@ -37,3 +37,30 @@ architectural and is **not** fixed: two VADs, ours at 900 ms and the server's at
 about where an utterance ends, so the server answers fragments of sentences a person is still
 speaking. That is why the tail is ugly — 1 turn in 10 over 2.7 s — and it is why M5 seals with P95
 unmet and honestly labelled rather than with the budget widened a second time to fit it.
+
+## 2026-08-15 — M8 It sees (built, not sealed)
+
+Vision costs **a quarter of a core** — 0.25 against §2.7.1's budget of one, at 4.98 fps with zero
+dropped frames and no thermal throttling — and the per-thread breakdown is the part that matters:
+one thread at 0.212 cores and nothing else above 0.009, which is what the SessionOptions treatment
+looks like when it took. The project has failed that same ONNX default twice and it cost the robot
+its hearing once, so the cheap result is the interesting one. **Almost every wrong number this
+milestone produced was a number I had reasoned to rather than measured.** ADR-013 shipped pinning
+`face_detection_yunet_2023mar` and arguing that 640×480 needs no resize because it is already
+stride-32 aligned — true of the geometry, false of the artifact: that export is statically shaped
+640×640 and rejects the rig's frames outright, which loading the file said in one second and
+reading about it never would have. The cost estimate in the same table was 4× optimistic (152 ms
+of inference, not ≲40). The preprocessing began as a textbook 2×2 box filter that turned out to
+cost **49.6 ms, more than the inference it feeds**, against 1.3 ms for plain subsampling that the
+detector cannot tell apart across five face sizes — a quarter of the frame budget spent on
+nothing, and invisible. And capture, at 81.9 ms, is the larger half of the loop, which no plan
+predicted. The one that would have hurt is the BGR channel swap: fed backwards, YuNet returns **8
+detections against 57** at entirely plausible confidences, so it does not fail — it quietly loses
+most of the robot's eyesight, which is this milestone's signature failure wearing its own uniform.
+Two dead state rows are alive at last (`SLEEPING → IDLE` on presence, `IDLE → SLEEPING` after ten
+minutes), and writing the driver surfaced the `THINK_TIMEOUT` shape a third time: a nap that comes
+due mid-conversation is legally ignored and, without a re-arm, never tried again — a robot awake
+forever in an empty room. It is **not sealed**, and deliberately: four criteria need a person in
+the room, the harness reports them as `HUMAN` and exits non-zero while they are unrecorded, and it
+downgrades its own ≤1-core PASS to *recorded* when it notices the detector never saw a face. A
+0.25-core measurement of an empty room is a floor, not a result.
