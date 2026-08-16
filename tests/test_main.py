@@ -52,6 +52,7 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    BehaviorTriggerDisabled,
     BehaviorTriggerFired,
     ConversationAssistantResponded,
     ConversationTurnEnded,
@@ -136,6 +137,13 @@ _EXPECTED_SUBSCRIPTIONS = {
     "BehaviorService.fact_stored",
     "BehaviorService.fact_superseded",
     "BehaviorService.fact_deleted",
+    # ObservabilityService (#242): the three §9.1.3 rows whose Observability subscriber existed in
+    # the catalog and nowhere else — state.transitioned's is even tagged (M10). Note what is NOT
+    # here: behavior.proactive_delivered/_suppressed, whose audit trail is the proactive_log table
+    # (§10.6). Two counts of one fact is one count too many.
+    "ObservabilityService.state_transitioned",
+    "ObservabilityService.trigger_fired",
+    "ObservabilityService.trigger_disabled",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -473,6 +481,7 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         MemoryFactSuperseded,
         MemoryFactDeleted,
         BehaviorTriggerFired,
+        BehaviorTriggerDisabled,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]

@@ -75,6 +75,7 @@ modules =
     avid.services.episode_recorder
     avid.services.expression
     avid.services.memory
+    avid.services.observability
     avid.services.presence
 # P5: no module reaches through another — cross-module effect happens via the bus,
 # never an import. `services.cue_bank` is deliberately NOT listed: it is a shared
