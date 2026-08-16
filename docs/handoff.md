@@ -6,13 +6,19 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-16 · `main = bc05261` · tag **`v0.M6.0`** · gh `AliSleiman0`.
+**As of:** 2026-08-16 · `main = ea36558` · tag **`v0.M6.0`** · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**M6 is sealed. 8 of 11 milestones done.** Nothing is in flight, no open PRs. The next milestone
-by value is **M10** (proactivity — the coffee scenario); PMP §5.4 puts it directly behind M6 on the
-critical path. M9 (motion) and M11 (product) are the others outstanding.
+**M6 is sealed. 8 of 11 milestones done.** Nothing is in flight, **no open PRs**, milestone and
+epic #210 closed, board reconciled (the seven M6 items → Done, #157 out of `Blocked`, #310 added as
+`Ready`). The next milestone by value is **M10** (proactivity — the coffee scenario); PMP §5.4 puts
+it directly behind M6 on the critical path. M9 (motion) and M11 (product) are the others
+outstanding.
+
+⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
+`git rev-parse --short origin/main` — three commands, and they are always right. See the
+BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
 
 Before starting new scope, there is a short, well-specified queue of things this milestone
 surfaced and deliberately did not absorb:
@@ -50,9 +56,11 @@ surfaced and deliberately did not absorb:
 
 ## Current state
 
-- `main = bc05261`; **1127 passed / 60 skipped** on 3.11 and 3.13; ruff, `mypy --strict` (56 files)
-  and `lint-imports` (4/4) clean. CI green.
-- **The Pi is ON**, `robot.service` **inactive and disabled**, on `main`. ⚠️ The hostname `AVID`
+- `main = ea36558`, tagged **`v0.M6.0`**; **1127 passed / 60 skipped** on 3.11 and 3.13; ruff,
+  `mypy --strict` (56 files) and `lint-imports` (4/4) clean. CI green. Working tree clean, no
+  unmerged local branches.
+- **The Pi is ON**, `robot.service` **inactive and disabled**, checked out on `main` at `ea36558`
+  with the tag present, and `nft` has no leftover block from `cut_wan.sh`. ⚠️ The hostname `AVID`
   intermittently stops resolving — `192.168.10.172` works.
 - `/etc/robot/config.toml` reconciled with the repo at the gate: `turn_detection = "none"`
   (AVID-194 — it was still `server_vad`, which would have invalidated the whole session), plus the
@@ -76,6 +84,10 @@ turned out to be one ALSA capture switch.
 
 **Four harness defects the gate surfaced**, all of the same family: a report describing something
 other than what ran. See `journal.md`.
+
+**The seal itself** — `v0.M6.0` tagged on `ea36558`, milestone and epic #210 closed, the seven M6
+board items moved to Done, #157 taken out of `Blocked` with the measurement recorded on the issue,
+and #310 added to the board as `Ready`.
 
 ## Standing gotchas (carry forward)
 
@@ -274,6 +286,12 @@ other than what ran. See `journal.md`.
   first-audio pairs against the wrong `speech_ended` — one run produced −740 ms and +6710 ms rows.
   Measure O1 with a strict wait-for-reply protocol and exercise barge-in in a **separate** run.
 
+- ⚠️ **The Pi cannot `git fetch` — push to it from the laptop.** `/opt/avid`'s `origin` is HTTPS
+  with no credentials (`could not read Username for 'https://github.com'`), and in a `&&` chain that
+  failure **silently skips every later step**, so a "put the Pi back on `main`" one-liner can report
+  nothing and change nothing. `git push ssh://alisleiman0@192.168.10.172/opt/avid <branch>
+  --follow-tags`, then check out on the far side and confirm with `git rev-parse --short HEAD`.
+  Full note in `PI_OPERATIONS.md` §0.
 - 📕 **All Pi/hardware traps now live in [`deploy/PI_OPERATIONS.md`](../deploy/PI_OPERATIONS.md)** —
   service-must-be-stopped, venv rules (no `pip`, never `uv run`, numpy `<2`, the dev group),
   config/unit drift, live framebuffer streaming, ALSA, the `pkill`-kills-its-own-SSH-session trap,
@@ -284,14 +302,25 @@ other than what ran. See `journal.md`.
   "≤200 ms mouth-to-ear" (impossible with `silence_hold_ms = 500` on a turn-based echo), M4 AC-5's
   **"SDS §5.4", a section that does not exist** (numbering shifted after the AC was drafted; §6.3 is
   what the criterion is about), and `docs/demos/README.md` asserting a `v0.M4.0` tag that never
-  existed. **#106 and #129 are the last two gate issues — check both for the same optimism before
-  running them.** #106's AC-3/AC-4 were pre-settled on the issue; **#129's have not been.**
+  existed. M6 added a fifth of its own kind: **AC-5 asked for a "token budget" that cannot be
+  measured without OpenAI's tokenizer**, which is not a dependency — it ships as a *character*
+  ceiling, named as one. **The remaining gate issues are M9's, M10's (#245) and M11's; read their
+  ACs for the same optimism before running them, and settle any renegotiation on the issue first.**
 - ⚠️ **A gate that measures the *event* path can pass while the hardware does nothing.** The M4
   harness printed `PASS` over a mute robot because it timed `playback_started − speech_ended` and
   took `played_ms` from arithmetic over the submitted buffer. **Any "did it work" number must come
   from the device, not from what we handed the device.** When a check cannot apply (a fake adapter),
   say so **loudly in the output** — a silently disarmed check is indistinguishable from a passing
   one. Apply this reading to #106's O1 histogram and cost meter.
+- ⚠️ **`0` from an instrument that recorded nothing reads exactly like a real `0`.** M6's dominant
+  defect family — four separate harness bugs where *the report described something other than the
+  run*: a banner quoting a config key the session had switched off, a harness keeping every number
+  *about* the conversation and none of the conversation, a `set_affect` count of zero printed by a
+  counter nothing incremented, and English transcribed as Korean (no `language` hint on
+  `whisper-1`) feeding §7.6 for a whole milestone. **Derive every reported line from the run**, never
+  from config or intent; print the instrument's own liveness beside any count that can legitimately
+  be zero; keep the artefact, not only the statistic; and print every criterion **above** the verdict
+  block — twice a real count was computed and then lost behind an early return.
 - ⚠️ **A silent capture is diagnosed by counting non-zero samples, not by reading the mixer.** The
   Logitech H540's boom mute is a **hardware** switch ALSA cannot see: `amixer` reports `Mic … 89%
   [on]` while `arecord` returns frames of *exact zero*. Cost ~30 min this session chasing a
