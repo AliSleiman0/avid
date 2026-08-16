@@ -782,6 +782,9 @@ def _wire_services(
         ),
         timezone=config.behavior.timezone,
         default_cooldown_s=config.behavior.global_cooldown_s,
+        hold_open_s=config.behavior.hold_open_s,
+        ignore_backoff_multiplier=config.behavior.ignore_backoff_multiplier,
+        ignore_streak_limit=config.behavior.ignore_streak_limit,
     )
 
     for service in (

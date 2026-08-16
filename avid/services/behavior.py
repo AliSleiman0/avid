@@ -31,9 +31,12 @@ condition, one place, or the two disagree eventually.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
 from uuid import UUID, uuid4
@@ -44,12 +47,14 @@ from avid.core.event_bus import DEFAULT_MAXSIZE, Handler, OverflowPolicy, Subscr
 from avid.core.ports import Clock, EventBus, ProactiveLog, TriggerRepository
 from avid.core.schedule import InvalidRoutine, next_occurrence
 from avid.core.state_manager import StateManager
+from avid.core.tasks import spawn
 from avid.domain import (
     AmbientWindow,
     AudioSpeechEnded,
     AudioSpeechStarted,
     BehaviorProactiveDelivered,
     BehaviorProactiveSuppressed,
+    BehaviorTriggerDisabled,
     BehaviorTriggerFired,
     ConversationUserTranscribed,
     MemoryFactDeleted,
@@ -82,6 +87,22 @@ _DELIVERED = "delivered"
 _SUPPRESSED = "suppressed"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PendingDelivery:
+    """A proactive turn that has been spoken and is waiting to see whether anyone answers (§10.5).
+
+    ``log_id`` is carried so the ``proactive_log`` row can be updated in place once the answer is
+    known: §8.3's ``user_reaction`` is deliberately nullable because at write time it is genuinely
+    unknown, and filling it later is what turns the table from a record of what the robot did into
+    a record of whether it worked.
+    """
+
+    trigger_id: int
+    log_id: int
+    ignore_streak: int
+    cooldown_s: int
+
+
 class BehaviorService:
     """Decide when the robot should speak first (SDS §3.6.1, §10.2)."""
 
@@ -98,6 +119,9 @@ class BehaviorService:
         limits: PolicyLimits,
         timezone: str,
         default_cooldown_s: int,
+        hold_open_s: float,
+        ignore_backoff_multiplier: int,
+        ignore_streak_limit: int,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -107,6 +131,9 @@ class BehaviorService:
         self._limits = limits
         self._zone = ZoneInfo(timezone)
         self._default_cooldown_s = default_cooldown_s
+        self._hold_open_s = hold_open_s
+        self._ignore_backoff_multiplier = ignore_backoff_multiplier
+        self._ignore_streak_limit = ignore_streak_limit
         self._scheduler = SchedulerLoop(clock=clock, on_due=self._on_due)
 
         # --- the world, as the gate needs to see it ---------------------------------------
@@ -121,6 +148,16 @@ class BehaviorService:
         # §10.4's manual override — an absolute instant, set by `set_quiet` (#243) and by
         # POST /quiet (#244). One piece of state, two doors.
         self._quiet_until: int | None = None
+        # The proactive turn currently waiting to hear back, if any (§10.5). One at a time by
+        # construction: rule 2 vetoes while the machine is not IDLE, and a turn in flight is
+        # not IDLE.
+        self._pending: _PendingDelivery | None = None
+        self._reply_task: asyncio.Task[None] | None = None
+        # How many delivered turns have been *fully* resolved — reaction written, backoff
+        # persisted. A plain attribute, like ExpressionService's staleness counters. It exists
+        # because `_pending` is cleared at the START of resolution and the writes follow it, so
+        # anything watching `_pending` alone sees "done" while the database is still mid-update.
+        self.resolved_deliveries = 0
 
     # --- SDS §9.2 service shape -----------------------------------------------------------
 
@@ -134,7 +171,12 @@ class BehaviorService:
         await self._scheduler.start()
 
     async def stop(self) -> None:
-        """Stop the scheduler loop. Idempotent."""
+        """Stop the scheduler loop and any pending reply window. Idempotent."""
+        task, self._reply_task = self._reply_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await self._scheduler.stop()
 
     def subscriptions(self) -> Sequence[Subscription]:
@@ -281,9 +323,17 @@ class BehaviorService:
         self._last_present_at = self._monotonic_s() - event.absent_for_s
 
     async def _on_speech_started(self, event: AudioSpeechStarted) -> None:
-        """Reserved for §10.5's reply detection (#241): speech inside the hold-open window is the
-        user answering a proactive turn. Tracked here now so the subscription is registered once
-        and the catalog stays honest; the backoff that reads it lands with #241."""
+        """§10.5's reply signal: speech inside the hold-open window is the user answering.
+
+        ⚠️ **Not matched by correlation_id, and it cannot be.** A reply is a fresh utterance, so
+        ``AudioService`` mints a *new* id for it at the other turn origin (§9.1.1) — the reply does
+        not carry the proactive turn's id and never will. It does not need to: the policy gate
+        guarantees no second proactive turn is in flight, and rule 2 guarantees the machine was IDLE
+        when this one fired, so **any** speech inside the window is the answer to it. That is the
+        honest definition, and it needs no new event and no cross-service call.
+        """
+        if self._pending is not None:
+            await self._resolve_pending(engaged=True)
 
     async def _on_speech_ended(self, event: AudioSpeechEnded) -> None:
         """Rule 4's raw feed: every utterance the VAD heard, counted until something retracts it."""
@@ -390,7 +440,13 @@ class BehaviorService:
         if isinstance(verdict, Suppressed):
             await self._suppress(record.id, rule=verdict.rule, at=now)
             return
-        await self._deliver(record.id, fact_id=record.fact_id, at=now)
+        await self._deliver(
+            record.id,
+            fact_id=record.fact_id,
+            at=now,
+            record_ignore_streak=record.ignore_streak,
+            record_cooldown_s=record.cooldown_s,
+        )
 
     async def _suppress(self, trigger_id: int, *, rule: str, at: int) -> None:
         """Log the veto and say so on the bus — never an early return.
@@ -415,7 +471,15 @@ class BehaviorService:
         )
         _log.info("proactive proposal suppressed by %s (trigger %d)", rule, trigger_id)
 
-    async def _deliver(self, trigger_id: int, *, fact_id: int | None, at: int) -> None:
+    async def _deliver(
+        self,
+        trigger_id: int,
+        *,
+        fact_id: int | None,
+        at: int,
+        record_ignore_streak: int,
+        record_cooldown_s: int,
+    ) -> None:
         """Mint the turn, publish the origin, and drive the state machine.
 
         The ``correlation_id`` is minted **here** — this is the head of the turn (§9.1.1), the only
@@ -431,7 +495,7 @@ class BehaviorService:
         await self._triggers.record_fired(
             trigger_id, at=at, next_fire_at=await self._next_fire_for(fact_id)
         )
-        await self._log.record(
+        log_id = await self._log.record(
             trigger_id=trigger_id,
             considered_at=at,
             outcome=_DELIVERED,
@@ -458,6 +522,99 @@ class BehaviorService:
         )
         await self._state.transition(
             Trigger.BEHAVIOR_TRIGGER_FIRED, correlation_id=correlation_id
+        )
+        # §10.5's clock starts the moment the turn is delivered, not when the model stops
+        # speaking. The difference is a few seconds of audio and it favours the user: a reply that
+        # arrives while the robot is still talking is a barge-in, and it counts as engagement.
+        self._pending = _PendingDelivery(
+            trigger_id=trigger_id,
+            log_id=log_id,
+            ignore_streak=record_ignore_streak,
+            cooldown_s=record_cooldown_s,
+        )
+        self._reply_task = spawn(
+            self._await_reply(self._hold_open_s), name="BehaviorService.reply_window"
+        )
+
+    async def _await_reply(self, hold_open_s: float) -> None:
+        """Wait out the hold-open window; if nothing interrupts, the turn was ignored (§10.5).
+
+        The window is the *same* ``[behavior] hold_open_s`` ``ConversationService`` holds the socket
+        open for, read from one key by two owners. The duplication is deliberate and worth the note:
+        one governs a **socket** and the other governs a **database row**, and coupling them would
+        put a ``RealtimeClient`` concern inside the behaviour engine.
+        """
+        await self._clock.sleep(hold_open_s)
+        if self._pending is not None:
+            await self._resolve_pending(engaged=False)
+
+    async def _resolve_pending(self, *, engaged: bool) -> None:
+        """Close the book on a delivered turn: engaged resets the streak, ignored widens it.
+
+        §10.5's whole argument: *"Without this, a badly-conceived trigger annoys forever at a fixed
+        rate. With it, the robot notices it's being ignored and stops. That is the single behaviour
+        most likely to keep this thing switched on in month nine."*
+        """
+        pending, self._pending = self._pending, None
+        if pending is None:  # pragma: no cover - guarded by both call sites
+            return
+        task, self._reply_task = self._reply_task, None
+        # Cancel the window only when something *else* closed it. On the ignored path this method
+        # IS the timer, and a task cancelling itself here would swallow the very write it is here
+        # to perform.
+        if engaged and task is not None:
+            task.cancel()
+
+        await self._log.set_reaction(
+            pending.log_id, "engaged" if engaged else "ignored"
+        )
+        if engaged:
+            # Reset, not decrement. One answered reminder means the trigger is wanted; making the
+            # user earn back three days of goodwill would be a different, worse design.
+            await self._triggers.set_backoff(
+                pending.trigger_id,
+                ignore_streak=0,
+                cooldown_s=self._default_cooldown_s,
+            )
+            self.resolved_deliveries += 1
+            return
+
+        streak = pending.ignore_streak + 1
+        cooldown = pending.cooldown_s * self._ignore_backoff_multiplier
+        await self._triggers.set_backoff(
+            pending.trigger_id, ignore_streak=streak, cooldown_s=cooldown
+        )
+        _log.info(
+            "proactive turn ignored (trigger %d): streak %d, cooldown now %ds",
+            pending.trigger_id,
+            streak,
+            cooldown,
+        )
+        if streak >= self._ignore_streak_limit:
+            await self._disable(pending.trigger_id, ignore_streak=streak)
+        self.resolved_deliveries += 1
+
+    async def _disable(self, trigger_id: int, *, ignore_streak: int) -> None:
+        """Switch a trigger off, **loudly** (§10.5).
+
+        The event is not optional decoration: *"a trigger that turned itself off is diagnostic
+        information about the design, and if you don't surface it you'll never learn which of your
+        ideas were bad."* The store write comes first — losing the disable would leave the robot
+        firing something it has already decided to stop.
+        """
+        await self._triggers.disable(trigger_id)
+        self._scheduler.cancel(trigger_id)
+        await self._bus.publish(
+            BehaviorTriggerDisabled(
+                **envelope(clock=self._clock, correlation_id=uuid4(), source=_SOURCE),
+                trigger_id=trigger_id,
+                ignore_streak=ignore_streak,
+            )
+        )
+        _log.warning(
+            "trigger %d disabled itself after %d consecutive ignores (§10.5)",
+            trigger_id,
+            ignore_streak,
         )
 
     async def _next_fire_for(self, fact_id: int | None) -> int | None:
