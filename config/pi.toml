@@ -54,7 +54,12 @@ voice             = "cedar"
 # without it no conversation.user_transcribed is ever published (SDS §6.2.2). PINNED.
 transcription_model = "whisper-1"
 max_output_tokens = 512                                  # §6.10 guardrail
-personality       = "config/personality/default.toml"    # §6.5
+# §6.5. ⚠️ Resolved against the process WORKING DIRECTORY, not against this file. On the Pi
+# that is WorkingDirectory=/opt/avid (robot.service) while this config lives at
+# /etc/robot/config.toml — so a config-relative path would look under /etc/robot/ and find
+# nothing. Same convention as [cues] dir and [realtime] session_dir: read-only assets
+# shipped under the code tree stay repo-relative. Missing file = loud failure at load.
+personality       = "config/personality/default.toml"
 
 [ai.turn_detection]
 # "none" since AVID-194: the SERVER's VAD is off and the local Silero gate is the single

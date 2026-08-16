@@ -217,6 +217,43 @@ class TurnDetectionConfig(_Section):
         return self.type == "server_vad"
 
 
+class PersonalityConfig(_Section):
+    """The §6.5 personality, loaded from the TOML at ``[ai] personality`` (ADR-006, AVID-211).
+
+    **Personality is composed instruction text, not a model.** §6.5 weighed three readings of
+    "separate the personality from the AI model" and only this one survives the latency budget:
+    fine-tuning is unavailable for Realtime and would defeat model-swapping, and a post-processing
+    "personality filter" LLM adds a full round trip inside the turn path (§2.8.1). Composed
+    instructions cost **zero** added latency and make personality a config file.
+
+    **``forbidden`` is where the milestone is actually won**, and it is not a lint list. §6.5:
+    *"Positive instructions ('be friendly') are weakly followed; negative constraints ('never open
+    with "Great question!"') are strongly followed. Most of what makes an assistant feel annoying
+    rather than companionable is a behaviour to suppress, not one to add."* That is where G3's
+    "≤1 user-rated annoying event/week" is won, and where the M6 gate's *"recognizably different"*
+    separation is expected to come from — not from the adjectives in ``traits``.
+
+    Write ``forbidden`` entries as **complete imperative sentences**, as §6.5 does ("Do not
+    compliment the user on their questions."). The composer emits them close to verbatim, so
+    fragments compose badly.
+
+    Every enumerated field is a ``Literal`` rather than a free string, so a typo fails **at load**
+    while the composition root is still wiring. ``verbosity = "concice"`` reaching the model as
+    silently-dropped intent is precisely the config-drift failure `deploy/PI_OPERATIONS.md` exists
+    to warn about, and it is invisible in the output.
+    """
+
+    name: str = "Pico"
+    traits: tuple[str, ...] = ()
+    verbosity: Literal["brief", "moderate", "detailed"] = "brief"
+    formality: Literal["casual", "neutral", "formal"] = "casual"
+    humor_frequency: Literal["never", "occasional", "frequent"] = "occasional"
+    # Ships as a key with **no consumer** (AVID-211). Nothing speaks first until M10 (§10), but
+    # it is part of §6.5's normative shape, so the schema carries it and no reader is built.
+    proactivity_tone: Literal["gentle", "direct", "playful"] = "gentle"
+    forbidden: tuple[str, ...] = ()
+
+
 class AiConfig(_Section):
     """Model and voice — a config edit, never code (the vendor boundary, CLAUDE.md §3).
 
@@ -581,6 +618,10 @@ class Config(_Section):
     microphone: MicrophoneConfig = MicrophoneConfig()
     speaker: SpeakerConfig = SpeakerConfig()
     ai: AiConfig = AiConfig()
+    # Loaded by :func:`load_config` from the separate file named at ``[ai] personality``, never
+    # authored inline in the main TOML — one personality per build, chosen at composition time
+    # (§6.5). Defaulted so ``Config()`` still constructs in tests that care about other sections.
+    personality: PersonalityConfig = PersonalityConfig()
     realtime: RealtimeConfig = RealtimeConfig()
     gate: GateConfig = GateConfig()
     cues: CuesConfig = CuesConfig()
@@ -698,6 +739,11 @@ def load_config(path: str | Path) -> Config:
 
     The key is optional: ``config/sim.toml`` runs with no key and no network (SDS
     §2.8.4). Raises :class:`pydantic.ValidationError` for a malformed or unknown field.
+
+    **Two files, one reader** (AVID-211). The §6.5 personality lives in its own TOML, named by
+    ``[ai] personality``, and it is read *here* rather than by whatever needs it — P7 is that
+    configuration is injected, never read, and this function's whole job is being the one place
+    that violates that so nothing else has to.
     """
     with Path(path).open("rb") as handle:
         data = tomllib.load(handle)
@@ -709,4 +755,40 @@ def load_config(path: str | Path) -> Config:
     notify_socket = os.environ.get("NOTIFY_SOCKET")
     if notify_socket:
         data["notify_socket"] = notify_socket
+    ai_section = data.get("ai")
+    personality_path = (
+        ai_section.get("personality") if isinstance(ai_section, dict) else None
+    )
+    data["personality"] = _load_personality(
+        personality_path or AiConfig.model_fields["personality"].default
+    )
     return Config.model_validate(data)
+
+
+def _load_personality(path: str | Path) -> dict[str, object]:
+    """Read the §6.5 personality TOML, or fail with the path it actually looked at (AVID-211).
+
+    **Resolved against the process's working directory, deliberately, and this is the decision
+    AVID-211 asked to have made and written down.** Resolving it against the *config file* would
+    read better and would break the Pi: ``robot.service`` sets ``WorkingDirectory=/opt/avid``
+    while the config lives at ``/etc/robot/config.toml``, so a config-relative path would look for
+    ``/etc/robot/config/personality/…`` — which does not exist. CWD-relative is also what
+    ``[cues] dir`` and ``[realtime] session_dir`` already are, and for the same reason: they are
+    read-only assets shipped under the code tree, unlike the writable ``/var/lib/robot`` paths.
+
+    The error carries the **resolved absolute path**, not the configured string. A relative path
+    that fails to resolve is exactly the case where the configured value tells you nothing and the
+    absolute one tells you everything — and the alternative to failing here is the robot running
+    the whole milestone on a bare identity string, passing every criterion except the one that
+    matters (SDS §6.4 layer 2 simply missing, with no symptom).
+    """
+    resolved = Path(path).resolve()
+    try:
+        with resolved.open("rb") as handle:
+            return dict(tomllib.load(handle))
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"[ai] personality points at {path!r}, which resolves to {resolved} — no such file. "
+            f"Paths are relative to the process working directory (SDS §6.5); on the Pi that is "
+            f"WorkingDirectory=/opt/avid, not the directory holding config.toml."
+        ) from None
