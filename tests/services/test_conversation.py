@@ -192,6 +192,7 @@ async def _rig(
     memory_inject_timeout_s: float = 1.0,
     think_timeout_s: float = 3600.0,
     server_turn_detection: bool = False,
+    thinking_delay_ms: int = 0,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -226,6 +227,7 @@ async def _rig(
         memory_inject_timeout_s=memory_inject_timeout_s,
         think_timeout_s=think_timeout_s,
         server_turn_detection=server_turn_detection,
+        thinking_delay_ms=thinking_delay_ms,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -548,6 +550,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         memory_inject_timeout_s=1.0,
         think_timeout_s=3600.0,
         server_turn_detection=False,
+        thinking_delay_ms=0,
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -969,6 +972,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         memory_inject_timeout_s=1.0,
         think_timeout_s=3600.0,
         server_turn_detection=False,
+        thinking_delay_ms=0,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -1164,6 +1168,72 @@ async def test_no_thinking_cue_when_the_reply_is_already_playing() -> None:
         )
 
 
+async def test_a_fast_turn_plays_no_thinking_cue_at_all() -> None:
+    """AVID-170 AC-1/AC-5, the near edge: first audio at 300 ms against a 600 ms threshold.
+
+    §6.9 specifies a *threshold*, not a delay — *"if first audio hasn't arrived by 600 ms"*. There
+    was no timer at all: the cue was scheduled immediately and only cancellation stopped it, a
+    race the cue reliably won because it starts pushing a WAV to ALSA in the same tick the user
+    stops speaking. So it played on **every** turn. Reported by the owner as *"hearing a lot of
+    one second"* and first suspected to be a network problem; it is a defect against spec.
+
+    The inverse of R-01, too: perceived latency is designable, and an unconditional filler makes
+    a fast turn *sound* slow."""
+    clock = FakeClock()
+    # The threshold is set far beyond the fixture's own first-delta delay rather than the
+    # shipped 600 ms, so "the reply arrived first" is true by construction instead of by
+    # whatever the recording happens to be paced at. The property under test is the ordering,
+    # not the number.
+    async with _rig(
+        client=_replay("two_turn", clock=clock), thinking_delay_ms=5_000
+    ) as (rig):
+        await _speak(rig, correlation_id=uuid4())
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await _advance_until(rig, lambda: bool(rig.sink.played))
+
+        assert rig.service._thinking_task is None  # the delta cancelled the pending cue
+        assert not rig.speaker.files_played
+
+        # ...and it stays uncued long after the threshold would have expired.
+        await rig.clock.advance(10.0)
+        await rig.collector.settle()
+
+        assert not rig.speaker.files_played, (
+            "a turn faster than the threshold still played a cue — AVID-170"
+        )
+
+
+async def test_a_slow_turn_plays_exactly_one_thinking_cue() -> None:
+    """The far edge (AC-5): nothing has arrived by the threshold, so the silence gets covered.
+
+    A robot that visibly and audibly thinks feels responsive at 1200 ms; one that sits silently
+    feels broken at 800 ms (§6.9). This is the case the cue exists for, and the only one."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, thinking_delay_ms=600) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await rig.collector.settle()
+        assert not rig.speaker.files_played  # not yet — still inside the threshold
+
+        await _advance_until(
+            rig,
+            lambda: any(p.name == "thinking_hmm.wav" for p in rig.speaker.files_played),
+        )
+
+    assert sum(p.name == "thinking_hmm.wav" for p in rig.speaker.files_played) == 1
+
+
 async def test_the_thinking_cue_is_armed_at_the_falling_edge_not_at_the_transcript() -> (
     None
 ):
@@ -1191,9 +1261,7 @@ async def test_the_thinking_cue_is_armed_at_the_falling_edge_not_at_the_transcri
         )
         await _advance_until(
             rig,
-            lambda: any(
-                p.name == "thinking_one_sec.wav" for p in rig.speaker.files_played
-            ),
+            lambda: any(p.name == "thinking_hmm.wav" for p in rig.speaker.files_played),
         )
 
 

@@ -345,6 +345,14 @@ class CuesConfig(_Section):
     """
 
     dir: str = "assets/cues"
+    # How long the robot waits for first audio before filling the silence (SDS §6.9, AVID-170).
+    # 600 ms is the spec's number, and it is a *threshold*, not a delay: a turn whose reply lands
+    # sooner plays no cue at all. Until AVID-170 there was no timer — the cue was scheduled
+    # immediately and only cancellation stopped it, a race the cue usually won because it starts
+    # pushing a WAV to ALSA in the same tick the user stops speaking. Net effect: it played on
+    # EVERY turn, so a mitigation for occasional slowness became a permanent verbal tic and made
+    # fast turns *sound* slower than they were — the exact inverse of R-01's intent.
+    thinking_delay_ms: int = Field(default=600, ge=0)
 
 
 class WeightsConfig(_Section):
