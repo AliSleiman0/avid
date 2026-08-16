@@ -58,6 +58,7 @@ from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
+from avid.core.personality import compose, compose_instructions
 from avid.core.ports import (
     Camera,
     Clock,
@@ -518,11 +519,17 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
                 api_key=config.openai_api_key.get_secret_value(),
                 model=config.ai.model,
                 voice=config.ai.voice,
-                # The §6.4 capability layer (layer 3): the base identity prompt plus the §7.6
-                # remember_fact/recall/forget instructions (#125), so the model knows the tools
-                # exist and when to call them. Part of the static cached prefix (§6.2.2) — layer 2
-                # (personality) is M6, layer 4 (pre-injected memory) is #126.
-                instructions=config.ai.instructions + "\n\n" + CAPABILITY_INSTRUCTIONS,
+                # §6.4's static prefix — layers 1, 2 and 3, in that order and assembled in exactly
+                # one place (AVID-213). This used to be a hand-rolled concatenation of layers 1
+                # and 3 with a comment noting layer 2 was still M6; it now goes through the
+                # composer, so the ordering rule lives with the function that owns it rather than
+                # here. Layer 4 (the §6.7 memory block) is appended per-session by the adapter and
+                # must stay last, or it invalidates the cached prefix behind it (§6.10.3).
+                instructions=compose_instructions(
+                    identity=config.ai.instructions,
+                    personality=compose(config.personality),
+                    capabilities=CAPABILITY_INSTRUCTIONS,
+                ),
                 max_output_tokens=config.ai.max_output_tokens,
                 turn_detection=config.ai.turn_detection.model_dump(),
                 # Realtime transcribes the user's speech only when asked; without this no

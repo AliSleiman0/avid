@@ -963,7 +963,47 @@ def test_memory_block_is_appended_after_the_static_instructions() -> None:
     base = _openai()._session_config()["instructions"]
     composed = _openai()._session_config("MEM FACTS")["instructions"]
     assert composed == f"{base}\n\nMEM FACTS"
-    assert composed.startswith(base)  # layers 1–3 unchanged as the prefix
+
+
+def test_the_memory_block_never_precedes_the_static_prefix() -> None:
+    """AVID-213 AC-4 — the one failure in this milestone that no behavioural test can catch.
+
+    §6.4's order is load-bearing because prompt caching works on **prefixes**: layers 1–3 are
+    identical across every session on a build and cache across sessions, while layer 4 changes per
+    session and must come last or it invalidates everything behind it.
+
+    ⚠️ **The robot behaves identically with a broken prefix.** Every reply is the same, every
+    latency is the same, every test that exercises conversation still passes. §6.10.3: broken
+    caching looks identical to working caching **until the invoice** — $12/month against
+    $85/month, with no symptom in between. So this is written as a test that fails, rather than a
+    comment that warns.
+
+    Asserted as a *prefix* relation rather than by string equality with a hand-built expectation,
+    so it keeps biting if the join separator or any layer's text changes."""
+    static = _openai()._session_config()["instructions"]
+    with_memory = _openai()._session_config("MEM FACTS")["instructions"]
+
+    assert isinstance(static, str) and isinstance(with_memory, str)
+    assert with_memory.startswith(static), (
+        "the memory block no longer sits behind the static prefix — layers 1-3 are not a stable "
+        "cache prefix any more, and nothing about the robot's behaviour will tell you"
+    )
+    assert with_memory.index("MEM FACTS") >= len(static)
+
+
+def test_the_static_prefix_is_identical_across_sessions() -> None:
+    """AVID-213 AC-3: two sessions built from the same config produce a byte-identical prefix.
+
+    This is the property the ~98.75% cached-input discount is bought with (§6.10.2). It is cheap
+    to assert and expensive to lose — and, like the ordering above, entirely invisible in
+    behaviour."""
+    first = _openai()._session_config("SESSION ONE FACTS")["instructions"]
+    second = _openai()._session_config("SESSION TWO FACTS")["instructions"]
+    prefix = _openai()._session_config()["instructions"]
+
+    assert isinstance(first, str) and isinstance(second, str)
+    assert first.startswith(str(prefix))
+    assert second.startswith(str(prefix))
 
 
 def test_empty_memory_block_leaves_the_instructions_unchanged() -> None:

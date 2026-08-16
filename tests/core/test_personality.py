@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 from avid.core.config import PersonalityConfig
-from avid.core.personality import MAX_LAYER_CHARS, compose
+from avid.core.personality import MAX_LAYER_CHARS, compose, compose_instructions
+from avid.services import CAPABILITY_INSTRUCTIONS
 
 _PERSONALITY_DIR = Path(__file__).resolve().parents[2] / "config" / "personality"
 
@@ -186,3 +187,45 @@ def test_an_unmapped_enumerated_value_raises_rather_than_composing_nothing() -> 
 
     with pytest.raises(KeyError):
         compose(personality)
+
+
+# --- compose_instructions: §6.4's static prefix (AVID-213) -------------------
+
+
+def test_the_static_prefix_is_layers_one_two_three_in_order() -> None:
+    """AC-1/AC-2. Order, not merely presence.
+
+    §6.4 is explicit that this is *most static first, most dynamic last*, because prompt caching
+    works on prefixes. A composer that emitted the same three layers in a different order would
+    produce a correct-looking prompt and a broken cache."""
+    text = compose_instructions(
+        identity="IDENTITY", personality="PERSONALITY", capabilities="CAPABILITIES"
+    )
+
+    assert (
+        text.index("IDENTITY") < text.index("PERSONALITY") < text.index("CAPABILITIES")
+    )
+    assert text.startswith("IDENTITY")
+    assert text.endswith("CAPABILITIES")
+
+
+def test_the_static_prefix_is_deterministic() -> None:
+    """AC-3's precondition: same inputs, byte-identical output, so two sessions on one build
+    cache against each other (§6.10.2)."""
+    args = {"identity": "I", "personality": "P", "capabilities": "C"}
+    assert compose_instructions(**args) == compose_instructions(**args)
+
+
+def test_the_shipped_prefix_stays_within_the_section_budget() -> None:
+    """AC-5, in characters and named as such — see ``MAX_LAYER_CHARS`` for why not tokens.
+
+    §6.4 budgets the whole block at ~1,200 tokens including layer 4's ~600, so the static prefix
+    should sit near ~600. Every character is billed as input on **every turn** of the session:
+    *"that's a choice, not a limit"*."""
+    text = compose_instructions(
+        identity="You are Pico, a small AI desk companion robot.",
+        personality=compose(_shipped("default")),
+        capabilities=CAPABILITY_INSTRUCTIONS,
+    )
+
+    assert len(text) <= 4 * MAX_LAYER_CHARS  # ~600 tokens at ~4 chars/token
