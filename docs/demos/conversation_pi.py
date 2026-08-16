@@ -715,6 +715,20 @@ def _report_conversation(
     return 0
 
 
+class _DemoBehavior:
+    """A ``BehaviorTools`` stand-in for the bench (#243).
+
+    The demo runs no behaviour engine, so ``set_quiet`` has nothing to suppress — but the port is a
+    constructor argument, and a bench that silently passed ``None`` would be a bench proving
+    something the robot does not do."""
+
+    async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+        logging.getLogger("avid.demos").info(
+            "bench: set_quiet(%ds) — no behaviour engine here, ignored", duration_s
+        )
+        return 0
+
+
 def _build_memory(
     config: Config, *, bus: AsyncioEventBus, clock: Clock, mode: str
 ) -> MemoryTools:
@@ -815,6 +829,7 @@ async def _run_conversation(
         cues=_build_cue_bank(config, speaker=speaker),
         memory=memory,
         affect=affect,
+        behavior=_DemoBehavior(),
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone="Asia/Beirut",

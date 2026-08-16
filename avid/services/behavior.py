@@ -279,6 +279,36 @@ class BehaviorService:
             ),
         )
 
+    # --- BehaviorTools (§6.6, #243) ---------------------------------------------------------
+
+    async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+        """§10.4's manual override: no proactive turns for ``duration_s``, from now.
+
+        Satisfies :class:`~avid.core.ports.BehaviorTools` structurally, exactly as ``AffectService``
+        satisfies ``AffectTools`` — no inheritance, no registration, and ``ConversationService``
+        still names only the Protocol.
+
+        The state is a single instant rather than a flag with a timer, and that is what makes the
+        HTTP door (§9.5's ``POST /quiet``) and the tool door the *same* piece of state instead of
+        two things that agree most of the time. It also survives a policy evaluation arriving at any
+        moment: the gate compares ``now`` against it and needs nothing else.
+
+        ⚠️ Extending, never shortening. A second call while quiet takes the **later** of the two
+        instants: someone who says "leave me alone" twice is not asking for less quiet, and a
+        careless second call must not cut the first one short.
+        """
+        if duration_s <= 0:
+            raise ValueError(f"quiet duration must be positive, got {duration_s}")
+        until = self._clock.now() + duration_s
+        self._quiet_until = max(until, self._quiet_until or 0)
+        _log.info(
+            "quiet until %d (%ds requested) [correlation_id=%s]",
+            self._quiet_until,
+            duration_s,
+            correlation_id,
+        )
+        return self._quiet_until
+
     # --- the world, arriving ----------------------------------------------------------------
 
     async def _on_started(self, event: SystemStarted) -> None:

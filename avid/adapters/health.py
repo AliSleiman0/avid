@@ -24,7 +24,11 @@ does for the screen). ``core`` stays lean; no web framework enters the tree for 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from uuid import uuid4
+
+from avid.core.ports import BehaviorTools
 
 _log = logging.getLogger("avid.adapters.health")
 
@@ -34,6 +38,8 @@ _log = logging.getLogger("avid.adapters.health")
 _LOOPBACK: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 _MAX_REQUEST_BYTES = 8192  # a health GET is tiny; cap so a bad client cannot grow us.
+# Also the ceiling on a POST body: `{"duration_s": 3600}` is 22 bytes, so anything near this
+# is not a client we want to keep reading from.
 
 _OK = (
     b"HTTP/1.1 200 OK\r\n"
@@ -53,6 +59,32 @@ _NOT_FOUND = (
 )
 
 
+def _response(status: str, body: bytes, *, content_type: str = "text/plain") -> bytes:
+    """Build one HTTP/1.1 response. Replaces the canned constants for the dynamic routes.
+
+    ``GET /health`` keeps its literal byte string on purpose: it is the systemd watchdog's probe,
+    the one route whose exact bytes a regression test pins, and it should not start depending on a
+    formatter that could change under it.
+    """
+    return (
+        f"HTTP/1.1 {status}\r\n"
+        f"Content-Type: {content_type}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+    ).encode("latin-1") + body
+
+
+_METHOD_NOT_ALLOWED = (
+    b"HTTP/1.1 405 Method Not Allowed\r\n"
+    b"Content-Type: text/plain\r\n"
+    b"Content-Length: 18\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+    b"method not allowed"
+)
+
+
 class HealthServer:
     """The ``GET /health`` endpoint of the local control API (SDS §9.5).
 
@@ -62,7 +94,9 @@ class HealthServer:
     :attr:`bound_port` — how the adapter test avoids a fixed-port clash.
     """
 
-    def __init__(self, *, bind: str, port: int) -> None:
+    def __init__(
+        self, *, bind: str, port: int, behavior: BehaviorTools | None = None
+    ) -> None:
         if bind not in _LOOPBACK:
             raise ValueError(
                 f"HealthServer refuses to bind {bind!r}: the control API is loopback "
@@ -71,6 +105,10 @@ class HealthServer:
             )
         self._bind = bind
         self._port = port
+        # §9.5's POST /quiet, behind the same Protocol the `set_quiet` tool dispatches
+        # against (#243). Optional so the M0 health-only wiring still constructs; a `None`
+        # here answers 503 rather than pretending the route worked.
+        self._behavior = behavior
         self._server: asyncio.Server | None = None
 
     @property
@@ -109,24 +147,94 @@ class HealthServer:
             request_line = await reader.readline()
             method, _, rest = request_line.decode("latin-1").partition(" ")
             path = rest.partition(" ")[0]
-            # Drain the request headers (bounded) so the client's write completes before
-            # we reply and close; we need none of them for a health GET.
-            await self._drain_headers(reader)
-            live = method == "GET" and path == "/health"
-            writer.write(_OK if live else _NOT_FOUND)
+            # The headers are read rather than discarded now: POST needs Content-Length to know
+            # how much body to expect, and reading to the blank line is what lets the client's
+            # write complete before we reply and close.
+            length = await self._read_headers(reader)
+            writer.write(await self._route(method, path, reader, length))
             await writer.drain()
         except (OSError, ValueError, asyncio.IncompleteReadError) as exc:
             _log.warning("control API request dropped: %s", exc)
         finally:
             writer.close()
 
+    async def _route(
+        self,
+        method: str,
+        path: str,
+        reader: asyncio.StreamReader,
+        length: int | None,
+    ) -> bytes:
+        """Dispatch one request to a response. Never raises — the caller logs and closes.
+
+        Unknown paths stay 404 and a known path with the wrong method is 405, which is the
+        distinction the single boolean this replaced could not make: a `GET /quiet` used to look
+        exactly like a typo.
+        """
+        if path == "/health":
+            return _OK if method == "GET" else _METHOD_NOT_ALLOWED
+        if path == "/quiet":
+            if method != "POST":
+                return _METHOD_NOT_ALLOWED
+            return await self._quiet(reader, length)
+        return _NOT_FOUND
+
+    async def _quiet(self, reader: asyncio.StreamReader, length: int | None) -> bytes:
+        """``POST /quiet {"duration_s": N}`` — §9.5's row, §10.4's manual override.
+
+        The *same* state the ``set_quiet`` tool sets (#243), through the same Protocol. Two doors,
+        one room: §9.5 describes this route as "also reachable via set_quiet tool", and the only way
+        to make that true rather than approximately true is for both to call one method.
+
+        Every failure here is a 4xx, never a 500 and never an exception reaching the loop — §3.12.3's
+        rule that a crashing control endpoint must not take the robot down. Loopback binding is still
+        the whole of the authentication (§9.5); this route mutates behaviour, which is precisely why
+        the bind assertion in ``__init__`` is defence in depth rather than decoration.
+        """
+        if self._behavior is None:
+            return _response("503 Service Unavailable", b"no behaviour engine")
+        if length is None or length <= 0 or length > _MAX_REQUEST_BYTES:
+            return _response("411 Length Required", b"length required")
+        try:
+            raw = await reader.readexactly(length)
+            payload = json.loads(raw)
+            duration = int(payload["duration_s"])
+        except (
+            asyncio.IncompleteReadError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ):
+            return _response("400 Bad Request", b'expected {"duration_s": <seconds>}')
+        try:
+            until = await self._behavior.set_quiet(duration, correlation_id=uuid4())
+        except ValueError as exc:
+            return _response("400 Bad Request", str(exc).encode("utf-8"))
+        _log.info("quiet requested over HTTP: %ds, until %d", duration, until)
+        return _response(
+            "200 OK",
+            json.dumps({"ok": True, "until": until}).encode("utf-8"),
+            content_type="application/json",
+        )
+
     @staticmethod
-    async def _drain_headers(reader: asyncio.StreamReader) -> None:
-        """Read up to the blank line that ends the request head, capped at
-        ``_MAX_REQUEST_BYTES`` so an endless header stream cannot grow us unbounded."""
+    async def _read_headers(reader: asyncio.StreamReader) -> int | None:
+        """Read to the blank line ending the request head; return ``Content-Length`` if present.
+
+        Capped at ``_MAX_REQUEST_BYTES`` so an endless header stream cannot grow us unbounded —
+        the same bound the previous drain used, kept rather than re-derived.
+        """
+        length: int | None = None
         read = 0
         while read < _MAX_REQUEST_BYTES:
             line = await reader.readline()
             read += len(line)
             if line in (b"\r\n", b"\n", b""):
-                return
+                return length
+            name, sep, value = line.decode("latin-1").partition(":")
+            if sep and name.strip().lower() == "content-length":
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    length = None
+        return length

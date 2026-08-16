@@ -1021,6 +1021,41 @@ class MemoryTools(Protocol):
 
 
 @runtime_checkable
+class BehaviorTools(Protocol):
+    """The behaviour vocabulary the model gets (SDS §6.6, §10.4, ADR-004).
+
+    One tool, and §10.4 is blunt about why it has to exist: *"'Leave me alone for an hour' is a
+    thing people say to companions, and it must work the first time, without configuration, or rule
+    1's static window carries the whole load."* A static 22:00–07:30 window cannot know about a
+    meeting at eleven.
+
+    ``ConversationService`` depends on this Protocol, never on ``BehaviorService`` (P2/P5) — the
+    same shape ``AffectTools`` has, and for the same reason: the dispatcher must be able to reach
+    the behaviour engine without the conversation layer knowing one exists.
+
+    ``duration_s`` crosses as a plain number because the model's raw JSON is the *dispatcher's*
+    problem — it owns turning a bad value into a tool error — while the service owns what a
+    duration means. Closer to ``MemoryTools.remember_fact``'s ``kind: str`` than to
+    ``AffectTools``'s enum: there is no domain type here that could carry the constraint.
+    """
+
+    async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+        """Suppress proactive turns for ``duration_s``, returning the epoch second it lifts.
+
+        The return value is what the model tells the user, so it is the *resolved instant* rather
+        than an echo of the request — "until 3 o'clock" is checkable, "for an hour" is not.
+
+        **Fire-and-forget with respect to the turn** (§6.6): it returns when the override is
+        recorded, which is immediate. Nothing waits on a schedule.
+
+        ⚠️ The override **stacks on top of** rule 1's static window rather than replacing it. "Leave
+        me alone for an hour" at 21:30 must not turn into "and then you may talk at 22:30", which is
+        exactly what replacing the window would do.
+        """
+        ...
+
+
+@runtime_checkable
 class Service(Protocol):
     """A use-case service, as the run loop and composition root need it (SDS §9.2).
 

@@ -83,6 +83,7 @@ from avid.core.event_bus import (
 )
 from avid.core.ports import (
     AffectTools,
+    BehaviorTools,
     Clock,
     EventBus,
     MemoryTools,
@@ -237,6 +238,7 @@ class ConversationService:
         cues: CueBank,
         memory: MemoryTools,
         affect: AffectTools,
+        behavior: BehaviorTools,
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
         default_timezone: str,
@@ -256,6 +258,9 @@ class ConversationService:
         # may not import each other (P5, and .importlinter fails CI on it), so the
         # composition root injects the concrete one exactly as it does for memory.
         self._affect = affect
+        # §6.6's set_quiet door. A Protocol, never BehaviorService (P2/P5) — this service must be
+        # able to reach the behaviour engine without knowing one exists.
+        self._behavior = behavior
         self._idle_close_s = session_idle_close_s
         self._memory_inject_timeout_s = memory_inject_timeout_s
         # [behavior] timezone, injected (P7) purely to fill in remember_fact's schedule when the
@@ -697,6 +702,7 @@ class ConversationService:
             self._memory,
             ev,
             affect=self._affect,
+            behavior=self._behavior,
             correlation_id=self._corr(),
             approximate=self._turn_approximate,
             default_timezone=self._default_timezone,

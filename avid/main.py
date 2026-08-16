@@ -700,6 +700,34 @@ def _wire_services(
         top_facts_max=config.memory.top_facts_max,
         top_facts_token_budget=config.memory.top_facts_token_budget,
     )
+    # BehaviorService before ConversationService, and the order is load-bearing since #243: it
+    # satisfies the `BehaviorTools` port that `set_quiet` dispatches against, so conversation
+    # takes it as a constructor argument. It is also the service whose subscriptions span every
+    # other one's output (§9.1.3) — but it depends on none of them, which is what makes this
+    # ordering possible at all.
+    # ⚠️ PolicyLimits is assembled here, from config, and passed as a value — the gate never sees
+    # a Config object, because a pure function that can read configuration is not a pure function.
+    behavior = BehaviorService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        triggers=trigger_store,
+        proactive_log=trigger_store,
+        limits=PolicyLimits(
+            quiet_start_minutes=config.behavior.quiet_hours.start_minutes,
+            quiet_end_minutes=config.behavior.quiet_hours.end_minutes,
+            presence_window_s=config.behavior.presence_window_s,
+            ambient_speech_threshold_s=config.behavior.ambient_speech_threshold_s,
+            global_cooldown_s=config.behavior.global_cooldown_s,
+            daily_budget=config.behavior.daily_budget,
+        ),
+        timezone=config.behavior.timezone,
+        default_cooldown_s=config.behavior.global_cooldown_s,
+        hold_open_s=config.behavior.hold_open_s,
+        ignore_backoff_multiplier=config.behavior.ignore_backoff_multiplier,
+        ignore_streak_limit=config.behavior.ignore_streak_limit,
+    )
+
     conversation = ConversationService(
         bus=bus,
         clock=clock,
@@ -713,6 +741,7 @@ def _wire_services(
         # AffectService satisfies AffectTools structurally — no inheritance, no edit there.
         # It is built above, before this call, so no reordering was needed (AVID-214).
         affect=affect,
+        behavior=behavior,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone=config.behavior.timezone,
@@ -762,31 +791,6 @@ def _wire_services(
         nap_after_s=config.vision.nap_after_s,
         health=adapter_health,
     )
-    # BehaviorService last: it needs the state machine, the trigger store and the policy limits,
-    # and it is the only service whose subscriptions span every other one's output (§9.1.3).
-    # ⚠️ PolicyLimits is assembled here, from config, and passed as a value — the gate never sees
-    # a Config object, because a pure function that can read configuration is not a pure function.
-    behavior = BehaviorService(
-        bus=bus,
-        clock=clock,
-        state=state,
-        triggers=trigger_store,
-        proactive_log=trigger_store,
-        limits=PolicyLimits(
-            quiet_start_minutes=config.behavior.quiet_hours.start_minutes,
-            quiet_end_minutes=config.behavior.quiet_hours.end_minutes,
-            presence_window_s=config.behavior.presence_window_s,
-            ambient_speech_threshold_s=config.behavior.ambient_speech_threshold_s,
-            global_cooldown_s=config.behavior.global_cooldown_s,
-            daily_budget=config.behavior.daily_budget,
-        ),
-        timezone=config.behavior.timezone,
-        default_cooldown_s=config.behavior.global_cooldown_s,
-        hold_open_s=config.behavior.hold_open_s,
-        ignore_backoff_multiplier=config.behavior.ignore_backoff_multiplier,
-        ignore_streak_limit=config.behavior.ignore_streak_limit,
-    )
-
     for service in (
         affect,
         expression,
@@ -844,7 +848,6 @@ async def _run(config: Config) -> int:
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
-    health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
     # The one state machine (SDS §3.8.4). Built here so every future service shares this
     # instance rather than growing a private copy — the lifecycle drives it to IDLE.
@@ -895,6 +898,16 @@ async def _run(config: Config) -> int:
         cues=cues,
         config=config,
         adapter_health=adapter_health,
+    )
+    # The control API is built *after* the services, and that ordering is #244's: §9.5's
+    # POST /quiet sets the same state the `set_quiet` tool does, through the same
+    # `BehaviorTools` port, so the server needs the behaviour engine to exist first. Two doors,
+    # one room — §9.5 calls the route "also reachable via set_quiet tool", and the only way to
+    # make that true rather than approximately true is for both to call one method.
+    health = HealthServer(
+        bind=config.api.bind,
+        port=config.api.port,
+        behavior=next(s for s in services if isinstance(s, BehaviorService)),
     )
     # ``servo`` is the last adapter still constructed only to realize the switch and appear in the
     # health map — moving it is MotionService's job (M9). ``camera`` and ``face_detector`` left this
