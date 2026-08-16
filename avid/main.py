@@ -677,6 +677,9 @@ def _wire_services(
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         think_timeout_s=config.gate.think_timeout_s,
+        # Who owns the turn boundary (AVID-194). False — the shipped value — means the local VAD
+        # is the only authority and ConversationService commits from its falling edge.
+        server_turn_detection=config.ai.turn_detection.server_is_an_authority,
     )
     # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
     # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so

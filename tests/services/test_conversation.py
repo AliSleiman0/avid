@@ -191,6 +191,7 @@ async def _rig(
     memory: _StubMemory | MemoryService | None = None,
     memory_inject_timeout_s: float = 1.0,
     think_timeout_s: float = 3600.0,
+    server_turn_detection: bool = False,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -224,6 +225,7 @@ async def _rig(
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
         think_timeout_s=think_timeout_s,
+        server_turn_detection=server_turn_detection,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -545,6 +547,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         think_timeout_s=3600.0,
+        server_turn_detection=False,
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -965,6 +968,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         think_timeout_s=3600.0,
+        server_turn_detection=False,
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -1068,6 +1072,56 @@ async def test_speech_ended_with_a_live_session_rearms_the_idle_timer() -> None:
         await rig.collector.settle()
         # The session stayed open across the pause; the idle timer is simply re-armed.
         assert rig.client.opened and not rig.client.closed
+
+
+async def test_the_falling_edge_ends_the_user_turn() -> None:
+    """AVID-194: with the server VAD off, our falling edge is the **only** thing that ends a turn.
+
+    Previously two detectors decided this — ours at ``silence_hold_ms``, OpenAI's at
+    ``silence_duration_ms`` — and since a 500–900 ms pause is ordinary speech, the server routinely
+    committed inside one and answered a fragment. The failure this asserts against is the mirror
+    image: with the server no longer committing, a falling edge that does not commit is a turn the
+    model never hears at all, and nothing downstream will rescue it."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+        assert rig.client.committed_turns == 0  # still talking
+
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await rig.collector.settle()
+
+    assert client.committed_turns == 1
+
+
+async def test_the_falling_edge_does_not_commit_when_the_server_still_owns_turns() -> (
+    None
+):
+    """The other half of the switch, and the reason it is a switch rather than a deletion.
+
+    With ``[ai.turn_detection] type = "server_vad"`` the far end commits on its own clock, so a
+    commit from here would be a *second* one — the two-authority race again, arriving from the
+    opposite direction. The configuration is the defect and is not shipped, but it stays reachable
+    for comparison, and reachable means correct."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+    async with _rig(client=client, server_turn_detection=True) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await rig.bus.publish(
+            AudioSpeechEnded(
+                **envelope(clock=rig.clock, correlation_id=uuid4(), source="test"),
+                duration_ms=200,
+            )
+        )
+        await rig.collector.settle()
+
+    assert client.committed_turns == 0
 
 
 async def test_no_thinking_cue_when_the_reply_is_already_playing() -> None:

@@ -364,6 +364,30 @@ class RealtimeClient(Protocol):
         before it crosses, so no Realtime shape leaks past the adapter."""
         ...
 
+    async def end_user_turn(self) -> None:
+        """The user has stopped speaking — close their turn and ask for a reply (AVID-194).
+
+        Called from the local VAD's falling edge, and it is what makes **us** the single
+        turn-taking authority. Until AVID-194 the system ran two independent VADs over the same
+        audio, both authoritative: ours at ``[gate] silence_hold_ms`` and OpenAI's at
+        ``[ai.turn_detection] silence_duration_ms``. A 500–900 ms pause *is ordinary speech* —
+        drawing breath, hesitating before a name — so inside that window the server committed and
+        answered a fragment while our gate still considered the utterance open. Whichever window
+        is smaller commits first, by construction; there is no assignment of the two knobs that
+        leaves only one of them deciding.
+
+        **Named for what the application needs, not for the frames it becomes.** The vendor's
+        version of this is ``input_audio_buffer.commit`` followed by ``response.create`` — two
+        frames, in that order, with the second mandatory or the model silently sits (§6.6's
+        step-5 trap). Which of those an adapter sends, and whether it sends any, is the adapter's
+        business (ADR-003): a replay fixture answers on its own recorded schedule and needs to
+        send nothing at all.
+
+        Idempotence is the adapter's business too: a falling edge with nothing buffered must not
+        raise, because the caller cannot know what the socket has seen.
+        """
+        ...
+
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): tell the model the user cut ``item_id`` off at
         ``audio_end_ms`` — **what the speaker actually played** (from

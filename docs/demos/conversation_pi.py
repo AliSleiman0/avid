@@ -735,6 +735,7 @@ async def _run_conversation(
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         think_timeout_s=config.gate.think_timeout_s,
+        server_turn_detection=config.ai.turn_detection.server_is_an_authority,
     )
     # The cost meter is the O7 instrument: it owns the §6.10.1 rate table and the §6.10.3 usage
     # model, so the harness reads a number rather than recomputing one (and cannot disagree with

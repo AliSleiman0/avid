@@ -301,6 +301,7 @@ class ReplayRealtimeClient:
         self.tool_outputs: list[tuple[str, str]] = []
         self.injected: list[str] = []
         self.cancels = 0
+        self.committed_turns = 0
         self.opened = False
         self.closed = False
 
@@ -361,6 +362,15 @@ class ReplayRealtimeClient:
             if self.closed:
                 return
             yield event
+
+    async def end_user_turn(self) -> None:
+        """Record the AVID-194 commit. A replay does not act on it.
+
+        The recorded timeline already contains the model's reply on its own schedule, so there is
+        nothing for a commit to trigger — asking a fixture to answer would mean inventing a reply
+        it never recorded. Counted, like :attr:`cancels`, so the dispatch tests can assert that the
+        falling edge reached the port at all. Non-blocking (P8)."""
+        self.committed_turns += 1
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): record the truncation. Non-blocking (P8)."""
@@ -553,27 +563,13 @@ class OpenAIRealtimeClient:
                     # is never published: the robot answers aloud with no record of what was
                     # said, so §7.5/§7.6 have nothing to extract a memory from.
                     "transcription": {"model": self._transcription_model},
-                    "turn_detection": {
-                        **self._turn_detection,
-                        "create_response": True,
-                        # FALSE, and this is load-bearing. Barge-in is OURS (§6.2.4, #104): local
-                        # VAD cuts the speaker, then this adapter sends truncate(item, played_ms)
-                        # + cancel with the ms the device really emitted. Letting the server also
-                        # interrupt is not redundancy, it is a second cancel racing ours on worse
-                        # information.
-                        #
-                        # How we learned it, since the symptom looks nothing like the cause: at the
-                        # #106 bench run every response went `response.created` -> `response.done`
-                        # with no output items and zero usage, so the robot only ever played its
-                        # thinking cue — the user hears "one second", forever. `AudioService` then
-                        # buffered each utterance and handed it over in one burst, and a burst
-                        # arriving while a reply is in flight is indistinguishable from a barge-in,
-                        # so the server cancelled every reply it had just started. #153 removed the
-                        # burst (capture is streamed live now, §6.3), which removes that particular
-                        # trigger — but this setting stays off for the reason above, which never
-                        # depended on it. Turning it back on is a second canceller, not a fix.
-                        "interrupt_response": False,
-                    },
+                    # `null` when [ai.turn_detection] type = "none" — the AVID-194 setting, and
+                    # the shipped one. It hands turn-taking to the local VAD alone: the server
+                    # stops committing the input buffer, stops deciding when the user finished,
+                    # and stops creating responses, so `end_user_turn()` becomes the only thing
+                    # that starts a reply. Two authorities over one microphone is not redundancy
+                    # — it is a race whose loser answers half a sentence.
+                    "turn_detection": self._server_turn_detection(),
                 },
                 "output": {
                     # 24 kHz is what the model emits and what _translate stamps on every
@@ -590,6 +586,30 @@ class OpenAIRealtimeClient:
         if self._tools:
             config["tools"] = list(self._tools)  # §6.6 — static for the session's life
         return config
+
+    def _server_turn_detection(self) -> dict[str, Any] | None:
+        """The `turn_detection` block, or ``None`` to switch the server's VAD off (AVID-194)."""
+        if self._turn_detection.get("type") in (None, "none"):
+            return None
+        return {
+            **self._turn_detection,
+            "create_response": True,
+            # FALSE, and this is load-bearing. Barge-in is OURS (§6.2.4, #104): local VAD cuts
+            # the speaker, then this adapter sends truncate(item, played_ms) + cancel with the ms
+            # the device really emitted. Letting the server also interrupt is not redundancy, it
+            # is a second cancel racing ours on worse information.
+            #
+            # How we learned it, since the symptom looks nothing like the cause: at the #106
+            # bench run every response went `response.created` -> `response.done` with no output
+            # items and zero usage, so the robot only ever played its thinking cue — the user
+            # hears "one second", forever. `AudioService` then buffered each utterance and handed
+            # it over in one burst, and a burst arriving while a reply is in flight is
+            # indistinguishable from a barge-in, so the server cancelled every reply it had just
+            # started. #153 removed the burst (capture is streamed live now, §6.3), which removes
+            # that particular trigger — but this setting stays off for the reason above, which
+            # never depended on it. Turning it back on is a second canceller, not a fix.
+            "interrupt_response": False,
+        }
 
     async def open(self, *, memory: Awaitable[str] | None = None) -> None:
         """Connect a fresh cold session and send ``session.update`` (SDS §6.2.2/§6.2.3).
@@ -961,9 +981,8 @@ class OpenAIRealtimeClient:
         the turn (§6.6's step-5 trap, the number-one Realtime tool-integration bug). Non-blocking
         (P8).
 
-        **The wait between them is #284.** This is the only ``response.create`` we ever send —
-        every other response is created by the server, because ``turn_detection.create_response``
-        is on — and it was unguarded, so on the 2026-08-15 rig run it raced::
+        **The wait between them is #284.** ``response.create`` was unguarded, so on the
+        2026-08-15 rig run it raced::
 
             realtime error #1: type='invalid_request_error'
               code='conversation_already_has_active_response'
@@ -994,6 +1013,38 @@ class OpenAIRealtimeClient:
                 },
             }
         )
+        await self._create_response()
+
+    async def end_user_turn(self) -> None:
+        """Close the input buffer and ask for a reply — the AVID-194 commit.
+
+        Two frames: ``input_audio_buffer.commit`` then ``response.create``. With
+        ``[ai.turn_detection] type = "none"`` the server does neither on its own, so this is the
+        only thing that ends a turn, and the local VAD's falling edge is the only clock that
+        matters. That is the whole point — see :meth:`~avid.core.ports.RealtimeClient.end_user_turn`
+        for why two authorities over one microphone is a race rather than redundancy.
+
+        **Idempotent against an empty buffer.** A falling edge can arrive with nothing buffered —
+        a barge-in already committed it, or the session opened mid-utterance — and the API answers
+        that with ``input_audio_buffer_commit_empty``. That is a complaint, not a fault: it is
+        logged like any other error frame and the session continues (§6.2.5). The caller cannot
+        know what the socket has seen, so it must not have to.
+        """
+        await self._send({"type": "input_audio_buffer.commit"})
+        await self._create_response()
+
+    async def _create_response(self) -> None:
+        """Send ``response.create``, waiting for any in-flight response to finish first (#284).
+
+        Two callers now, and #194 is why there are two: :meth:`send_tool_output`'s step-5 follow,
+        and :meth:`end_user_turn`'s commit. AVID-194's own write-up predicted this — *"``response
+        .create`` becomes ours to not-send twice; AVID-182's response tracking already exists for
+        this, it would gain a second caller"* — and the guard built for #284 is that machinery.
+
+        The wait fails **open**: on timeout the create goes out anyway. A dropped reply is a turn
+        the user waited on and never got, which from their chair is indistinguishable from being
+        ignored; a rejected one at least surfaces as an ERROR naming our own event id.
+        """
         if not self._response_idle.is_set():
             try:
                 await asyncio.wait_for(
@@ -1068,6 +1119,9 @@ class CapturingRealtimeClient:
 
     async def send_audio(self, chunk: AudioChunk) -> None:
         await self._inner.send_audio(chunk)
+
+    async def end_user_turn(self) -> None:
+        await self._inner.end_user_turn()
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         await self._inner.truncate(item_id, audio_end_ms)

@@ -191,12 +191,30 @@ class SpeakerConfig(_Section):
 
 
 class TurnDetectionConfig(_Section):
-    """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails)."""
+    """OpenAI Realtime server-VAD turn detection (SDS §6.10 guardrails).
 
-    type: str = "server_vad"
+    ``"none"`` — the **shipped** value since AVID-194 — switches the server's VAD off entirely and
+    makes the local Silero gate the single turn-taking authority. Until then the system ran two
+    independent detectors over the same microphone, both authoritative for turn boundaries, and a
+    500–900 ms pause *is ordinary speech*: inside that window the server committed and answered a
+    fragment while our gate still considered the utterance open. That is not tunable — AVID-176
+    measured 500/500 producing 2 replies in 13 turns and 900/900 producing 1 in 8, and given any
+    required margin the smaller window commits first by construction.
+
+    ``"server_vad"`` keeps the old two-authority behaviour reachable for comparison. The three
+    tuning fields below apply only to it and are inert under ``"none"``; they are kept rather than
+    deleted so switching back is a config edit, which is the whole point of the seam.
+    """
+
+    type: Literal["server_vad", "none"] = "none"
     threshold: float = 0.5
     prefix_padding_ms: int = 300
     silence_duration_ms: int = 500
+
+    @property
+    def server_is_an_authority(self) -> bool:
+        """Whether the server also decides when a turn ends (AVID-194)."""
+        return self.type == "server_vad"
 
 
 class AiConfig(_Section):
@@ -587,6 +605,13 @@ class Config(_Section):
         #   900 / 500  ->  8 transcripts, 10 replies in 14 turns
         # Equal being fatal in BOTH directions is what identifies this as a race rather than a
         # value being too short, and it is why the SDS used to claim equal was the shipped case.
+        #
+        # ⚠️ **Conditional since AVID-194.** The whole invariant exists because the server is a
+        # second turn-taking authority; with `type = "none"` it is not one, nothing on the far end
+        # is counting silence, and there is no margin to clear. Enforcing it anyway would reject
+        # the correct shipped configuration — the classic shape of a guard outliving its reason.
+        if not self.ai.turn_detection.server_is_an_authority:
+            return self
         margin_ms = (
             self.gate.silence_hold_ms - self.ai.turn_detection.silence_duration_ms
         )

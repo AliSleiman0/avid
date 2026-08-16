@@ -109,6 +109,18 @@ def test_events_is_an_async_iterator(client: RealtimeClient) -> None:
     assert isinstance(client.events(), AsyncIterator)
 
 
+async def test_end_user_turn_is_accepted_by_every_adapter(
+    client: RealtimeClient,
+) -> None:
+    """AVID-194: the falling edge reaches the port on every adapter, and never raises.
+
+    Deliberately shallow, because the port's promise here is shallow: *"the user stopped talking"*.
+    What that becomes on the wire is the adapter's business — two frames for the real client,
+    a counter for a replay whose reply is already recorded — so the shared tier can only assert
+    that the call is part of the contract and is safe to make with nothing buffered."""
+    await client.end_user_turn()
+
+
 # --- ReplayRealtimeClient tail (#101): the behaviour the fake owns (AC-5) ------------------
 
 
@@ -1033,6 +1045,95 @@ async def test_send_tool_output_returns_the_result_then_requests_a_response() ->
         "call_id": "call_0",
         "output": '{"facts": ["Lisbon"]}',
     }
+
+
+async def test_end_user_turn_commits_then_asks_for_a_reply() -> None:
+    """AVID-194: two frames, in order. The commit closes the input buffer; the create is what
+    actually produces a reply, and without it the model sits silently (§6.6's step-5 trap) — which
+    with the server VAD off nothing else would rescue, because nothing else is watching."""
+    client = _openai()
+    ws = _CapturingWs()
+    client._ws = ws  # type: ignore[assignment]
+
+    await client.end_user_turn()
+
+    assert [m["type"] for m in ws.sent] == [
+        "input_audio_buffer.commit",
+        "response.create",
+    ]
+
+
+async def test_end_user_turn_waits_for_an_in_flight_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #284 guard has a second caller now, and AVID-194's write-up predicted it would:
+    *"``response.create`` becomes ours to not-send twice."*
+
+    Reachable in ordinary use: a barge-in leaves a response generating, and the user's next
+    falling edge arrives before it terminates. The commit still goes out immediately — it is about
+    the input buffer and races nothing — but the create waits."""
+    _stub_websockets(monkeypatch)
+    ws = _DuplexWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+    stream = client.events()
+
+    ws.push({"type": "response.created", "response": {"id": "resp_1"}})
+    ws.push(
+        {
+            "type": "response.output_audio_transcript.done",
+            "transcript": "still talking",
+            "item_id": "item_1",
+        }
+    )
+    await asyncio.wait_for(anext(stream), _WAIT_S)
+
+    task = asyncio.create_task(client.end_user_turn())
+    await asyncio.wait_for(ws.sent_event.wait(), _WAIT_S)
+
+    assert [m["type"] for m in ws.sent] == ["input_audio_buffer.commit"], (
+        "response.create went out while resp_1 was still in flight"
+    )
+
+    ws.push({"type": "response.done", "response": {"id": "resp_1"}})
+    await asyncio.wait_for(task, _WAIT_S)
+
+    assert [m["type"] for m in ws.sent] == [
+        "input_audio_buffer.commit",
+        "response.create",
+    ]
+
+    await client.aclose()
+    await stream.aclose()
+
+
+def test_the_shipped_session_switches_the_server_vad_off() -> None:
+    """AVID-194's whole mechanism, asserted on the payload that carries it.
+
+    ``turn_detection: null`` is what stops the far end committing the buffer, deciding when the
+    user finished, and creating responses. A behavioural test cannot see this — the robot answers
+    either way — it just answers *fragments* when two detectors disagree, intermittently, in a way
+    only a bench session reveals. So it is asserted on the wire shape."""
+    client = _openai(turn_detection={"type": "none", "silence_duration_ms": 500})
+
+    session = client._session_config()["audio"]["input"]  # type: ignore[index]
+
+    assert session["turn_detection"] is None
+
+
+def test_the_server_vad_can_still_be_switched_back_on() -> None:
+    """The two-authority configuration stays reachable for comparison — it is the defect, but a
+    seam that cannot be switched back is not a seam, and AVID-194's risk register explicitly notes
+    we now inherit turn-end quality from Silero alone."""
+    client = _openai(turn_detection={"type": "server_vad", "silence_duration_ms": 500})
+
+    detection = client._session_config()["audio"]["input"]["turn_detection"]  # type: ignore[index]
+
+    assert detection is not None
+    assert detection["type"] == "server_vad"
+    assert detection["create_response"] is True
+    # Still ours to interrupt, even when the server owns turn ends (§6.2.4).
+    assert detection["interrupt_response"] is False
 
 
 async def test_the_tool_output_waits_for_the_in_flight_response(
