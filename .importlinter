@@ -70,6 +70,7 @@ type = independence
 modules =
     avid.services.affect
     avid.services.audio
+    avid.services.behavior
     avid.services.conversation
     avid.services.episode_recorder
     avid.services.expression

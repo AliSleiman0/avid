@@ -7,6 +7,7 @@ never imports ``avid.adapters`` (P2, P5).
 
 from avid.services.affect import AffectService
 from avid.services.audio import AudioService
+from avid.services.behavior import BehaviorService
 from avid.services.conversation import ConversationService
 from avid.services.cost_meter import CostMeterService
 from avid.services.cue_bank import CUE_FILES, CueBank
@@ -27,6 +28,7 @@ __all__ = [
     "AffectService",
     # The audio loop — VAD gate, pre-roll, audio.* facts (AVID-79)
     "AudioService",
+    "BehaviorService",
     # The conversation loop — Realtime session, conversation.* + degraded facts (#102)
     "ConversationService",
     # The cost meter — §6.10.6 mandatory instrumentation, projected monthly spend (#105)
