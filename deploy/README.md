@@ -144,6 +144,39 @@ arecord -D default -f S16_LE -r 16000 -c 1 -d 2 /tmp/t.wav   # ~64 kB = the mic
 speaker-test -D default -t sine -f 440 -l 1 -c 2             # tone from the amp
 ```
 
+**Then set the capture mixer, and store it.** This is not tuning — it is the difference between
+a robot that hears you and one that hears a room that is not there (AVID-296):
+
+```sh
+amixer -c Device sset "Auto Gain Control" off   # ⚠️ THE important one — see below
+amixer -c Device sset Mic 10                    # 62%, +14.9 dB: the bring-up calibration
+sudo alsactl store                              # or it is gone at the next boot
+```
+
+⚠️ **Why AGC off is provisioning rather than preference.** Measured on this rig, 2026-08-16,
+empty room, nobody speaking:
+
+| | AGC **on** | AGC **off** |
+|---|---|---|
+| broadband | **−16.9 dBFS** | −36.4 dBFS |
+| speech band 300–3400 Hz | −48.8 | −60.4 |
+| **Silero frames called speech** | **151 / 750 (20%)** | 2 / 1250 (0.16%) |
+
+AGC amplifies a *quiet* room until the capture path's own noise floor looks like speech. A fifth
+of an empty room classified as speech opens sessions nobody started: the model has nothing to
+answer, §6.9's deadline fires at 10 s, the robot degrades and reconnects, repeatedly. That is
+AVID-283's nine dropped turns, and it was filed as a *mains hum* problem for a fortnight because
+nothing anywhere reported this switch. 0.16% is AVID-77's published false-open rate — with AGC
+off, nothing is wrong with Silero, the mic, or the room.
+
+`AlsaMicrophone` now logs an ERROR at capture-open if it finds AGC enabled, so a rig that drifts
+back says so. It does **not** refuse to start (§3.12.3: nothing but a bad key at boot stops the
+robot), which means **the log line is the only warning you get** — read it.
+
+⚠️ Do **not** compensate by raising `Mic` instead. Gain is linear and predictable; AGC is a
+feedback loop that raises the floor precisely when the room is quiet, which is the condition the
+session gate cares about.
+
 ### 2. Prepare the venv (do **not** rebuild it)
 
 The `/opt/avid` venv was created with `--system-site-packages` (for `picamera2`). A `uv run`

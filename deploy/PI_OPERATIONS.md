@@ -178,6 +178,71 @@ Mixer state that matters and is easy to lose: mic **gain 10/16 (+14.88 dB), AGC 
 `Device`); amp **Master 85%** (card `MAX98357A`). Note `amixer -D default sget Master` resolves to
 the *mic's* control — query the card explicitly (`amixer -c MAX98357A`).
 
+### ⚠️ 5.1 `Auto Gain Control` — the trap that cost a milestone (AVID-296)
+
+**The line above already said "AGC off". It was not enough, and the reason is worth the space.**
+
+That sentence recorded the *intended* state and nothing checked it, nothing reported it, and
+nothing in the repo owned it. ALSA mixer state is **machine state** restored by `alsactl` at boot
+— a third copy that rots, alongside `/etc/robot/config.toml` and the systemd unit. When it drifted
+on, the symptom was not an error. It was a robot that answered a room nobody was speaking in.
+
+Measured, 2026-08-16, empty room, nobody speaking, one switch toggled:
+
+| | AGC **on** | AGC **off** |
+|---|---|---|
+| broadband | **−16.9 dBFS** | −36.4 dBFS |
+| speech band 300–3400 Hz | −48.8 | −60.4 |
+| dominant below 500 Hz | 50 Hz | 50 Hz |
+| **Silero frames called speech** | **151 / 750 (20%)** | 2 / 1250 (0.16%) |
+
+AGC amplifies a *quiet* room until the capture path's own noise floor looks like speech. A fifth
+of an empty room classified as speech opens sessions the user never started: nothing to answer,
+§6.9's deadline at 10 s, degrade, reconnect, repeat. **That is AVID-283's nine dropped turns**,
+and AVID-283 was filed as a *mains hum* defect and investigated as one for a fortnight. The 50 Hz
+hum is real and identical in both columns; it is not what broke anything.
+
+0.16% is AVID-77's published false-open rate — with AGC off nothing is wrong with Silero, the
+mic, or the room.
+
+**Check it, and check it before believing any level measurement:**
+
+```sh
+amixer -c Device sget "Auto Gain Control"       # want: Playback [off]
+amixer -c Device sget Mic                       # want: Capture 10 [62%] [14.88dB] [on]
+```
+
+`AlsaMicrophone` now logs an **ERROR** at capture-open when it finds AGC enabled, naming the fix.
+It deliberately does *not* refuse to start (§3.12.3 — nothing but a bad key at boot stops the
+robot), so **that log line is the whole of the warning**. Verified both ways on this rig: it fires
+with AGC on and is silent with it off.
+
+⚠️ **Do not compensate with `Mic` gain.** Gain is linear and predictable; AGC is a feedback loop
+that raises the floor *precisely when the room is quiet*, which is the condition the session gate
+exists to act on.
+
+⚠️ **Any level number taken at an unknown AGC state is uncalibrated.** `[gate] barge_in_margin_db
+= 3.0` was tuned on 2026-08-15 with this switch in an unknown position; it is marked uncalibrated
+in `config/pi.toml` until it is re-derived at the provisioned setting. A margin measured at one
+gain is not valid at another.
+
+**Every mixer control on this rig, and its intended value** — so the next one is a known quantity
+rather than a second discovery (AVID-296 AC-4):
+
+| card | control | type | intended | why |
+|---|---|---|---|---|
+| `Device` (USB PnP mic) | `Mic` | capture volume | **10 / 16 (62%, +14.9 dB)** | the bring-up calibration; speech peaks ≈ −3.6 dBFS at ~50 cm |
+| `Device` | `Auto Gain Control` | playback switch | **off** | the whole of this section |
+| `MAX98357A` (I²S amp) | `Master` | playback volume | **85%** | speaker bring-up; louder clips the DAC |
+
+That is the complete list — two controls on the capture card, one on the amp. `amixer -c Device
+scontrols` will say so again if a device is ever swapped.
+
+**The general lesson, since this is the second time:** the empty-room readings that started
+AVID-283 were taken with a broken instrument and reasoned about as if they described the room.
+Before trusting a level, capture a control with a person actually speaking — bring-up's figure is
+**peak −3.6 dBFS**, and anything far below that means the instrument, not the room.
+
 **Acoustic coupling amp → mic is weak.** Audio clearly audible to a human does not lift the mic
 above its ~−51 dBFS ambient floor. Don't build test rigs that assume the mic can hear the speaker —
 and note that for the M4 loopback gate that coupling is a *feedback path you don't want* anyway.
