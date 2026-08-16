@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "_comment": [
+    "The §10.7 proactive turn: the robot speaks and NOBODY SPOKE FIRST.",
+    "Note what is absent — there is no user_transcript event, and that absence is the fixture's",
+    "whole content. Every other session under assets/sessions/ replays a conversation someone",
+    "started; this one replays a conversation a clock started. Using two_turn here instead would",
+    "have the gate reading that fixture's own user turn and reporting it as proactive.",
+    "No audio chunk: the M10 gate grades the utterance and the arc, not playback — that is M4's",
+    "and M5's ground, already covered by their own gates."
+  ],
+  "events": [
+    {"delay_ms": 100, "type": "assistant_transcript", "text": "Morning — coffee's about due, isn't it?", "item_id": "item_0"},
+    {"delay_ms": 200, "type": "turn_done", "usage": {"input_tokens": 380, "cached_input_tokens": 320, "output_tokens": 22}}
+  ]
+}
