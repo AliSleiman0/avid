@@ -32,12 +32,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import socket
 import ssl
 import statistics
 import time
+import tomllib
+from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _HOST = "api.openai.com"
 _PORT = 443
 _NS_PER_MS = 1_000_000
@@ -86,11 +90,27 @@ def _time_transport() -> dict[str, int]:
     return phases
 
 
-async def _time_upgrade(api_key: str, context: ssl.SSLContext) -> dict[str, int]:
-    """One authenticated pass: the WebSocket upgrade, plus a ``session.update`` and close.
+async def _time_upgrade(
+    api_key: str, context: ssl.SSLContext, *, instructions: str = ""
+) -> dict[str, int]:
+    """One authenticated pass, split four ways (AVID-157's spike).
 
     This is the leg the adapter cannot avoid and the key-free phases cannot see. Subtracting the
     transport numbers above from it leaves the API's own handshake cost.
+
+    ⚠️ **``send`` was never the interesting number and used to be the only one here.** It times a
+    local socket write and is always ~0 — it says nothing about whether the API is slow. The two
+    phases that answer #157's actual question are the ones that *wait for the far end*:
+
+    * ``created`` — upgrade complete → the server's own ``session.created`` frame. This is the
+      **server's session bootstrap**, and #157 named it as one of the two candidates for the
+      ~1.3–1.8 s that transport does not explain.
+    * ``updated`` — our ``session.update`` sent → the server's ``session.updated`` acknowledgement.
+      This is where payload size, if it matters at all, would show up.
+
+    ``instructions`` exists to test #157's own hypothesis — *"whether ``session.update``'s size
+    matters (instructions + tools + memory block)"* — which M6 makes urgent rather than academic,
+    because layer 2 adds ~250 tokens to every session's prefix.
     """
     import websockets  # optional `openai` extra, exactly like the adapter's lazy import
 
@@ -104,11 +124,37 @@ async def _time_upgrade(api_key: str, context: ssl.SSLContext) -> dict[str, int]
     phases["upgrade"] = time.monotonic_ns() - started
 
     started = time.monotonic_ns()
-    await connection.send('{"type":"session.update","session":{"type":"realtime"}}')
+    await _recv_until(connection, "session.created")
+    phases["created"] = time.monotonic_ns() - started
+
+    payload = json.dumps(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "instructions": instructions},
+        }
+    )
+    started = time.monotonic_ns()
+    await connection.send(payload)
     phases["send"] = time.monotonic_ns() - started
+
+    started = time.monotonic_ns()
+    await _recv_until(connection, "session.updated")
+    phases["updated"] = time.monotonic_ns() - started
 
     await connection.close()
     return phases
+
+
+async def _recv_until(connection: object, kind: str) -> None:
+    """Read frames until one of type *kind* arrives, or the socket ends.
+
+    Bounded by the socket rather than a timer on purpose: a probe that gave up early would report
+    a fast bootstrap for a session that never started, which is the direction a latency
+    measurement must not fail in."""
+    while True:
+        raw = await connection.recv()  # type: ignore[attr-defined]
+        if json.loads(raw).get("type") == kind:
+            return
 
 
 def _report(label: str, samples: list[dict[str, int]]) -> None:
@@ -134,6 +180,11 @@ async def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument(
+        "--config",
+        default="config/pi.toml",
+        help="profile supplying the identity layer for the M6-prefix arm",
+    )
+    parser.add_argument(
         "--live",
         action="store_true",
         help="also time the WebSocket upgrade (needs OPENAI_API_KEY + the openai extra)",
@@ -158,14 +209,39 @@ async def _main() -> int:
         return 2
 
     context = ssl.create_default_context()  # built once, as the adapter now does
-    upgrades = []
-    for _ in range(args.iterations):
-        try:
-            upgrades.append(await _time_upgrade(api_key, context))
-        except Exception as exc:  # noqa: BLE001 - a diagnostic reports failures, never raises
-            print(f"\nupgrade failed: {type(exc).__name__}: {exc}")
-            return 1
-    _report("websocket upgrade (authenticated)", upgrades)
+
+    # Two arms, so #157's "does session.update's size matter" stops being a hypothesis. The M6 arm
+    # is the REAL shipped prefix — layers 1-3 through the shipped composer — because a made-up
+    # string of roughly the right length would measure the wrong thing if the API charges for
+    # anything other than raw bytes.
+    from avid.core.config import PersonalityConfig, load_config
+    from avid.core.personality import compose, compose_instructions
+    from avid.services.tools import CAPABILITY_INSTRUCTIONS
+
+    config = load_config(args.config)
+    personality_path = _REPO_ROOT / "config" / "personality" / "default.toml"
+    with personality_path.open("rb") as handle:
+        personality = PersonalityConfig.model_validate(tomllib.load(handle))
+    m6_prefix = compose_instructions(
+        identity=config.ai.instructions,
+        personality=compose(personality),
+        capabilities=CAPABILITY_INSTRUCTIONS,
+    )
+
+    for label, instructions in (
+        ("empty instructions", ""),
+        (f"M6 prefix ({len(m6_prefix)} chars)", m6_prefix),
+    ):
+        upgrades = []
+        for _ in range(args.iterations):
+            try:
+                upgrades.append(
+                    await _time_upgrade(api_key, context, instructions=instructions)
+                )
+            except Exception as exc:  # noqa: BLE001 - a diagnostic reports, never raises
+                print(f"\nupgrade failed: {type(exc).__name__}: {exc}")
+                return 1
+        _report(f"websocket upgrade — {label}", upgrades)
 
     print(
         "\nRead it against SDS §6.3's ~200 ms:\n"
