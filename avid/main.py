@@ -535,6 +535,7 @@ def _build_realtime(config: Config, *, clock: Clock) -> RealtimeClient:
                 # Realtime transcribes the user's speech only when asked; without this no
                 # UserTranscript is ever produced and the turn arc stalls (§6.2.2).
                 transcription_model=config.ai.transcription_model,
+                transcription_language=config.ai.transcription_language,
                 # The §6.6 tool declarations (#125): recall/forget/remember_fact as JSON Schema,
                 # static for the session's life. Vendor-neutral dicts, injected like turn_detection.
                 tools=TOOL_SCHEMAS,

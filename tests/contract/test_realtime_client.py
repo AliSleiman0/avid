@@ -410,6 +410,7 @@ def _openai(**overrides: object) -> OpenAIRealtimeClient:
         "max_output_tokens": 512,
         "turn_detection": {"type": "server_vad"},
         "transcription_model": "whisper-1",
+        "transcription_language": None,
     }
     kwargs.update(overrides)
     return OpenAIRealtimeClient(**kwargs)  # type: ignore[arg-type]
@@ -1402,3 +1403,29 @@ def test_the_open_report_total_is_not_the_sum_of_its_phases() -> None:
 
     assert "connect 150 ms" in line and "memory 30 ms" in line
     assert "total 153 ms" in line  # not 182
+
+
+def test_the_transcriber_gets_a_language_hint_when_one_is_configured() -> None:
+    """Measured at the M6 gate: English speech came back as Arabic and Korean.
+
+    Auto-detection is weakest on exactly what this robot hears — short conversational utterances —
+    and the consequence is not cosmetic. Realtime is speech-to-speech, so the *reply* is unaffected
+    and the robot answered the spoken content correctly every time; but the mis-detected text is
+    what reaches ``conversation.user_transcribed``, which §7.6 extracts memories from. §7.6's own
+    argument is that confidently wrong memory is worse than none."""
+    client = _openai(transcription_language="en")
+
+    transcription = client._session_config()["audio"]["input"]["transcription"]  # type: ignore[index]
+
+    assert transcription == {"model": "whisper-1", "language": "en"}
+
+
+def test_no_language_key_is_sent_when_the_hint_is_unset() -> None:
+    """``None`` means "let it auto-detect" and must send no key at all — a hint of ``""`` or
+    ``"auto"`` would be us inventing vendor vocabulary at the boundary the port exists to keep
+    clean."""
+    client = _openai(transcription_language=None)
+
+    assert client._session_config()["audio"]["input"]["transcription"] == {  # type: ignore[index]
+        "model": "whisper-1"
+    }

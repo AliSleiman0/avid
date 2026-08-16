@@ -284,6 +284,18 @@ class AiConfig(_Section):
     # answers aloud with no record of what was said, leaving §7.5/§7.6 nothing to extract. The
     # replay fixtures record the frame, so only a live session can catch its absence (#106 prep).
     transcription_model: str = "whisper-1"
+    # ISO-639-1 hint for the transcriber, or None to let it auto-detect.
+    #
+    # ⚠️ Not cosmetic. Measured at the M6 gate: English speech came back transcribed as Arabic and
+    # Korean across several runs ("لقد حصلت على يوم صعب", "테스트"). The *conversation* was
+    # unaffected — Realtime is speech-to-speech and answered the spoken content correctly every
+    # time — but `conversation.user_transcribed` is what §7.6 extracts memories from, so a
+    # mis-detected language writes confident nonsense into the store, and §7.6's whole argument is
+    # that confabulated memory is worse than none.
+    #
+    # A hint rather than a hard setting, and defaulted to the language the robot ships speaking:
+    # auto-detection on short conversational utterances is exactly where it is weakest.
+    transcription_language: str | None = "en"
     max_output_tokens: int = 512
     personality: str = "config/personality/default.toml"
     instructions: str = (
