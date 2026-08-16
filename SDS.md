@@ -163,11 +163,13 @@
 
 ## 10. Behavior and Proactivity Engine
 10.1 Design goals
-10.2 Trigger types
-10.3 Scheduler design
-10.4 Interruption and politeness policy
-10.5 Do-not-disturb and quiet hours
-10.6 Behavior authoring format
+10.2 The central separation
+10.3 Scheduler
+10.4 The interruption policy
+10.5 Ignore backoff
+10.6 Log every decision
+10.7 Proactive turn initiation
+10.8 What it says
 
 ## 11. Performance Engineering
 11.1 End-to-end latency budget
@@ -538,7 +540,7 @@ Naming: `<domain>.<past_tense_verb>`. Never `display.set_emotion` — that's a c
 | `state` | `transitioned` |
 | `vision` | `presence_gained`, `presence_lost`, `face_detected` |
 | `memory` | `fact_stored`, `fact_superseded`, `fact_deleted`, `recall_completed` |
-| `behavior` | `trigger_fired`, `proactive_suppressed`, `proactive_delivered` |
+| `behavior` | `trigger_fired`, `proactive_suppressed`, `proactive_delivered`, `trigger_disabled` |
 | `motion` | `gesture_started`, `gesture_completed`, `gesture_preempted` |
 
 Every event carries: `event_id`, `correlation_id`, `timestamp`, `source` (the publishing component name). These are on the `Event` base class and are not optional.
@@ -606,7 +608,7 @@ A queue hitting its bound publishes `system.handler_failed` with a `queue_overfl
 | `ExpressionService` | Turn one affect into display frames. | `affect.changed`, `state.transitioned` | — |
 | `MotionService` | Turn one affect or gesture request into servo movement, safely. | `affect.changed` | `motion.*` |
 | `PresenceService` | Decide whether a human is present, with hysteresis. | — (polls camera port) | `vision.*` |
-| `BehaviorService` | Decide when the robot should speak first. | `vision.*`, `memory.*`, clock | `behavior.*` |
+| `BehaviorService` | Decide when the robot should speak first. | `system.started`, `system.degraded_*`, `state.transitioned`, `audio.speech_*`, `conversation.user_transcribed`, `vision.presence_*`, `memory.fact_*`, clock | `behavior.*` |
 
 Note `AffectService` and `ExpressionService` are separate. The temptation is to merge them. Don't: *deciding* to be happy is domain logic with unit tests; *getting a happy face onto glass* ends in an adapter, and adapters carry device dependencies — a framebuffer, a panel driver, whatever the hardware of the day demands. Merging them puts that dependency in the chain of your emotion tests. That's exactly the mistake P1 exists to prevent. The split holds whatever the display backend is; see §3.6.4.
 
@@ -680,7 +682,7 @@ Two of the three cost more than they looked:
 
 **This is presence, not identity.** The robot learns that *a person* is there, never *which* person. Face recognition is a §7.2 "Could" with materially different privacy consequences (§13), and the boundary is stated here so nothing later drifts across it by accident: no embeddings of faces are computed, none are stored, and the only thing that reaches the database is what the conversation put there. The committed artefacts of this milestone are bounding boxes and confidences — **never images** (§13, `assets/vision/README.md`).
 
-**What M8 delivers, and what it does not.** UC-04 (§2.5) reads *"user sits down; robot notices **and greets**."* Greeting means speaking first, which is `BehaviorService`, quiet hours and the interruption policy — **all of them M10** (§10), and §3.7.5 has no body yet for exactly that reason. M8 delivers the *notices* half, demonstrated by the `SLEEPING → IDLE` wake (§3.10.1). PMP §5.2's register line is amended to match, so this milestone is neither dragging a slice of M10 forward nor sealed against a criterion it knowingly does not meet.
+**What M8 delivers, and what it does not.** UC-04 (§2.5) reads *"user sits down; robot notices **and greets**."* Greeting means speaking first, which is `BehaviorService`, quiet hours and the interruption policy — **all of them M10** (§10); §3.7.5 was a table-of-contents entry for exactly that reason, and M10 wrote it. M8 delivers the *notices* half, demonstrated by the `SLEEPING → IDLE` wake (§3.10.1). PMP §5.2's register line is amended to match, so this milestone is neither dragging a slice of M10 forward nor sealed against a criterion it knowingly does not meet.
 
 **A note on where `BBox` lives.** §3.9.1 lists it in the HAL vocabulary and `avid.core.hal.BBox` is the spelling every port, adapter and service uses — but the type is *defined* in `avid/domain/vision.py` and re-exported from `core/hal.py`. The reason is P1, mechanically: the layers contract puts `core` above `domain`, `vision.face_detected` is a domain event that must name `BBox` to type its payload, and defining it in `core` would make that event the first `domain → core` import in the project. Re-exporting costs nothing and keeps the dependency rule at zero exceptions — the same move `StateTransitioned` makes for a different reason (`domain/state.py`).
 
@@ -753,6 +755,96 @@ Realtime          ConvSvc          MemoryService        SQLite         Bus
 ```
 
 Note the ordering: the fact is **committed before the tool result returns**. The model is told "yes, I remembered" only when that is true. And `BehaviorService` learns about the new recurring fact by subscribing to `memory.fact_stored` — `MemoryService` has no idea the behavior engine exists. That's how UC-02 becomes UC-03 with zero coupling between them.
+
+### 3.7.4 Proactive trigger firing (UC-03)
+
+```
+Clock        Scheduler      BehaviorSvc      PolicyGate     TriggerRepo    Bus        ConvSvc
+  │              │               │               │               │          │            │
+  │ 07:55        │               │               │               │          │            │
+  ├─────────────►│               │               │               │          │            │
+  │              │ heap pop: due(trigger 7)      │               │          │            │
+  │              ├──────────────►│               │               │          │            │
+  │              │               │ build PolicyContext           │          │            │
+  │              │               │  now / state / presence_age_s │          │            │
+  │              │               │  ambient_speech_s / cooldown  │          │            │
+  │              │               ├──────────────►│               │          │            │
+  │              │               │               │ 6 rules, first veto wins │            │
+  │              │               │◄─ Delivered ──┤               │          │            │
+  │              │               │               │               │          │            │
+  │              │               │ mint correlation_id (§9.1.1)  │          │            │
+  │              │               │ proactive_log(outcome=delivered)         │            │
+  │              │               ├──────────────────────────────►│          │            │
+  │              │               │ behavior.trigger_fired{trigger_id, fact_id}           │
+  │              │               ├─────────────────────────────────────────►│            │
+  │              │               │ state.transition(BEHAVIOR_TRIGGER_FIRED) │            │
+  │              │               ├─────────────────────────────────────────►│            │
+  │              │               │               │               │  IDLE → THINKING       │
+  │              │               │               │               │          ├───────────►│
+  │              │               │               │               │          │  §10.7 opens
+  │              │               │               │               │          │  the session
+  │              │               │               │               │          │            │
+  │              │        ── OR, if any rule vetoed ──           │          │            │
+  │              │               │◄─ Suppressed("quiet_hours") ──┤          │            │
+  │              │               │ proactive_log(outcome=suppressed,        │            │
+  │              │               │   reason="quiet_hours", utterance=NULL)  │            │
+  │              │               ├──────────────────────────────►│          │            │
+  │              │               │ behavior.proactive_suppressed{rule}      │            │
+  │              │               ├─────────────────────────────────────────►│            │
+  │              │               │  (no session, no audio, but LOGGED)      │            │
+```
+
+Three things this diagram commits the code to. **The gate is consulted before anything observable
+happens** — no session is opened, no state moves, and nothing reaches a speaker until
+`evaluate_policy` has returned `Delivered`; a suppressed proposal is indistinguishable from silence
+to everyone except `proactive_log`. **Both arms write a row.** The suppressed arm is not an early
+return: §10.6's whole argument is that "it never fired" and "it fired and was vetoed forty times"
+look identical from outside the database, and only one of them means rule 4 is too aggressive.
+**`BehaviorService` both publishes the event and drives the transition**, exactly as `AudioService`
+does at the other turn origin — `StateManager` subscribes to nothing (§9.2), so the publisher of a
+fact is always the caller of `transition()`.
+
+### 3.7.5 Presence detected → greeting (UC-04)
+
+The half of UC-04 M8 deliberately left undone: M8 delivers *notices*, M10 delivers *greets*.
+
+```
+Camera     PresenceSvc     StateMgr      BehaviorSvc     PolicyGate     ConvSvc
+  │             │              │              │               │            │
+  │ frames      │              │              │               │            │
+  ├────────────►│              │              │               │            │
+  │             │ hysteresis: gain_window_s of detections     │            │
+  │             │ vision.presence_gained{confidence}          │            │
+  │             ├──────────────┬─────────────►│               │            │
+  │             │              │              │ last_present_at = now      │
+  │             │ transition(VISION_PRESENCE_GAINED)          │            │
+  │             ├─────────────►│              │               │            │
+  │             │              │ SLEEPING → IDLE (§3.10.3)    │            │
+  │             │              │ state.transitioned           │            │
+  │             │              ├─────────────►│               │            │
+  │             │              │              │ state = IDLE  │            │
+  │             │              │              │               │            │
+  │             │              │  presence-kind trigger due?  │            │
+  │             │              │              ├──────────────►│            │
+  │             │              │              │  rule 2 now passes (IDLE)  │
+  │             │              │              │  rule 3 now passes (age 0) │
+  │             │              │              │◄─ Delivered ──┤            │
+  │             │              │              │ behavior.trigger_fired     │
+  │             │              │              ├───────────────────────────►│
+  │             │              │              │               │  greet, §10.7
+```
+
+The ordering is the point, and it is why §10.4's rule 2 vetoes anything that is not `IDLE`. Presence
+is what *wakes* the robot — `(SLEEPING, VISION_PRESENCE_GAINED) → IDLE` is a shipped row — so by the
+time a presence-kind trigger is evaluated the machine has already left SLEEPING. A trigger never
+needs to wake anything, which is why there is no `(SLEEPING, BEHAVIOR_TRIGGER_FIRED)` row and why
+adding one would be adding a lie: rule 3 requires presence newer than `presence_window_s` (300 s),
+and `IDLE → SLEEPING` requires ten minutes *without* presence, so "asleep **and** recently seen"
+is not a reachable state.
+
+Note also what M10 does **not** add here: nothing distinguishes *who* was detected. §8's presence
+signal is "someone is there", per-person recognition was ruled a non-goal at M8, and §10 needs
+nothing more than that.
 
 ### 3.7.6 Network loss → degraded → recovery (UC-06)
 
@@ -1001,7 +1093,7 @@ Normative. Implemented as a frozen dict in `domain/state.py`, tested exhaustivel
 |---|---|---|---|
 | BOOTING | `system.started` | IDLE | all required adapters healthy |
 | IDLE | `audio.speech_started` | LISTENING | — |
-| IDLE | `behavior.trigger_fired` | THINKING | not quiet hours; §10.4 passes |
+| IDLE | `behavior.trigger_fired` | THINKING | §10.4 passes (rule 1 covers quiet hours, rule 2 is why IDLE is the only `From` state here) |
 | IDLE | `vision.presence_lost` + 10 min | SLEEPING | — |
 | SLEEPING | `vision.presence_gained` | IDLE | — |
 | SLEEPING | `audio.speech_started` | LISTENING | — |
@@ -1429,12 +1521,36 @@ Per ADR-004, **the model does not own memory. It gets tools.** This is the mecha
 
 | Tool | Signature | Sync? | Notes |
 |---|---|---|---|
-| `remember_fact` | `(text, kind, importance)` → `{ok, fact_id}` | **Durable before return** | §3.7.3. The model is told "remembered" only when it's true. |
+| `remember_fact` | `(text, kind, importance, schedule?)` → `{ok, fact_id}` | **Durable before return** | §3.7.3. The model is told "remembered" only when it's true. `schedule` added at M10 — see below. |
 | `recall` | `(query, k=5)` → `{facts: [...]}` | Async-safe | §7.7. The long-tail retrieval path. |
 | `forget` | `(query)` → `{deleted: n}` | **Durable before return** | UC-07. Hard delete, not supersession. §7.10. |
 | `set_affect` | `(affect)` → `{ok}` | Async, fire-and-forget | §6.8 |
+| `set_quiet` | `(duration_s)` → `{ok, until}` | Async, fire-and-forget | §10.4's manual override, added at M10. Also reachable over HTTP as `POST /quiet` (§9.5) — **one piece of state, two doors.** |
 
 Declaration is at session level in `session.update`, as JSON Schema. Static for the session (§6.2.2 — they're part of the cached prefix).
+
+**`remember_fact`'s `schedule` argument (M10).** Optional, and meaningful only when `kind = "routine"`:
+
+```jsonc
+"schedule": {
+  "rrule":      "FREQ=DAILY",      // RFC 5545 (§10.3). No invented DSL.
+  "local_time": "08:00",           // HH:MM wall clock, in the zone below
+  "timezone":   "Asia/Beirut"      // IANA; defaults to [behavior] timezone if omitted
+}
+```
+
+It exists because §10 needs a *machine-readable* time to schedule and §8.3's `routines` table has
+nowhere else to get one. The alternative — reading `facts.text` back and parsing "every day at 8 AM"
+locally — re-derives structure the model already had in hand while producing the fact text, and a
+heuristic that reads "8" as 20:00 delivers the coffee reminder at night. So the model supplies it on
+the same call, and the `routines` row is written **in the same transaction as the `facts` row**: this
+tool promises durability before it returns, and a fact whose schedule landed separately would make
+that promise half true.
+
+⚠️ A `kind="routine"` fact arriving with no `schedule` is **logged, loudly, with the fact and
+correlation ids**. It is a legitimate outcome — not every routine has a clock time — but a model that
+quietly stops filling the field is indistinguishable from a user with no routines, and that is the
+exact shape of the `set_affect` failure §6.8 spent six live runs discovering.
 
 **The call flow, which is easy to get wrong:**
 
@@ -1912,7 +2028,7 @@ Not ISO-8601 TEXT. §7.7 computes `0.5 ** ((now - last_accessed_at) / (14*86400)
 
 ## 8.3 Physical schema (v1)
 
-> **As built (#117).** The DDL below is the **verbatim** shipped `avid/adapters/migrations/0001_initial.sql` — the spec block and the file are byte-identical, not a sketch that drifted. The file ships inside the wheel and is the single source the checksummed runner applies (§8.6); `FakeFactRepository`/`FakeEpisodeStore` run this same SQL at `":memory:"`, so the simulator's schema *is* the Pi's (P6). All of `facts`, `routines`, `triggers`, `proactive_log`, `episodes`, the `facts_fts` FTS5 shadow + its sync triggers, and `schema_migrations` exist as written.
+> **As built (#117).** The DDL below is the **verbatim** shipped `avid/adapters/migrations/0001_initial.sql` — the spec block and the file are byte-identical, not a sketch that drifted. The file ships inside the wheel and is the single source the checksummed runner applies (§8.6); `FakeFactRepository`/`FakeEpisodeStore` run this same SQL at `":memory:"`, so the simulator's schema *is* the Pi's (P6). All of `facts`, `routines`, `triggers`, `proactive_log`, `episodes`, the `facts_fts` FTS5 shadow + its sync triggers, and `schema_migrations` exist as written. **Including the three §10 tables** — `routines`, `triggers` and `proactive_log` shipped with `0001`, months before anything read them, and M10 added no migration. Note this before planning one: the runner is checksummed and append-only (§8.6), so a second `CREATE TABLE routines` fails at boot and `0001` can never be edited to make room.
 
 ```sql
 -- ─────────────────────────────────────────────────────────────
@@ -2201,6 +2317,40 @@ The `_wake` event is what makes it correct: when §3.7.3's `memory.fact_stored` 
 
 Wall-clock anchoring is mandatory: compute the next occurrence in `routines.timezone`, then convert to UTC. Storing "08:00 = epoch X, +86400 each day" breaks on the DST boundary and delivers your coffee reminder at 07:00 for six months.
 
+**As built (M10): `avid/core/schedule.py`, and `python-dateutil` is now a runtime dependency.** Two
+decisions worth recording, because both push against a stated posture.
+
+*Where the library lives.* Runtime dependencies were `pydantic` alone; every other third-party
+package in this tree sits in an optional extra behind exactly one adapter (`numpy`, `onnxruntime`,
+`websockets`). `python-dateutil` is instead a **core** dependency, imported from `core/schedule.py`.
+It is pure Python with no C extension, so it costs the Pi nothing, and — the real argument — hiding a
+recurrence resolver behind a port would oblige P6 to provide a *fake* one, which is a second, worse
+RRULE implementation grading itself against the first. That is precisely the DSL this section
+forbids. The domain stays clean mechanically rather than by promise: `dateutil` is on
+`import-linter`'s `domain-purity` forbidden list, beside `numpy` and `sqlite3`.
+
+*How the DST fix actually works.* `dateutil.rrule` operates on **naive local** datetimes only; the
+zone is attached afterwards:
+
+```
+after (UTC epoch) → local datetime in routines.timezone → strip tzinfo
+                  → rrulestr(rrule, dtstart=<today at local_time>) → first occurrence after
+                  → re-attach ZoneInfo → UTC epoch → minus lead_time_s
+```
+
+Let rrule work in UTC and you get exactly the "+86400 each day" bug above, wearing a library's
+clothes. Two edges need a named policy or they become a 2 a.m. incident: a **nonexistent** local time
+(spring forward — 02:30 does not occur) advances to the first valid instant after the gap, so a
+reminder is late rather than skipped; an **ambiguous** one (fall back — 01:30 happens twice) takes
+`fold=0`, so it fires once, on the earlier. A finite rule that has run out (`COUNT=`/`UNTIL=`)
+returns no occurrence, the trigger's `next_fire_at` goes NULL, and `idx_triggers_due`'s partial
+predicate drops it from the scheduler's only query for free.
+
+⚠️ `tzdata` is a **dev**-group dependency, not a runtime one. Linux and the Pi carry a system tz
+database; Windows does not, and without the wheel `zoneinfo.ZoneInfo("America/New_York")` raises
+`ZoneInfoNotFoundError` — so the DST tests below pass in CI and fail on a Windows dev box, which is
+the worst possible way for a test to behave.
+
 The clock is injected (`Clock` port). M10's gate criterion — *"the coffee scenario, end to end, unprompted"* — is testable in 40 ms with a `FakeClock`, and separately once for real. Waiting until 07:55 to test the 07:55 code path is not a testing strategy.
 
 ## 10.4 The interruption policy
@@ -2210,11 +2360,34 @@ Rules, in order. **First veto wins.** All state arrives in a `PolicyContext`; th
 | # | Rule | Veto when | Rationale |
 |---|---|---|---|
 | 1 | **Quiet hours** | `now` within configured quiet window | Hard. Non-negotiable. Default 22:00–07:30. |
-| 2 | **State** | state ∉ {IDLE, SLEEPING} | Never interrupt a conversation in progress. §3.10.1. |
+| 2 | **State** | state is not IDLE | Never interrupt a conversation in progress. §3.10.1. **See below** — this cell used to read `∉ {IDLE, SLEEPING}`. |
 | 3 | **Presence** | no presence within last 5 min | **See below.** |
 | 4 | **Ambient speech** | >60 s of VAD speech in last 5 min that opened no session | **See below.** |
 | 5 | **Cooldown** | trigger fired < `cooldown_s` ago, *or* any proactive < 15 min ago | Global cooldown, not just per-trigger. |
 | 6 | **Daily budget** | ≥5 proactive delivered today | Ceiling, not a target. G3 asks for ≥1. |
+
+### Rule 2 — why IDLE alone, and not IDLE-or-SLEEPING
+
+This cell read `state ∉ {IDLE, SLEEPING}` until M10 tried to implement it and found the SLEEPING half
+unreachable. Three shipped facts, together:
+
+- `(SLEEPING, VISION_PRESENCE_GAINED) → IDLE` is a row in §3.10.3. Presence is what wakes the robot.
+- `IDLE → SLEEPING` happens only on `PRESENCE_LOST_TIMEOUT` — ten minutes *without* presence.
+- Rule 3, below, vetoes unless presence is newer than `presence_window_s` (300 s).
+
+So "asleep **and** seen in the last five minutes" cannot occur: by the time rule 3 can pass, rule 2's
+SLEEPING case has already become IDLE. Admitting SLEEPING here would have obliged a
+`(SLEEPING, behavior.trigger_fired)` row in the normative table that nothing could ever drive — and
+§3.10.3 is a table where an unreachable row is not documentation but a claim that fails silently.
+AVID-173 and AVID-189 were both shipped by reasoning about reachability one row too narrowly; this is
+the same argument, made once, in the direction that removes a row rather than adding one.
+
+The consequence is worth stating plainly: **proactivity does not wake a sleeping robot.** It speaks
+to someone who is already there. Given rule 3 that was always true; now the two rules agree about it.
+
+*Revisit if* rule 3 is ever degraded to a non-vision proxy (§7.3's M8-cut scenario, "was there a
+conversation recently") — that proxy *can* be fresh while the machine sleeps, and this cell and the
+state table would both need the SLEEPING case back, together.
 
 ### Rule 3 — presence
 
@@ -2235,6 +2408,41 @@ Someone on a call, in a meeting, talking to a colleague — the VAD fires consta
 Free, because the infrastructure already exists for a different reason. It's the kind of signal you only find by asking what the components you already have are incidentally measuring.
 
 *Known false positive:* the user watching a video or playing music. Suppressing then is a small loss — arguably correct anyway.
+
+#### The condition, made codeable (M10)
+
+"Speech that opened no session" is not a state this architecture can observe. Per §6.3, **every**
+Silero detection opens a session — that is what the gate is for — so there is no VAD-fired-but-quiet
+case to count. The rule was written against a system that does not exist.
+
+What *is* observable is the same idea one step later: speech that opened a session and never became a
+conversation. So the settled condition is
+
+> **cumulative `audio.speech_ended` duration within the last `presence_window_s` seconds whose turn
+> never reached `conversation.turn_started`.**
+
+`BehaviorService` already receives `audio.speech_ended{duration_ms}` in §9.1.3, and every one of them
+carries the `correlation_id` minted at its own rising edge. So the accumulator is a pure fold:
+
+```
+record(window, correlation_id, at_s, duration_ms)   ← on audio.speech_ended
+attribute(window, correlation_id)                   ← on conversation.user_transcribed
+ambient_speech_s(window, now_s, window_s)           ← sum of the un-attributed, inside the window
+```
+
+**Count everything, then subtract what turned out to be a conversation.** The obvious alternative —
+hold each utterance in a pending bucket for a grace period and promote it if no transcript arrives —
+needs a timer, a new config knob, and a defensible value for it; and §3.10.3's own trace evidence
+shows transcripts landing *after* the assistant's audio and sometimes after `conversation.turn_ended`,
+so the grace would have to be seconds long and would be a guess. Retraction needs none of that.
+
+It is transiently wrong for a second or two after a genuine user utterance, before the transcript
+retracts it. That window is unreachable: rule 2 has already vetoed, because the machine is not IDLE
+while a turn is in flight.
+
+The distinction earns its keep in §10.6. Because attributed speech is excluded, a suppression
+histogram separates *"the user was on a call"* from *"the user was talking to me"*. Counting all
+speech would collapse both into `ambient_speech` and destroy the only diagnostic the table exists for.
 
 ### Manual override
 
@@ -2267,6 +2475,8 @@ SELECT reason, COUNT(*) FROM proactive_log
 WHERE outcome = 'suppressed' AND considered_at > unixepoch() - 604800
 GROUP BY reason ORDER BY 2 DESC;
 ```
+
+⚠️ **`rule` and `reason` are the same value under two names, and both are normative.** The event field is `rule` (§9.1.3's `behavior.proactive_suppressed`); the column is `reason` (§8.3's `proactive_log`). Both shipped before either had a writer, and renaming a normative schema for cosmetics is not worth a migration. The values are pinned once — `POLICY_RULES` in `domain/behavior.py`, the same frozen vocabulary §10.4's gate returns — and mapped at the single write site, with a test that nothing outside that set ever reaches the column. If the two ever disagree, the query below silently under-counts, which is the one failure this table cannot afford.
 
 If `ambient_speech` vetoed 40 times last week, rule 4 is too aggressive. If nothing was ever suppressed, the rules are decorative. **Without this table, both look identical from the outside** — which is precisely why R-08 is scored 15 and why "log every suppression so you can see what it would have said" was in the mitigation from the start.
 
@@ -2366,12 +2576,14 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
-| `audio.speech_started` | `ring_buffer_ms: int` | AudioService | StateManager, ConversationService | DROP_OLDEST |
+| `audio.speech_started` | `ring_buffer_ms: int` | AudioService | StateManager, ConversationService, BehaviorService (M10) | DROP_OLDEST |
 | `audio.speech_ended` | `duration_ms: int` | AudioService | StateManager, BehaviorService | DROP_OLDEST |
 | `audio.playback_started` | `item_id: str` | AudioService | StateManager | DROP_OLDEST |
 | `audio.playback_finished` | `item_id: str`, `played_ms: int`, `truncated: bool` | AudioService | StateManager, ConversationService | DROP_OLDEST |
 
 `audio.speech_started` mints the `correlation_id` for a user-initiated turn. It is one of exactly two turn origins; `behavior.trigger_fired` is the other.
+
+**Two M10 subscribers on this table need their reason stated, because neither is obvious from the event's name.** `BehaviorService` takes `audio.speech_started` as its *reply* signal (§10.5): a user answering a proactive turn speaks, and speaking mints a **fresh** `correlation_id` here — so the reply cannot be matched to the proactive turn by id, and does not need to be. The policy gate guarantees no second proactive is in flight and rule 2 guarantees the machine was IDLE when we fired, so any speech inside the hold-open window *is* the reply. And it takes `conversation.user_transcribed` as rule 4's **retraction** signal (§10.4): speech that became a transcript was speech directed at the robot, and is subtracted from the ambient accumulator.
 
 `played_ms` on `audio.playback_finished` is §6.2.4's barge-in measurement — the milliseconds the speaker **accepted from us**, summed from `Speaker.play()`'s return, not the length of the buffer we submitted. `played_ms == 0` therefore means the device took nothing, and a gate may treat it as a hard failure (AVID-91).
 
@@ -2380,7 +2592,7 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
 | `conversation.turn_started` | `initiator: "user" \| "proactive"` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
-| `conversation.user_transcribed` | `text: str`, `is_approximate: bool` | ConversationService | EpisodeRecorder | DROP_NEWEST |
+| `conversation.user_transcribed` | `text: str`, `is_approximate: bool` | ConversationService | EpisodeRecorder, BehaviorService (M10) | DROP_NEWEST |
 | `conversation.assistant_responded` | `text: str`, `item_id: str` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
 | `conversation.turn_ended` | `duration_ms: int`, `usage: TokenUsage` | ConversationService | EpisodeRecorder, Observability (cost meter, §6.10.6) | DROP_NEWEST |
 | `conversation.session_lost` | `cause: str`, `was_mid_turn: bool` | ConversationService | StateManager, ExpressionService | DROP_NEWEST |
@@ -2394,7 +2606,7 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
 | `affect.changed` | `affect: Affect`, `tier: 1 \| 2`, `previous: Affect` | AffectService | **ExpressionService** ✅, MotionService (M9) | **DROP_OLDEST** |
-| `state.transitioned` | `from_: RobotState`, `to: RobotState`, `trigger: Trigger` | StateManager | **ExpressionService** ✅, **AffectService** ✅, BehaviorService (M6), Observability (M10) | DROP_OLDEST |
+| `state.transitioned` | `from_: RobotState`, `to: RobotState`, `trigger: Trigger` | StateManager | **ExpressionService** ✅, **AffectService** ✅, BehaviorService (M10), Observability (M10) | DROP_OLDEST |
 
 ✅ marks a subscriber that is **registered in the composition root today** (AVID-73); the rest are planned, with the milestone that lands them. The distinction matters for §9.1.5: a drift check written now would flag every unmarked entry as missing, which is a gap in the *schedule*, not a defect in the code — so the generator must diff against live registrations, not against the full aspirational catalog. This is the only table in §9.1.3 annotated so far, because it is the only one whose subscribers have started to exist.
 
@@ -2653,6 +2865,8 @@ daily_budget     = 5
 presence_window_s = 300
 ambient_speech_threshold_s = 60
 ignore_streak_limit = 3
+hold_open_s      = 30           # §10.7 step 5 / §10.5's "wait 30 s" — one number, two readers
+ignore_backoff_multiplier = 2   # §10.5. cooldown_s *= this, per ignore
 
 [vision]
 fps        = 5                  # §2.7.1: ≤1 core
@@ -2731,7 +2945,7 @@ def test_no_undocumented_transitions():
 
 That second test is the valuable one. §3.4.2 claimed *"ninety percent of the bugs in a system like this are illegal state transitions"* — this is the test that cashes it, and it's exhaustive over the cross product in about 4 ms.
 
-Its companion, `test_every_trigger_drives_at_least_one_row`, holds the other invariant: `Trigger` **is** the §3.10.3 Event column, so a member with no row is not documentation, it is seven guaranteed-illegal pairs padding the test above and a value `StateTransitioned.trigger` can never legally carry. Rows without a *driver* are fine and expected (`behavior.trigger_fired` is M6, the three `timer.*` expiries are unwired) — membership tracks the table, not the call sites. That is why AVID-158 deleted `CONVERSATION_USER_TRANSCRIBED` outright rather than leaving it row-less.
+Its companion, `test_every_trigger_drives_at_least_one_row`, holds the other invariant: `Trigger` **is** the §3.10.3 Event column, so a member with no row is not documentation, it is seven guaranteed-illegal pairs padding the test above and a value `StateTransitioned.trigger` can never legally carry. Rows without a *driver* are fine and expected (the three `timer.*` expiries are unwired; `behavior.trigger_fired` gained its driver at M10) — membership tracks the table, not the call sites. That is why AVID-158 deleted `CONVERSATION_USER_TRANSCRIBED` outright rather than leaving it row-less.
 
 **The policy gate (§10.2).** The single highest-value test file in the project:
 
@@ -2844,6 +3058,8 @@ async def test_uc03_coffee(sim: Sim):
 ```
 
 That is UC-03 — the entire product pitch — as a test that runs in about **40 milliseconds** on a laptop with no hardware, no network and no API key.
+
+**As built (M10): `tests/e2e/test_m10_gate.py`.** The `Sim` sketch above is the shape, not the API — this repo realised the scenario tier as one `tests/e2e/test_mN_gate.py` per milestone, wiring the real `AsyncioEventBus`, the real services and fakes only. The steps are the same line for line, including the process restart against the same SQLite file, and it carries the M4/M5 addition the sketch predates: **the harness's own pass/fail logic is under test**, one neutered guard per criterion, because a gate that can pass on silence is not a gate.
 
 Three things make it possible, and each was a decision made hundreds of lines earlier for reasons that looked local at the time:
 
