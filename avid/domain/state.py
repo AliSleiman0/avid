@@ -164,6 +164,30 @@ _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     (RobotState.SPEAKING, Trigger.AUDIO_SPEECH_ENDED): RobotState.THINKING,
     # ...and then the overlapping reply drains, with the user already finished.
     (RobotState.THINKING, Trigger.AUDIO_PLAYBACK_FINISHED): RobotState.IDLE,
+    # A reply that starts while the machine has already gone IDLE (AVID-189). **Observed**, not
+    # reasoned into existence: the M6 gate run logged it twice, on one correlation id, on the first
+    # turn after a reconnect —
+    #
+    #   INFO  realtime open: ... total 2194 ms (warm)
+    #   WARN  ignored illegal transition: no rule for AUDIO_PLAYBACK_STARTED in state IDLE
+    #   WARN  ignored illegal transition: no rule for AUDIO_PLAYBACK_FINISHED in state IDLE
+    #
+    # SPEAKING because it is simply true: audio is coming out of the speaker, so the robot is
+    # speaking, and saying otherwise leaves the Tier-1 face showing IDLE through a reply the user
+    # can hear (§6.8 derives affect from this state, so a wrong row here is a wrong face).
+    #
+    # ⚠️ **One row, not two, and that is the whole design of this fix.** The gate logged two
+    # illegal transitions; adding a row for each would be the obvious response and would be wrong.
+    # With this row the machine is in SPEAKING when the reply drains, so
+    # ``(SPEAKING, AUDIO_PLAYBACK_FINISHED) -> IDLE`` above already carries the second edge and an
+    # ``(IDLE, AUDIO_PLAYBACK_FINISHED)`` row would be **unreachable** — a lie in the normative
+    # table, which is the mistake AVID-173 had just finished correcting in the other direction.
+    #
+    # ⚠️ It is also the sibling AVID-173 missed. That fix rooted the *rising* edge on this same
+    # degrade/recover arc and stopped there; the playback edges on the arc were left unrooted, and
+    # the run that proved the first fix is the run that exposed the second. Walking an arc only as
+    # far as the row under test is how AVID-158, AVID-161 and AVID-162 each shipped their successor.
+    (RobotState.IDLE, Trigger.AUDIO_PLAYBACK_STARTED): RobotState.SPEAKING,
     # --- recovery rejoins the turn it interrupted (AVID-162) -------------------------------
     # LISTENING, not IDLE. ``_exit_degraded`` has exactly one caller — ConversationService's
     # rising-edge handler, after ``open()`` succeeds — because there is no background
