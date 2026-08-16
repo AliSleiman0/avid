@@ -55,12 +55,19 @@ CAPABILITY_INSTRUCTIONS = (
     "Do not store passing remarks, questions, or anything you inferred rather than were told. "
     "When the user asks about something they told you before that is not already in your "
     "context, call recall. When the user asks you to forget something, call forget. "
-    # §6.5's finding governs the shape of this: the clause that STOPS it firing matters more
-    # than the one that enables it. An affect set on every reply is a flickering face, and the
-    # Tier-1 baseline is already correct without any help (§6.8).
-    "Your face already shows whether you are listening, thinking or speaking, so call "
-    "set_affect only when the emotional tone of a reply is genuinely different — happy, sad "
-    "or confused — and not on ordinary replies."
+    # ⚠️ REWEIGHTED at the M6 gate (AVID-214/216). The first version led with the constraint —
+    # "call set_affect ONLY when ... and not on ordinary replies" — on §6.5's finding that
+    # negative constraints are followed far more strongly than encouragements. Measured live, that
+    # is exactly what happened: across 20 turns including an unambiguously sad utterance (the model
+    # replied "I'm really sorry to hear that") and an unambiguously delighted one ("WOO-HOO! That's
+    # huge"), set_affect fired **zero** times. The model was emotionally engaged in its words and
+    # never touched the tool.
+    #
+    # So the suppression was doing all the work, which is §6.5's finding operating against us. The
+    # instruction now LEADS with the action and keeps a single short constraint behind it.
+    "When your reply carries a clear emotional tone, call set_affect so your face matches your "
+    "words — happy for good news, sad for bad, confused when you do not follow. Do this as well "
+    "as replying, not instead of it. Skip it for neutral replies."
 )
 
 
