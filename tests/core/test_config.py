@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from avid.core.config import AdaptersConfig, ApiConfig, Config, load_config
+from avid.core.config import (
+    AdaptersConfig,
+    ApiConfig,
+    Config,
+    PersonalityConfig,
+    load_config,
+)
 
 # Repo root -> config/{sim,pi}.toml, independent of the test runner's cwd.
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
@@ -15,6 +22,12 @@ _SIM_TOML = _CONFIG_DIR / "sim.toml"
 _PI_TOML = _CONFIG_DIR / "pi.toml"
 
 _SECRET = "sk-not-a-real-key-1234567890"
+
+
+def _read_toml(path: Path) -> dict[str, object]:
+    """Read a shipped TOML directly, so a test can assert on a file the loader did not pick."""
+    with path.open("rb") as handle:
+        return dict(tomllib.load(handle))
 
 
 def test_load_sim_toml_is_all_fake() -> None:
@@ -114,6 +127,122 @@ def test_non_loopback_bind_is_rejected() -> None:
     # SDS §9.5: 0.0.0.0 is a security bug — refuse to load.
     with pytest.raises(ValidationError):
         ApiConfig.model_validate({"bind": "0.0.0.0"})
+
+
+# --- the §6.5 personality (AVID-211) ----------------------------------------
+
+
+def test_both_shipped_personalities_parse() -> None:
+    """AC-3/AC-4: two real artefacts, not one file and a fixture.
+
+    The M6 gate's criterion is a *difference* — "same question, two personality configs,
+    recognizably different responses" — so a second config is load-bearing, and both the eval
+    (#215) and the gate (#216) consume them by name."""
+    for name in ("default", "terse"):
+        config = load_config(_SIM_TOML)  # picks up default.toml via [ai] personality
+        assert config.personality.name == "Pico"
+        loaded = PersonalityConfig.model_validate(
+            _read_toml(_CONFIG_DIR / "personality" / f"{name}.toml")
+        )
+        assert loaded.forbidden, (
+            f"{name}.toml forbids nothing — §6.5's load-bearing half"
+        )
+
+
+def test_the_two_personalities_differ_where_difference_is_produced() -> None:
+    """§6.5: positive instructions are weakly followed, negative constraints strongly.
+
+    So the two shipped configs are separated primarily by ``forbidden`` and ``verbosity``, not by
+    swapping adjectives. Asserted here rather than left to prose, because a later edit that made
+    them differ only in ``traits`` would silently weaken the gate's premise."""
+    default = PersonalityConfig.model_validate(
+        _read_toml(_CONFIG_DIR / "personality" / "default.toml")
+    )
+    terse = PersonalityConfig.model_validate(
+        _read_toml(_CONFIG_DIR / "personality" / "terse.toml")
+    )
+    assert set(default.forbidden).isdisjoint(terse.forbidden)
+    assert default.verbosity != terse.verbosity
+    assert default.humor_frequency != terse.humor_frequency
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("verbosity", "concice"),  # the typo AC-5 names
+        ("formality", "chatty"),
+        ("humor_frequency", "sometimes"),
+        ("proactivity_tone", "loud"),
+    ],
+)
+def test_an_enumerated_personality_field_is_rejected_at_load(
+    field: str, bad: str
+) -> None:
+    """AC-5: a typo must fail while the composition root is still wiring.
+
+    ``verbosity = "concice"`` reaching the model as silently-dropped intent is the config-drift
+    failure `deploy/PI_OPERATIONS.md` exists to warn about, and it is **invisible in the output**:
+    the robot answers perfectly, just not the way the file says."""
+    with pytest.raises(ValidationError):
+        PersonalityConfig.model_validate({field: bad})
+
+
+def test_traits_and_forbidden_round_trip_as_sequences() -> None:
+    """AC-7: TOML arrays become tuples, and stay ordered — the composer emits them in file
+    order, and AC-1's determinism is a *caching* requirement, not a style preference."""
+    personality = PersonalityConfig.model_validate(
+        {"traits": ["a", "b"], "forbidden": ["Do not X.", "Do not Y."]}
+    )
+    assert personality.traits == ("a", "b")
+    assert personality.forbidden == ("Do not X.", "Do not Y.")
+
+
+def test_a_missing_personality_file_fails_loudly_with_the_resolved_path(
+    tmp_path: Path,
+) -> None:
+    """AC-6: name the absolute path, not the configured string.
+
+    A relative path that fails to resolve is exactly the case where the configured value tells
+    you nothing. The alternative to failing here is worse than an error: the robot would run on a
+    bare identity string with §6.4's layer 2 simply absent, passing every criterion except the
+    one the milestone is about, with no symptom anywhere."""
+    profile = tmp_path / "config.toml"
+    profile.write_text('[ai]\npersonality = "nope/missing.toml"\n', encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError) as caught:
+        load_config(profile)
+
+    message = str(caught.value)
+    assert "nope/missing.toml" in message
+    assert str(Path("nope/missing.toml").resolve()) in message
+    assert "working directory" in message
+
+
+def test_the_personality_path_resolves_against_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision AVID-211 asked to have made, pinned so it cannot drift back.
+
+    Resolving against the *config file* reads better and breaks the Pi: `robot.service` sets
+    ``WorkingDirectory=/opt/avid`` while the config lives at ``/etc/robot/config.toml``, so a
+    config-relative path would look under ``/etc/robot/`` — where nothing is installed. CWD is
+    also what ``[cues] dir`` and ``[realtime] session_dir`` already use.
+
+    Proven by putting the config and the personality in **different** directories: it loads from
+    the working directory, and would fail if it resolved from the config's."""
+    (tmp_path / "here").mkdir()
+    (tmp_path / "here" / "p.toml").write_text(
+        'verbosity = "detailed"\n', encoding="utf-8"
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    profile = elsewhere / "config.toml"
+    profile.write_text('[ai]\npersonality = "here/p.toml"\n', encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    config = load_config(profile)
+
+    assert config.personality.verbosity == "detailed"
 
 
 def test_loopback_bind_variants_accepted() -> None:
