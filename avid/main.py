@@ -680,6 +680,7 @@ def _wire_services(
         # Who owns the turn boundary (AVID-194). False — the shipped value — means the local VAD
         # is the only authority and ConversationService commits from its falling edge.
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
+        thinking_delay_ms=config.cues.thinking_delay_ms,
     )
     # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
     # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so

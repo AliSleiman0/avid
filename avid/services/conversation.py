@@ -127,6 +127,15 @@ _THINK_TIMEOUT_CAUSE = "think_timeout"
 # every turn (§6.10), and it is the *only* memory content OpenAI ever sees (§7.10), so it stays lean.
 _MEMORY_HEADER = "What you already know about the user (from earlier conversations):"
 
+# Which cue covers a slow first token (AVID-170 AC-4, a decision §6.9 asked to be made rather
+# than inherited). §6.9 names a short **"hmm"**; the code shipped `THINKING_ONE_SEC` ("one sec.").
+# The spec wins, and not only because it is the spec: "hmm" is a hesitation marker that costs
+# nothing if the reply lands immediately after it, while "one sec." *promises* a wait and is
+# therefore wrong precisely when the model turns out to be fast. Now that the cue only plays past
+# the 600 ms threshold the promise is more defensible than it was — but a filler the user cannot
+# be annoyed by is worth more than one that is marginally more apt, which is G3's whole argument.
+_THINKING_CUE = Cue.THINKING_HMM
+
 
 def _format_memory_block(facts: Sequence[Fact]) -> str:
     """Compose the layer-4 injection text from the pre-selected top facts (§6.7 path 1, #126).
@@ -168,6 +177,7 @@ class ConversationService:
         memory_inject_timeout_s: float,
         think_timeout_s: float,
         server_turn_detection: bool,
+        thinking_delay_ms: int,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -184,6 +194,10 @@ class ConversationService:
         # never passes, and this one changes who owns the conversation. False is the shipped
         # value and means we are the only authority.
         self._server_turn_detection = server_turn_detection
+        # The §6.9 threshold before the thinking cue fills the silence (AVID-170). Required,
+        # never defaulted, for the #180 reason: a defaulted perceived-quality knob is one the
+        # bench silently never passes, and this one governs how the robot *sounds*.
+        self._thinking_delay_ms = thinking_delay_ms
 
         # Session lifecycle. The lock guards every open/teardown/degraded mutation so the
         # reactive handlers and the owned tasks cannot race the session in or out.
@@ -735,14 +749,46 @@ class ConversationService:
         await self._client.aclose()
 
     def _start_thinking_cue(self) -> None:
-        """Kick the best-effort thinking cue for this turn (cancelled when first audio lands).
+        """Arm the §6.9 thinking cue: play it **only** if first audio is late (AVID-170).
 
         The ``_first_audio`` latch that cancels this cue is re-armed by the caller, at the
         falling edge, on **every** path — not here. It lived here until AVID-186, which is
         precisely why it stopped being re-armed once the caller grew a path that skips the cue.
         """
         self._cancel_task(self._thinking_task)
-        self._thinking_task = self._play_cue(Cue.THINKING_ONE_SEC)
+        self._thinking_task = spawn(
+            self._thinking_cue_after_delay(),
+            name="ConversationService.thinking_cue",
+        )
+
+    async def _thinking_cue_after_delay(self) -> None:
+        """Wait ``[cues] thinking_delay_ms``, then fill the silence if nothing has arrived.
+
+        §6.9 specifies a *threshold*, not a delay: *"if first audio hasn't arrived by 600 ms we
+        play a short local 'hmm'"*. There was no timer — the cue was scheduled immediately and
+        only cancellation stopped it, which is a race the cue reliably won because it starts
+        pushing a WAV to ALSA in the same tick the user stops speaking. So it played on **every**
+        turn, and a mitigation for occasional slowness became a permanent verbal tic. Reported by
+        the owner as *"hearing a lot of one second"* and first suspected to be a network problem.
+
+        It also made fast turns *sound* slower than they were, which is the precise inverse of
+        R-01's argument: perceived latency is designable, and this was designing it upward.
+
+        The wait is on the **injected clock**, so tests drive it in virtual time and the deadline
+        is exact rather than approximately-600-ms-plus-scheduler. Cancellation is the first
+        delta's job (:meth:`_on_assistant_audio` cancels this task), so a reply that lands during
+        the wait leaves no partial WAV anywhere near the speaker — the cue has not begun.
+        """
+        if self._thinking_delay_ms > 0:
+            # Zero means "no threshold" — the pre-AVID-170 behaviour, still a legal setting. The
+            # branch is not decoration: `FakeClock.sleep` parks until a test advances time, so a
+            # zero-second sleep on it would block forever rather than return immediately.
+            await self._clock.sleep(self._thinking_delay_ms / 1000)
+        if self._first_audio:
+            # Belt to the cancellation's braces: if the delta landed in the same tick as the
+            # deadline, cancelling and this check race, and a spurious cue is exactly the defect.
+            return
+        await self._cues.play(_THINKING_CUE, correlation_id=self._corr())
 
     def _play_cue(self, cue: Cue) -> asyncio.Task[None]:
         """Play *cue* through the CueBank as a tracked background task (best-effort, SDS §6.9).

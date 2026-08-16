@@ -248,6 +248,7 @@ async def main() -> int:
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         think_timeout_s=config.gate.think_timeout_s,
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
+        thinking_delay_ms=config.cues.thinking_delay_ms,
     )
 
     for sub in conversation.subscriptions():
