@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-16 · `main` on the M10 branch chain · gh `AliSleiman0`.
+**As of:** 2026-08-16 · `main = 4ecef61` · **no tag** (M10 is unsealed) · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
@@ -75,9 +75,14 @@ says anything about R-08.
 
 ## Current state
 
-- **M10 code-complete.** 14 PRs merged this session (#316, #317, #318, #319, #320, #321, #322,
-  #323, #324, #326, #327, #329, #330, #331, #332, #333) with #334 the last. **~1360 passed /
-  61 skipped** on 3.11 and 3.13; `ruff`, `mypy --strict` and `lint-imports` (4 contracts) clean.
+- **M10 code-complete.** 19 PRs merged this session, #316 → #335. **1366 passed / 61 skipped** on
+  3.11 and 3.13; `ruff`, `ruff format --check`, `mypy --strict` and `lint-imports` (4 contracts)
+  clean. **CI on `main` is green on all four jobs**, `async-debug` included. Working tree clean,
+  zero open PRs.
+- ⚠️ **M10 is code-complete but NOT sealed.** No `v0.M10.0` tag, no `docs/journal.md` entry, PMP
+  §5.2's confidence untouched, epic #230 and milestone still open — all of that is #245's to do,
+  and it is deliberate rather than forgotten. A milestone is "done done" only when its gate demo is
+  recorded (PMP §5.1), and no demo can exist until the robot has run a morning.
 - ⚠️ **`async-debug` is intermittently red on pre-existing tests** — diagnosed and filed as #328,
   and *not* a regression from this milestone's code. Every M10 PR that merged past it says so in
   its body rather than quietly.
