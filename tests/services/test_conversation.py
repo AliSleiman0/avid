@@ -74,7 +74,11 @@ from avid.domain import (
 )
 from avid.services import CueBank, MemoryService
 from avid.services.audio import AudioService
-from avid.services.conversation import ConversationService
+from avid.services.conversation import (
+    _MEMORY_HEADER,
+    ConversationService,
+    compose_proactive_block,
+)
 
 _SESSIONS = Path(__file__).resolve().parents[2] / "assets" / "sessions"
 _CUES = Path(__file__).resolve().parents[2] / "assets" / "cues"
@@ -1782,3 +1786,169 @@ async def test_a_trigger_arriving_mid_session_is_dropped() -> None:
 
         await _fire_trigger(rig, correlation_id=uuid4())
         assert rig.client.proactive_turns == 0
+
+
+# --- §10.8: what it says (#240) -------------------------------------------------------------
+
+
+def test_the_context_block_matches_the_sds_example_shape() -> None:
+    """AC-3: §10.8's worked example — the coffee fact at 07:55 on a Tuesday.
+
+    The *shape*, not the wording: §10.8 is explicit that the model writes the words and that
+    everything a template would carry — tone, brevity, not being annoying — already lives in §6.5's
+    personality layer. What this asserts is that the block supplies the four things §10.8's example
+    supplies: the time, the day, what is known about the user's presence and silence, and the fact
+    that prompted the turn.
+    """
+    block = compose_proactive_block(
+        local_time="07:55",
+        weekday="Tuesday",
+        present=True,
+        spoken_today=False,
+        fact="The user drinks coffee every day at 08:00.",
+    )
+    assert "07:55" in block
+    assert "Tuesday" in block
+    assert "present" in block
+    assert "not spoken to you yet today" in block
+    assert "The user drinks coffee every day at 08:00." in block
+    assert "in one sentence" in block
+
+
+def test_the_block_forbids_sounding_like_a_reminder_app() -> None:
+    """⚠️ AC-4, and §10.8 says this clause *"is doing more work than it looks"*:
+
+    > *"The failure mode for UC-03 isn't wrong timing; it's correct timing delivered like a calendar
+    > notification. The gap between 'Good morning! Coffee time is coming soon' and 'Reminder: coffee
+    > at 08:00' is the entire product."*
+
+    Asserted rather than merely present by habit, because it is the single clause whose removal
+    would leave every automated check green and the product broken.
+    """
+    block = compose_proactive_block(
+        local_time="07:55",
+        weekday="Tuesday",
+        present=True,
+        spoken_today=False,
+        fact="coffee at 08:00",
+    )
+    assert "Do not sound like an alarm or a reminder app." in block
+
+
+def test_the_block_is_pure_and_needs_no_model_call() -> None:
+    """AC-2. The same inputs give the same text, every time, with no inference to build a prompt —
+    the post-processing shape ADR-006 already ruled out for personality, ruled out here for the same
+    reason: a second call to decide how to phrase the first is latency spent on something the first
+    call is already good at."""
+    args = {
+        "local_time": "07:55",
+        "weekday": "Tuesday",
+        "present": True,
+        "spoken_today": False,
+        "fact": "coffee",
+    }
+    assert compose_proactive_block(**args) == compose_proactive_block(**args)  # type: ignore[arg-type]
+
+
+def test_a_trigger_with_no_fact_still_composes() -> None:
+    """A presence greeting (§3.7.5) has no routine behind it. The block still carries the time, the
+    day and the framing — it simply has nothing specific to mention."""
+    block = compose_proactive_block(
+        local_time="09:10",
+        weekday="Monday",
+        present=True,
+        spoken_today=False,
+        fact=None,
+    )
+    assert "You know:" not in block
+    assert "Do not sound like an alarm or a reminder app." in block
+
+
+async def test_the_proactive_block_is_appended_after_the_memory_block() -> None:
+    """§6.4's cache-prefix ordering: most-dynamic layer **last**.
+
+    The two blocks ride the same ``memory=`` awaitable rather than a second ``open()`` kwarg —
+    which would have cost a port change, three adapters and a contract suite for ordering that
+    string concatenation already gives. The adapter appends whatever it is handed after the static
+    layers 1-3, so the cached prefix is byte-identical on both paths.
+    """
+    clock = FakeClock()
+    memory = _StubMemory(
+        top_facts_result=(
+            Fact(
+                id=42,
+                text="The user drinks coffee every day at 08:00.",
+                kind="routine",
+                importance=6,
+                created_at=0,
+                last_accessed_at=0,
+            ),
+        )
+    )
+    async with _rig(
+        client=ReplayRealtimeClient(clock=clock, timeline=()),
+        initial=RobotState.IDLE,
+        memory=memory,
+    ) as rig:
+        await rig.bus.publish(
+            BehaviorTriggerFired(
+                **envelope(
+                    clock=clock, correlation_id=uuid4(), source="BehaviorService"
+                ),
+                trigger_id=7,
+                fact_id=42,
+            )
+        )
+        await _yield(rig)
+
+        assert rig.client.injected
+        block = rig.client.injected[-1]
+        assert block.index(_MEMORY_HEADER) < block.index("Do not sound like an alarm")
+        assert "The user drinks coffee every day at 08:00." in block
+
+
+async def test_the_block_names_the_fact_that_prompted_the_turn() -> None:
+    """Given ten facts and no indication which one is due, a model picks whichever is most
+    interesting rather than the one the clock fired on. Naming it is why the block restates
+    something §6.7 has usually already injected a few lines above."""
+    clock = FakeClock()
+    memory = _StubMemory(
+        top_facts_result=(
+            Fact(
+                id=1,
+                text="The user's dog is called Biscuit.",
+                kind="relationship",
+                importance=7,
+                created_at=0,
+                last_accessed_at=0,
+            ),
+            Fact(
+                id=42,
+                text="The user drinks coffee every day at 08:00.",
+                kind="routine",
+                importance=6,
+                created_at=0,
+                last_accessed_at=0,
+            ),
+        )
+    )
+    async with _rig(
+        client=ReplayRealtimeClient(clock=clock, timeline=()),
+        initial=RobotState.IDLE,
+        memory=memory,
+    ) as rig:
+        await rig.bus.publish(
+            BehaviorTriggerFired(
+                **envelope(
+                    clock=clock, correlation_id=uuid4(), source="BehaviorService"
+                ),
+                trigger_id=7,
+                fact_id=42,
+            )
+        )
+        await _yield(rig)
+
+        assert rig.client.injected
+        block = rig.client.injected[-1]
+        assert 'You know: "The user drinks coffee every day at 08:00."' in block
+        assert 'You know: "The user\'s dog is called Biscuit."' not in block

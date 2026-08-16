@@ -69,8 +69,10 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 from typing import assert_never, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from avid.core.envelope import Envelope, envelope
 from avid.core.event_bus import (
@@ -135,6 +137,10 @@ _THINK_TIMEOUT_CAUSE = "think_timeout"
 # every turn (§6.10), and it is the *only* memory content OpenAI ever sees (§7.10), so it stays lean.
 _MEMORY_HEADER = "What you already know about the user (from earlier conversations):"
 
+# §6.4's layering, made literal: the memory block and §10.8's context are separate layers appended
+# in order, so a blank line between them is the seam a reader (and the model) can see.
+_BLOCK_SEPARATOR = "\n\n"
+
 # Which cue covers a slow first token (AVID-170 AC-4, a decision §6.9 asked to be made rather
 # than inherited). §6.9 names a short **"hmm"**; the code shipped `THINKING_ONE_SEC` ("one sec.").
 # The spec wins, and not only because it is the spec: "hmm" is a hesitation marker that costs
@@ -155,6 +161,55 @@ def _format_memory_block(facts: Sequence[Fact]) -> str:
     if not facts:
         return ""
     return "\n".join([_MEMORY_HEADER, *(f"- {fact.text}" for fact in facts)])
+
+
+def compose_proactive_block(
+    *,
+    local_time: str,
+    weekday: str,
+    present: bool,
+    spoken_today: bool,
+    fact: str | None,
+) -> str:
+    """The §10.8 context block: what the robot knows, and how to say it (#240).
+
+    **No template DSL. No canned strings.** §10.8 is explicit that everything a template would
+    carry — tone, brevity, not being annoying — already lives in §6.5's personality layer, and
+    *"duplicating it here would give you two places to change and one to forget."* So this composes
+    **context**, not an utterance; the model writes the words.
+
+    Pure, and no model call to build the prompt — the same post-processing shape ADR-006 already
+    ruled out for personality, ruled out here for the same reason: a second inference to decide how
+    to phrase the first is latency spent on something the first call is already good at.
+
+    ⚠️ *"Do not sound like an alarm or a reminder app"* is doing more work than it looks, and §10.8
+    says so: *"The failure mode for UC-03 isn't wrong timing; it's correct timing delivered like a
+    calendar notification. The gap between 'Good morning! Coffee time is coming soon' and 'Reminder:
+    coffee at 08:00' is the entire product."* That clause is asserted by test, not merely present by
+    habit.
+
+    ``fact`` is optional and usually redundant: §6.7 already injects active routines into the memory
+    block immediately above this one, so the coffee fact is normally on the wire twice. Restating it
+    here is deliberate — it is the *reason this turn is happening*, and a model given ten facts and
+    no indication which one prompted it will pick whichever is most interesting rather than the one
+    that is due.
+    """
+    presence = "The user is present" if present else "You are not sure anyone is there"
+    spoken = (
+        "and has already spoken to you today"
+        if spoken_today
+        else "and has not spoken to you yet today"
+    )
+    lines = [f"It is {local_time} on {weekday}. {presence} {spoken}."]
+    if fact:
+        lines.append(f'You know: "{fact}"')
+    lines.append("")
+    lines.append(
+        "Greet them briefly and mention this naturally, in one sentence. "
+        "Do not sound like an alarm or a reminder app. Do not ask a question "
+        "unless it would be natural. If they don't reply, that's fine."
+    )
+    return "\n".join(lines)
 
 
 class ConversationService:
@@ -570,19 +625,24 @@ class ConversationService:
                 )
                 return
             self._turn_id = event.correlation_id
+            self._proactive_fact_id = event.fact_id
+            # Set BEFORE the open: the awaitable handed to open() composes the §10.8 block, and it
+            # reads this latch to know it should. Setting it after (as the first draft did) opened
+            # every proactive session with the memory block alone and no reason for the turn.
+            self._proactive = True
             try:
-                await self._client.open(memory=self._compose_memory_block())
+                await self._client.open(memory=self._compose_open_block())
             except OSError as exc:
                 _log.warning(
                     "proactive session open failed, staying quiet: %s [correlation_id=%s]",
                     exc,
                     event.correlation_id,
                 )
+                self._proactive = False
                 return
             self._session_open = True
             self._pump_task = spawn(self._pump(), name="ConversationService.pump")
             self._mic_task = spawn(self._forward_mic(), name="ConversationService.mic")
-            self._proactive = True
             self._arm_idle(self._hold_open_s)
 
         await self._begin_turn("proactive", approximate=False)
@@ -749,6 +809,64 @@ class ConversationService:
 
     # --- memory injection (§6.7 path 1, #126) --------------------------------------------
 
+    async def _compose_open_block(self) -> str:
+        """The §6.7 memory block, followed by §10.8's proactive context (#240).
+
+        One awaitable rather than a second ``open()`` kwarg, and that is the whole design decision.
+        The adapter appends whatever it is handed **after** the static instruction layers 1-3, so
+        the prompt-cache prefix stays byte-identical either way (§6.2.2/§6.10.2) — and a second
+        kwarg would have cost a port change, three adapters and a contract suite for ordering that
+        string concatenation already gives. §6.4's rule holds: most-dynamic layer last.
+        """
+        facts = await self._top_facts()
+        memory = _format_memory_block(facts)
+        if not self._proactive:
+            return memory
+        context = self._proactive_context(facts)
+        return _BLOCK_SEPARATOR.join((memory, context)) if memory else context
+
+    def _proactive_context(self, facts: Sequence[Fact]) -> str:
+        """Render §10.8's block from the world as this service sees it.
+
+        The fact is looked up in the memory block's own facts rather than fetched: §6.7 has already
+        selected active routines for injection, so the one that prompted this turn is normally
+        there — and reaching for a store read here would put a second retrieval on the path to
+        first token for information already in hand.
+        """
+        local = datetime.fromtimestamp(
+            self._clock.now(), tz=ZoneInfo(self._default_timezone)
+        )
+        fact = next(
+            (f.text for f in facts if f.id == self._proactive_fact_id),
+            None,
+        )
+        return compose_proactive_block(
+            local_time=local.strftime("%H:%M"),
+            weekday=local.strftime("%A"),
+            present=True,  # rule 3 vetoed unless someone was seen in the last few minutes
+            spoken_today=False,  # rule 5's cooldown means no turn has happened recently
+            fact=fact,
+        )
+
+    async def _top_facts(self) -> Sequence[Fact]:
+        """The bounded §6.7 read, shared by both open paths (#240).
+
+        Extracted so a proactive open fetches **once** and can both render the memory block and
+        find the fact that prompted it. A second read here would put another retrieval on the path
+        to first token for information already in hand.
+        """
+        try:
+            return await asyncio.wait_for(
+                self._memory.top_facts(), self._memory_inject_timeout_s
+            )
+        except Exception:  # noqa: BLE001 - AC-6: a retrieval failure must not block the session
+            _log.warning(
+                "memory injection failed [%s] — opening the session without it",
+                self._corr(),
+                exc_info=True,
+            )
+            return ()
+
     async def _compose_memory_block(self) -> str:
         """Fetch the top facts and render the layer-4 injection block, or ``""`` (§6.7 path 1, AC-4/AC-6).
 
@@ -760,18 +878,7 @@ class ConversationService:
         correlation id and degrades to an empty block — the robot still talks, it just does not
         remember this session (AC-6). Runs on every open, so a reconnect re-seeds the same memory
         (AC-5)."""
-        try:
-            facts = await asyncio.wait_for(
-                self._memory.top_facts(), self._memory_inject_timeout_s
-            )
-        except Exception:  # noqa: BLE001 - AC-6: a retrieval failure/timeout must not block the session
-            _log.warning(
-                "memory injection failed [%s] — opening the session without it",
-                self._corr(),
-                exc_info=True,
-            )
-            return ""
-        return _format_memory_block(facts)
+        return _format_memory_block(await self._top_facts())
 
     # --- mic forwarding ------------------------------------------------------------------
 
@@ -886,6 +993,7 @@ class ConversationService:
         # ...nor a stale proactive latch: the next session may well be a user-initiated one, and
         # an inherited latch would report an ordinary quiet session as an ignored reminder.
         self._proactive = False
+        self._proactive_fact_id = None
         # A fresh cold session must not inherit a stale barge-in mute (#104).
         self._muted_item = None
         self._cancel_task(self._idle_task)
