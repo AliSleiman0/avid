@@ -25,9 +25,11 @@ module has no imports beyond the stdlib and one sibling enum.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TypeAlias
+from dataclasses import dataclass, replace
+from typing import ClassVar, TypeAlias
+from uuid import UUID
 
+from avid.domain.events import Event
 from avid.domain.state import RobotState
 
 # ── Rule identities ──────────────────────────────────────────────────────────────────────────
@@ -245,6 +247,182 @@ def _is_quiet(ctx: PolicyContext, *, limits: PolicyLimits) -> bool:
     )
 
 
+# -- The four facts (SDS 9.1.3) ---------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BehaviorTriggerFired(Event):
+    """A trigger passed the policy gate and the robot is about to speak first (SDS §9.1.3).
+
+    **One of exactly two events that mint a ``correlation_id``** — the other is
+    ``audio.speech_started`` (§9.1.1). This is the head of a proactive turn, so every downstream
+    event in it carries the id minted here, and one ``grep`` reconstructs the whole thing.
+
+    A fact, not a request (P4): it says the gate passed, not that anyone should open a socket.
+    ``StateManager`` concludes ``IDLE → THINKING`` from it and ``ConversationService`` concludes a
+    session is wanted; neither is instructed. Queue policy is DROP_NEWEST — an older proposal that
+    has been sitting in a queue is one whose policy context has gone stale.
+
+    ``fact_id`` is ``None`` for a trigger with no fact behind it (a presence greeting, §3.7.5).
+    """
+
+    name: ClassVar[str] = "behavior.trigger_fired"
+
+    trigger_id: int
+    fact_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BehaviorProactiveDelivered(Event):
+    """The robot spoke unprompted, and this is what it said (SDS §9.1.3, §10.6).
+
+    Published alongside the ``proactive_log`` row rather than instead of it. The row is the durable
+    audit §10.6 tunes the policy from and is the one that must not be lost (§4: the bus carries
+    notifications, not obligations); this is the same fact told on the bus for anything watching
+    live.
+    """
+
+    name: ClassVar[str] = "behavior.proactive_delivered"
+
+    trigger_id: int
+    utterance: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BehaviorProactiveSuppressed(Event):
+    """A proposal was considered and vetoed (SDS §9.1.3, §10.4, §10.6).
+
+    ⚠️ ``rule`` here is the same value the ``proactive_log`` column calls ``reason``. Both
+    spellings are normative and both shipped before either had a writer; :data:`POLICY_RULES` is
+    the single vocabulary they are fed from, so the histogram §10.6 groups by cannot split into two
+    buckets over a name.
+
+    ``would_have_said`` is ``None`` in the ordinary case, and that is not an omission: the gate
+    runs *before* a session exists, so on almost every suppression there is no utterance yet —
+    §10.8 composes the words only once the model is on the line.
+    """
+
+    name: ClassVar[str] = "behavior.proactive_suppressed"
+
+    trigger_id: int
+    rule: str
+    would_have_said: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BehaviorTriggerDisabled(Event):
+    """A trigger switched itself off after being ignored too often (SDS §9.1.3, §10.5).
+
+    §10.5 requires this be *"logged loudly, never silent"*, for a diagnostic reason rather than an
+    operational one: *"a trigger that turned itself off is diagnostic information about the design,
+    and if you don't surface it you'll never learn which of your ideas were bad."*
+
+    ⚠️ This event was **missing from §3.5.3's taxonomy** until M10 — invented in §10.5 when the
+    backoff needed it, catalogued in §9.1.3, never added to the domain list. §9.1.5's drift check
+    exists for exactly that gap.
+    """
+
+    name: ClassVar[str] = "behavior.trigger_disabled"
+
+    trigger_id: int
+    ignore_streak: int
+
+
+# -- Rule 4's accumulator (SDS 10.4) ----------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SpeechEntry:
+    """One utterance the VAD heard, and whether it turned out to be aimed at the robot."""
+
+    correlation_id: UUID
+    at_s: float  # monotonic seconds, from the owning service's clock
+    duration_s: float
+    attributed: bool = False  # became a conversation turn -> not ambient
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AmbientWindow:
+    """Speech heard recently, for §10.4 rule 4. Frozen; every operation returns a new one.
+
+    Rule 4 as written is *"> 60 s of VAD speech in the last 5 min **that opened no session**"* —
+    and that is not a state this architecture can observe. Per §6.3 **every** Silero detection opens
+    a session; that is what the gate is for. The rule was written against a system that does not
+    exist.
+
+    What *is* observable is the same idea one step later: **speech that opened a session and never
+    became a conversation.** So this counts everything and subtracts what turned out to be a
+    conversation — :func:`record_speech` on ``audio.speech_ended``, :func:`attribute_speech` on
+    ``conversation.user_transcribed``, matched by ``correlation_id``, which spans both edges.
+
+    **Retraction rather than a grace timer.** The obvious alternative holds each utterance pending
+    for a few seconds and promotes it if no transcript arrives. That needs a timer, a config knob
+    and a defensible value for it — and §3.10.3's own trace evidence has transcripts landing after
+    the assistant's audio and sometimes after ``conversation.turn_ended``, so the grace would have
+    to be seconds long and would be a guess. This needs none of it, and is a pure fold.
+
+    It is transiently wrong for a second or two after a genuine user utterance, before the
+    transcript retracts it. That window is unreachable: rule 2 has already vetoed, because the
+    machine is not IDLE while a turn is in flight.
+    """
+
+    entries: tuple[SpeechEntry, ...] = ()
+
+
+def record_speech(
+    window: AmbientWindow,
+    *,
+    correlation_id: UUID,
+    at_s: float,
+    duration_s: float,
+    keep_s: float,
+) -> AmbientWindow:
+    """Fold one finished utterance in, dropping anything older than ``keep_s``.
+
+    Pruning on write keeps the tuple bounded with no second pass and no timer — an always-on VAD in
+    a busy room is the case that would otherwise grow this forever.
+    """
+    kept = tuple(entry for entry in window.entries if at_s - entry.at_s <= keep_s)
+    return AmbientWindow(
+        entries=(
+            *kept,
+            SpeechEntry(
+                correlation_id=correlation_id, at_s=at_s, duration_s=duration_s
+            ),
+        )
+    )
+
+
+def attribute_speech(window: AmbientWindow, correlation_id: UUID) -> AmbientWindow:
+    """Mark every entry for ``correlation_id`` as directed at the robot — the retraction.
+
+    An unknown id is a no-op: a transcript can arrive for an utterance already pruned out of the
+    window, and that is not an error.
+    """
+    return AmbientWindow(
+        entries=tuple(
+            replace(entry, attributed=True)
+            if entry.correlation_id == correlation_id
+            else entry
+            for entry in window.entries
+        )
+    )
+
+
+def ambient_speech_s(window: AmbientWindow, *, now_s: float, window_s: float) -> float:
+    """Seconds of **un-attributed** speech inside the last ``window_s`` — rule 4's input.
+
+    Excluding attributed speech is what makes §10.6's histogram diagnostic. Counting all speech
+    would collapse *"the user was on a call"* and *"the user was talking to me"* into one
+    ``ambient_speech`` bucket and destroy the only signal that tells them apart.
+    """
+    return sum(
+        entry.duration_s
+        for entry in window.entries
+        if not entry.attributed and now_s - entry.at_s <= window_s
+    )
+
+
 __all__ = [
     "AMBIENT_SPEECH",
     "COOLDOWN",
@@ -254,6 +432,15 @@ __all__ = [
     "PROACTIVE_STATES",
     "QUIET_HOURS",
     "STATE",
+    "AmbientWindow",
+    "BehaviorProactiveDelivered",
+    "BehaviorProactiveSuppressed",
+    "BehaviorTriggerDisabled",
+    "BehaviorTriggerFired",
+    "SpeechEntry",
+    "ambient_speech_s",
+    "attribute_speech",
+    "record_speech",
     "Delivered",
     "PolicyContext",
     "PolicyLimits",
