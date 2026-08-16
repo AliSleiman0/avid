@@ -428,3 +428,101 @@ def test_the_shipped_vision_defaults_satisfy_their_own_invariants() -> None:
         vision = load_config(profile).vision
         assert vision.gain_window_s < vision.lose_window_s < vision.nap_after_s
         assert 0.0 < vision.confidence_threshold < 1.0
+
+
+# ── [behavior] — SDS §10.4's numbers, and the two ways to configure a mute robot ──
+
+
+def test_behavior_defaults_match_the_sds_and_ship_in_both_profiles() -> None:
+    """§9.6 pins these values and both profiles carry them explicitly. The assertion is against
+    the *loaded* config rather than the file, because a key missing from a TOML falls back to the
+    schema default silently (``deploy/PI_OPERATIONS.md`` §3) — so "the file says 900" and "the
+    robot uses 900" are different claims and this is the one that matters."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        behavior = load_config(profile).behavior
+        assert behavior.quiet_hours.start == "22:00"
+        assert behavior.quiet_hours.end == "07:30"
+        assert behavior.global_cooldown_s == 900
+        assert behavior.daily_budget == 5
+        assert behavior.presence_window_s == 300
+        assert behavior.ambient_speech_threshold_s == 60
+        assert behavior.ignore_streak_limit == 3
+        assert behavior.hold_open_s == 30
+        assert behavior.ignore_backoff_multiplier == 2
+
+
+@pytest.mark.parametrize(
+    "bound", ["7:30", "22:00:00", "24:00", "22:60", "evening", "", "2200"]
+)
+def test_a_malformed_quiet_hours_bound_is_rejected_at_load(bound: str) -> None:
+    """Rule 1 is the rule the user notices — at night, once. A malformed window does not degrade
+    the robot, it removes quiet hours entirely, so this fails at load rather than at 22:00."""
+    with pytest.raises(ValidationError, match="not HH:MM wall clock"):
+        Config.model_validate({"behavior": {"quiet_hours": {"start": bound}}})
+
+
+def test_a_zero_width_quiet_window_is_rejected() -> None:
+    """``start == end`` reads as 'always quiet' or 'never quiet' and the two differ by the whole
+    feature. Ambiguous config is a coin flip taken at 22:00, so reject rather than pick."""
+    with pytest.raises(ValidationError, match="zero-width window is ambiguous"):
+        Config.model_validate(
+            {"behavior": {"quiet_hours": {"start": "22:00", "end": "22:00"}}}
+        )
+
+
+def test_a_presence_window_below_the_exit_window_is_rejected() -> None:
+    """Rule 3 vetoes unless presence is newer than ``presence_window_s``, but presence is not
+    *concluded* until ``vision.lose_window_s`` of evidence settles. Set the policy window below it
+    and the freshest possible presence is already stale: every proposal vetoed, forever, with no
+    error anywhere. A knob that quietly does nothing is worse than one that is loudly wrong."""
+    with pytest.raises(ValidationError, match="vetoes every proactive proposal"):
+        Config.model_validate(
+            {"behavior": {"presence_window_s": 10}, "vision": {"lose_window_s": 75.0}}
+        )
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        {"global_cooldown_s": 0},
+        {"daily_budget": 0},
+        {"presence_window_s": 0},
+        {"ambient_speech_threshold_s": 0},
+        {"ignore_streak_limit": 0},
+        {"hold_open_s": 0},
+        {"ignore_backoff_multiplier": 0},
+    ],
+)
+def test_non_positive_behavior_budgets_are_rejected(section: dict[str, int]) -> None:
+    """Every one of these is a cadence or a ceiling; zero means either 'never' or 'divide by the
+    idea of a cadence', and neither is a configuration anyone typed on purpose."""
+    with pytest.raises(ValidationError):
+        Config.model_validate({"behavior": section})
+
+
+def test_the_shipped_quiet_window_wraps_midnight() -> None:
+    """22:00 → 07:30 is the shipped default and it crosses midnight, which is exactly where a
+    naive ``start <= now < end`` comparison is false all night and quiet hours never apply.
+    ``covers`` is the single implementation so §10.4's rule 1 cannot re-derive it wrongly."""
+    quiet = load_config(_PI_TOML).behavior.quiet_hours
+    assert quiet.start_minutes == 22 * 60
+    assert quiet.end_minutes == 7 * 60 + 30
+    assert quiet.covers(23 * 60 + 30)  # 23:30 — after start, before midnight
+    assert quiet.covers(2 * 60)  # 02:00 — after midnight, before end
+    assert quiet.covers(22 * 60)  # 22:00 — the boundary is inclusive at the start
+    assert not quiet.covers(7 * 60 + 30)  # 07:30 — and exclusive at the end
+    assert not quiet.covers(
+        7 * 60 + 55
+    )  # 07:55 — UC-03's coffee reminder must pass rule 1
+    assert not quiet.covers(12 * 60)
+
+
+def test_a_non_wrapping_quiet_window_is_still_handled() -> None:
+    """The wrap is the shipped case, not the only case: a daytime window (say a home worker's
+    focus block) must not be inverted by the same code path."""
+    quiet = Config.model_validate(
+        {"behavior": {"quiet_hours": {"start": "09:00", "end": "17:00"}}}
+    ).behavior.quiet_hours
+    assert quiet.covers(12 * 60)
+    assert not quiet.covers(8 * 60)
+    assert not quiet.covers(23 * 60)
