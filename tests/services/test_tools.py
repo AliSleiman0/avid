@@ -16,12 +16,13 @@ from uuid import UUID, uuid4
 import pytest
 
 from avid.core.realtime import ToolCallRequested
-from avid.domain import FACT_KINDS, Fact
+from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact
 from avid.services.tools import (
     CAPABILITY_INSTRUCTIONS,
     FORGET,
     RECALL,
     REMEMBER_FACT,
+    SET_AFFECT,
     TOOL_SCHEMAS,
     dispatch_tool_call,
 )
@@ -67,6 +68,27 @@ class _RecordingMemory:
         return self._deleted
 
 
+class _RecordingAffect:
+    """An ``AffectTools`` double that records what the model asked for.
+
+    Note the signature: ``correlation_id`` is **required and keyword-only**, matching the real
+    ``AffectService.set_affect`` rather than ``MemoryTools``' optional one. An overlay with no
+    turn behind it is a face change nothing can be traced to (§9.1.1)."""
+
+    def __init__(self) -> None:
+        self.applied: list[tuple[Affect, UUID]] = []
+
+    async def set_affect(self, affect: Affect, *, correlation_id: UUID) -> None:
+        self.applied.append((affect, correlation_id))
+
+
+class _BoomAffect:
+    """The affect port's failure mode — AC-3 says a raising call is still a tool error."""
+
+    async def set_affect(self, affect: Affect, *, correlation_id: UUID) -> None:
+        raise RuntimeError("face fell off")
+
+
 class _BoomMemory:
     """A memory port whose every call raises — the real ``MemoryService`` failure modes (a store
     error, a supersession-judge blow-up) surface here; AC-6 says the dispatcher must catch them."""
@@ -106,12 +128,17 @@ def _fact(text: str, *, kind: str = "other", importance: int = 5) -> Fact:
 
 
 async def _dispatch(
-    memory: object, call: ToolCallRequested, *, approximate: bool = False
+    memory: object,
+    call: ToolCallRequested,
+    *,
+    approximate: bool = False,
+    affect: object | None = None,
 ) -> dict[str, object]:
     """Dispatch and parse the tool output back to a dict for assertion."""
     output = await dispatch_tool_call(
         memory,  # type: ignore[arg-type]
         call,
+        affect=affect or _RecordingAffect(),  # type: ignore[arg-type]
         correlation_id=uuid4(),
         approximate=approximate,
     )
@@ -132,6 +159,7 @@ async def test_remember_fact_maps_to_the_port_and_returns_the_id() -> None:
             REMEMBER_FACT,
             '{"text": "the user likes tea", "kind": "preference", "importance": 6}',
         ),
+        affect=_RecordingAffect(),
         correlation_id=corr,
         approximate=False,
     )
@@ -203,7 +231,10 @@ async def test_forget_maps_to_the_port_and_returns_the_count() -> None:
 
 async def test_an_unknown_tool_name_is_a_tool_error() -> None:
     memory = _RecordingMemory()
-    out = await _dispatch(memory, _call("set_affect", '{"affect": "happy"}'))
+    # ⚠️ This used to use "set_affect" as its unknown name. AVID-214 routes that tool, so the
+    # test would have silently changed meaning — passing for the wrong reason, or failing for a
+    # reason unrelated to what it is named for. It needs a name nothing will ever implement.
+    out = await _dispatch(memory, _call("teleport", '{"where": "mars"}'))
     assert out["ok"] is False
     assert "unknown tool" in out["error"]  # type: ignore[operator]
 
@@ -237,12 +268,92 @@ async def test_a_raising_handler_becomes_a_tool_error(
     assert f"{name} failed" in out["error"]  # type: ignore[operator]
 
 
+# --- set_affect (AVID-214) ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("affect", SEMANTIC_AFFECTS)
+async def test_every_tier_two_affect_dispatches(affect: Affect) -> None:
+    """AC-7: each overlay the schema offers reaches the port, carrying the turn's id."""
+    memory = _RecordingMemory()
+    face = _RecordingAffect()
+
+    out = await _dispatch(
+        memory, _call(SET_AFFECT, f'{{"affect": "{affect.name.lower()}"}}'), affect=face
+    )
+
+    assert out == {"ok": True}
+    assert [applied for applied, _ in face.applied] == [affect]
+
+
+async def test_a_tier_one_baseline_is_not_settable_by_the_model() -> None:
+    """The schema's enum is the Tier-2 subset, and the parser enforces the same bound.
+
+    IDLE/LISTENING/THINKING/SPEAKING are the state machine's to own and SLEEPING is presence's.
+    §6.8's whole argument for tolerating Tier 2's ~400 ms latency is that *"the baseline is never
+    wrong"* — a model that could overwrite the baseline would spend exactly that property, and it
+    would do it invisibly: a THINKING face while the robot is speaking is odd, not an error."""
+    memory = _RecordingMemory()
+    face = _RecordingAffect()
+
+    for baseline in ("idle", "listening", "thinking", "speaking", "sleeping"):
+        out = await _dispatch(
+            memory, _call(SET_AFFECT, f'{{"affect": "{baseline}"}}'), affect=face
+        )
+        assert out["ok"] is False
+        assert "unknown affect" in str(out["error"])
+
+    assert face.applied == [], "a Tier-1 baseline reached the affect port"
+
+
+async def test_an_unknown_affect_is_a_tool_error_not_a_crash() -> None:
+    memory = _RecordingMemory()
+    face = _RecordingAffect()
+
+    out = await _dispatch(memory, _call(SET_AFFECT, '{"affect": "smug"}'), affect=face)
+
+    assert out["ok"] is False
+    assert face.applied == []
+
+
+async def test_a_raising_affect_port_becomes_a_tool_error() -> None:
+    """AC-3: every failure path returns a tool error. A face that fell off must not end a turn."""
+    out = await _dispatch(
+        _RecordingMemory(),
+        _call(SET_AFFECT, '{"affect": "happy"}'),
+        affect=_BoomAffect(),
+    )
+
+    assert out["ok"] is False
+    assert "face fell off" in str(out["error"])
+
+
+def test_the_set_affect_enum_is_the_domain_tier_two_tuple() -> None:
+    """AC-2: derived, not re-listed — the same drift guard ``remember_fact.kind`` has.
+
+    A ninth affect added to ``SEMANTIC_AFFECTS`` appears in the schema for free; one added to
+    ``Affect`` alone stays out of the model's reach, which is the correct default."""
+    schema = next(s for s in TOOL_SCHEMAS if s["name"] == SET_AFFECT)
+    enum = schema["parameters"]["properties"]["affect"]["enum"]  # type: ignore[index]
+
+    assert enum == [a.name.lower() for a in SEMANTIC_AFFECTS]
+    assert "idle" not in enum
+
+
+def test_capability_instructions_tell_the_model_when_not_to_set_an_affect() -> None:
+    """AC-5, and the emphasis is deliberate. §6.5's finding is that negative constraints are
+    followed far more reliably than encouragements, so the clause that stops it firing every turn
+    matters more than the one that enables it — an affect that changes on every reply is a
+    flickering face."""
+    assert "set_affect" in CAPABILITY_INSTRUCTIONS
+    assert "not on ordinary replies" in CAPABILITY_INSTRUCTIONS
+
+
 # --- the shipped declarations (AC-2/AC-4) ------------------------------------------------------
 
 
-def test_tool_schemas_declare_the_three_tools() -> None:
+def test_tool_schemas_declare_the_four_tools() -> None:
     names = {schema["name"] for schema in TOOL_SCHEMAS}
-    assert names == {REMEMBER_FACT, RECALL, FORGET}
+    assert names == {REMEMBER_FACT, RECALL, FORGET, SET_AFFECT}
     assert all(schema["type"] == "function" for schema in TOOL_SCHEMAS)
 
 

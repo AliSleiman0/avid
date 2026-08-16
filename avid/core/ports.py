@@ -10,7 +10,7 @@ Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clo
 :class:`Speaker`, :class:`VoiceActivityDetector`, :class:`FaceDetector`,
 :class:`RealtimeClient`, :class:`TurnSink`, :class:`FactRepository`,
 :class:`Embedder`, :class:`Retriever`, :class:`TextModel`, :class:`MemoryTools`,
-:class:`EpisodeStore`.
+:class:`AffectTools`, :class:`EpisodeStore`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -48,7 +48,7 @@ from avid.core.hal import (
     Frame,
 )
 from avid.core.realtime import RealtimeEvent
-from avid.domain import Event, Fact, RetrievalMatch
+from avid.domain import Affect, Event, Fact, RetrievalMatch
 
 
 @runtime_checkable
@@ -714,6 +714,44 @@ class TextModel(Protocol):
         when none. ``async`` because the real adapter runs HTTPS inference it must keep off the loop
         (P8); the fake decides in-process. Confabulation is a bug (§7.8): return only ids genuinely
         superseded — *unknown* is a valid "not superseded", never a guess."""
+        ...
+
+
+@runtime_checkable
+class AffectTools(Protocol):
+    """The `set_affect` tool, as ``ConversationService`` needs it (SDS §6.6, §6.8, AVID-214).
+
+    The M6 gate's second clause is *"affect inferred from response drives the face **without `ai`
+    importing `display`**"*, and this port is why that holds without anyone arranging it: the
+    dispatcher calls this surface, ``AffectService`` publishes one ``affect.changed``,
+    ``ExpressionService`` renders it, and neither end knows the other exists (§6.8, §3.6.1). The
+    `import-linter` service-independence contract fails CI if ``conversation`` ever names
+    ``avid.services.affect`` directly, so the Protocol is load-bearing rather than ceremonial.
+
+    ``AffectService`` satisfies it **structurally**, with no inheritance and no edit — which is
+    also why the signature is copied from that service rather than from :class:`MemoryTools`
+    beside it. ``MemoryTools`` makes ``correlation_id`` optional; ``AffectService.set_affect``
+    requires it, keyword-only, and is right to: an overlay with no turn behind it is a face change
+    nothing can be traced to (§9.1.1 — the id is *propagated*, never minted downstream). A
+    Protocol that copied the neighbour's shape would simply not be satisfied.
+
+    The tool takes an ``Affect``, not a string, and the dispatcher does the parsing: the model's
+    raw JSON is the *dispatcher's* problem (it owns turning a bad value into a tool error), while
+    this port speaks the domain's vocabulary. That is the opposite of ``MemoryTools.remember_fact``
+    taking ``kind: str``, and deliberately — there the validation needs the store's own
+    constraint, here the enum *is* the constraint.
+    """
+
+    async def set_affect(self, affect: Affect, *, correlation_id: UUID) -> None:
+        """Apply the model's Tier-2 semantic overlay (§6.8).
+
+        **Fire-and-forget** (§6.6 classifies it so): it returns when the overlay is recorded and
+        the event published, not when a face reaches glass. §6.8's whole argument is that Tier 2's
+        ~400 ms is invisible *because the Tier-1 baseline is never wrong*, so blocking a turn on a
+        render would import that latency into the conversation for no benefit.
+
+        The overlay is cleared by the next Tier-1 transition, which the service already owns — that
+        clearing is what stops the robot grinning through "I've finished speaking"."""
         ...
 
 

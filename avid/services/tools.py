@@ -26,9 +26,9 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from avid.core.ports import MemoryTools
+from avid.core.ports import AffectTools, MemoryTools
 from avid.core.realtime import ToolCallRequested
-from avid.domain import FACT_KINDS, Fact
+from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact
 
 _log = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ _log = logging.getLogger(__name__)
 REMEMBER_FACT = "remember_fact"
 RECALL = "recall"
 FORGET = "forget"
+SET_AFFECT = "set_affect"
 
 # The default recall cutoff (§7.7, k=5) when the model omits ``k``.
 _DEFAULT_RECALL_K = 5
@@ -53,7 +54,13 @@ CAPABILITY_INSTRUCTIONS = (
     "are remembering. Rate importance 1-10, where 1 is trivia and 10 is core identity. "
     "Do not store passing remarks, questions, or anything you inferred rather than were told. "
     "When the user asks about something they told you before that is not already in your "
-    "context, call recall. When the user asks you to forget something, call forget."
+    "context, call recall. When the user asks you to forget something, call forget. "
+    # §6.5's finding governs the shape of this: the clause that STOPS it firing matters more
+    # than the one that enables it. An affect set on every reply is a flickering face, and the
+    # Tier-1 baseline is already correct without any help (§6.8).
+    "Your face already shows whether you are listening, thinking or speaking, so call "
+    "set_affect only when the emotional tone of a reply is genuinely different — happy, sad "
+    "or confused — and not on ordinary replies."
 )
 
 
@@ -130,6 +137,30 @@ TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
             "required": ["query"],
         },
     },
+    {
+        "type": "function",
+        "name": SET_AFFECT,
+        "description": (
+            "Set the robot's facial expression to match the emotional tone of what you "
+            "are about to say. Use it only when the tone genuinely changes; leave it alone "
+            "for ordinary replies."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "affect": {
+                    "type": "string",
+                    # Derived from the domain's Tier-2 tuple, exactly as `remember_fact.kind`
+                    # is derived from FACT_KINDS, so the model is structurally prevented from
+                    # inventing an expression — or from reaching a Tier-1 baseline that is the
+                    # state machine's to own (§6.8).
+                    "enum": [a.name.lower() for a in SEMANTIC_AFFECTS],
+                    "description": "The expression to show.",
+                },
+            },
+            "required": ["affect"],
+        },
+    },
 )
 
 
@@ -147,6 +178,7 @@ async def dispatch_tool_call(
     memory: MemoryTools,
     call: ToolCallRequested,
     *,
+    affect: AffectTools,
     correlation_id: UUID,
     approximate: bool,
 ) -> str:
@@ -196,12 +228,37 @@ async def dispatch_tool_call(
             )
             return _result({"deleted": deleted})
 
+        if call.name == SET_AFFECT:
+            args = _load_object(call.arguments)
+            await affect.set_affect(
+                _parse_affect(str(args["affect"])), correlation_id=correlation_id
+            )
+            # {ok} and nothing else, immediately: §6.6 classifies this async/fire-and-forget,
+            # and §6.8's argument for tolerating Tier 2's ~400 ms is that the Tier-1 baseline is
+            # never wrong. Awaiting a render would import that latency into the turn for nothing.
+            return _result({"ok": True})
+
         return _error(f"unknown tool {call.name!r}")
     except Exception as exc:  # noqa: BLE001 — AC-6: no tool failure may reach the pump
         _log.warning(
             "tool %r failed [%s]: %s", call.name, correlation_id, exc, exc_info=True
         )
         return _error(f"{call.name} failed: {exc}")
+
+
+def _parse_affect(name: str) -> Affect:
+    """Map the model's string to a Tier-2 :class:`~avid.domain.Affect`, or raise (AC-3).
+
+    Only the semantic overlays are reachable. A Tier-1 baseline — IDLE, LISTENING, THINKING,
+    SPEAKING — is the state machine's to set, and SLEEPING is presence's; letting the model reach
+    one would let it overwrite the baseline §6.8 depends on being never wrong. The raise becomes a
+    tool error in the dispatcher, so the model is told and the turn continues."""
+    wanted = name.strip().lower()
+    for affect in SEMANTIC_AFFECTS:
+        if affect.name.lower() == wanted:
+            return affect
+    allowed = ", ".join(a.name.lower() for a in SEMANTIC_AFFECTS)
+    raise ValueError(f"unknown affect {name!r} — expected one of: {allowed}")
 
 
 def _load_object(arguments: str) -> dict[str, Any]:
@@ -228,6 +285,7 @@ __all__ = [
     "FORGET",
     "RECALL",
     "REMEMBER_FACT",
+    "SET_AFFECT",
     "TOOL_SCHEMAS",
     "dispatch_tool_call",
 ]

@@ -47,6 +47,22 @@ class Affect(Enum):
     SLEEPING = auto()
 
 
+# The Tier-2 overlays, and **the only affects the model may ask for** (AVID-214, §6.8).
+#
+# Deliberately a subset, not the whole enum. The other five are not the model's to set:
+# IDLE/LISTENING/THINKING/SPEAKING are Tier-1 operational baselines the state machine owns and
+# `AffectService` derives from `RobotState`, and SLEEPING belongs to presence. §6.8's entire
+# argument for tolerating Tier 2's ~400 ms latency is that *"the baseline is never wrong"* — so
+# letting the model overwrite the baseline would spend the one property that makes the design
+# work, and it would do it invisibly: a model that sets THINKING while the robot is SPEAKING
+# produces a face that is merely odd, not an error.
+#
+# Ordered as declared, and derived from the enum rather than re-listed, so `set_affect`'s JSON
+# Schema enum cannot drift from the domain — the same reason `FACT_KINDS` backs `remember_fact`'s
+# `kind`. A ninth affect that belongs to Tier 2 is added here once and appears in the schema free.
+SEMANTIC_AFFECTS: tuple[Affect, ...] = (Affect.HAPPY, Affect.SAD, Affect.CONFUSED)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AffectChanged(Event):
     """The blended affect changed (SDS §9.1.3). Published by ``AffectService``; the fan-out

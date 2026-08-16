@@ -49,6 +49,7 @@ from avid.core.realtime import (
 )
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    Affect,
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
@@ -223,6 +224,7 @@ async def _rig(
         sink=sink,
         cues=cues,
         memory=mem,
+        affect=_StubAffect(),
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
         think_timeout_s=think_timeout_s,
@@ -551,6 +553,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         think_timeout_s=3600.0,
         server_turn_detection=False,
         thinking_delay_ms=0,
+        affect=_StubAffect(),
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -973,6 +976,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         think_timeout_s=3600.0,
         server_turn_detection=False,
         thinking_delay_ms=0,
+        affect=_StubAffect(),
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -1166,6 +1170,20 @@ async def test_no_thinking_cue_when_the_reply_is_already_playing() -> None:
         assert rig.service._think_task is None, (
             "the §6.9 deadline was armed for a first token that had already arrived"
         )
+
+
+class _StubAffect:
+    """An ``AffectTools`` double for the conversation rig (AVID-214).
+
+    Records rather than renders: the service's job is to route a tool call to the port, and what
+    happens to the face afterwards is ``AffectService``'s and ``ExpressionService``'s business —
+    neither of which this service is allowed to know exists (P5)."""
+
+    def __init__(self) -> None:
+        self.applied: list[Affect] = []
+
+    async def set_affect(self, affect: Affect, *, correlation_id: UUID) -> None:
+        self.applied.append(affect)
 
 
 class _UnreachableClient(ReplayRealtimeClient):
