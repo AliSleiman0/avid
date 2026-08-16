@@ -167,6 +167,7 @@ class ConversationService:
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
         think_timeout_s: float,
+        server_turn_detection: bool,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -178,6 +179,11 @@ class ConversationService:
         self._idle_close_s = session_idle_close_s
         self._memory_inject_timeout_s = memory_inject_timeout_s
         self._think_timeout_s = think_timeout_s
+        # Whether the SERVER is also deciding when a turn ends (AVID-194). Required, never
+        # defaulted — the #180 lesson: a defaulted turn-taking knob is one the bench silently
+        # never passes, and this one changes who owns the conversation. False is the shipped
+        # value and means we are the only authority.
+        self._server_turn_detection = server_turn_detection
 
         # Session lifecycle. The lock guards every open/teardown/degraded mutation so the
         # reactive handlers and the owned tasks cannot race the session in or out.
@@ -341,14 +347,27 @@ class ConversationService:
                 # same reason: this is the moment the wait for a first token actually begins
                 # (AVID-171).
                 self._arm_think_timeout()
+        # The AVID-194 commit, and the reason this service is now the only turn-taking authority.
+        # Outside the lock: `end_user_turn` goes to the socket, and the lock guards this service's
+        # own state, not the wire. Before the `already_replying` return below, because a turn must
+        # be committed whether or not a reply happened to arrive early — an uncommitted buffer is
+        # a turn the model never hears, which with the server VAD off nothing else will rescue.
+        #
+        # Skipped when the server VAD is still configured on: it commits on its own clock, and
+        # ours would be a second commit racing it. That configuration stays *reachable* for
+        # comparison rather than deleted — but it is not the shipped one, and it is the defect.
+        if not self._server_turn_detection:
+            await self._client.end_user_turn()
         if already_replying:
-            # The reply beat our falling edge — routine since AVID-176 gave the local hold a
-            # 400 ms margin over the server VAD, because the server commits on its own clock
-            # while we are still streaming. There is nothing left to cover: arming the §6.9 cue
-            # here would play "one sec" *over* a reply already coming out of the speaker, which
-            # is the AVID-158 defect (``CueBank`` plays straight to the ``Speaker``, not through
-            # the ``TurnSink``) and also breaks ``AlsaSpeaker``'s one-play-in-flight invariant.
-            # The deadline is skipped for the same reason: the first token has already arrived.
+            # The reply beat our falling edge. Routine while the server VAD was the other
+            # authority (AVID-176's 400 ms margin meant it committed while we were still
+            # streaming); with AVID-194 it should be rare, because nothing creates a response
+            # before we ask for one. It stays handled: a late overlap from a previous turn can
+            # still land here, and arming the §6.9 cue would play "one sec" *over* a reply already
+            # coming out of the speaker — the AVID-158 defect (``CueBank`` plays straight to the
+            # ``Speaker``, not through the ``TurnSink``), which also breaks ``AlsaSpeaker``'s
+            # one-play-in-flight invariant. The deadline is skipped because the first token has
+            # already arrived.
             return
         self._start_thinking_cue()
 

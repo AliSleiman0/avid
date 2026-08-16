@@ -131,7 +131,12 @@ def test_a_local_hold_shorter_than_the_server_vad_is_rejected() -> None:
         Config.model_validate(
             {
                 "gate": {"silence_hold_ms": 300},
-                "ai": {"turn_detection": {"silence_duration_ms": 500}},
+                "ai": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "silence_duration_ms": 500,
+                    }
+                },
             }
         )
 
@@ -179,7 +184,12 @@ def test_a_local_hold_must_clear_the_server_vad_by_a_margin() -> None:
         config = Config.model_validate(
             {
                 "gate": {"silence_hold_ms": hold},
-                "ai": {"turn_detection": {"silence_duration_ms": 500}},
+                "ai": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "silence_duration_ms": 500,
+                    }
+                },
             }
         )
         assert config.gate.silence_hold_ms == hold
@@ -189,9 +199,47 @@ def test_a_local_hold_must_clear_the_server_vad_by_a_margin() -> None:
             Config.model_validate(
                 {
                     "gate": {"silence_hold_ms": too_close},
-                    "ai": {"turn_detection": {"silence_duration_ms": 500}},
+                    "ai": {
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "silence_duration_ms": 500,
+                        }
+                    },
                 }
             )
+
+
+def test_the_margin_is_not_required_when_the_server_is_not_an_authority() -> None:
+    """AVID-194: with the server VAD off there is no second detector to clear.
+
+    The margin invariant above exists *because* the far end is also counting silence. Switch it
+    off and nothing over there is counting, so a 300 ms local hold that the old rule rejects is
+    now simply a short hold — a legitimate tuning choice, not a robot that never answers.
+
+    This is the half worth testing. A guard that outlives its reason does not announce itself: it
+    just starts rejecting correct configurations, and the obvious response is to weaken the guard
+    rather than to notice it no longer applies."""
+    config = Config.model_validate(
+        {
+            "gate": {"silence_hold_ms": 300},
+            "ai": {"turn_detection": {"type": "none", "silence_duration_ms": 500}},
+        }
+    )
+    assert config.gate.silence_hold_ms == 300
+    assert config.ai.turn_detection.server_is_an_authority is False
+
+
+def test_both_shipped_profiles_hand_turn_taking_to_the_local_gate() -> None:
+    """AVID-194's shipped decision, asserted on the artefacts rather than the schema default.
+
+    ``deploy/PI_OPERATIONS.md``'s rule is that a key missing from ``/etc/robot/config.toml`` falls
+    back to a schema default **silently**, so "the default is right" is not the same claim as "the
+    robot runs it". Both profiles say it explicitly."""
+    assert Config().ai.turn_detection.type == "none"
+    for profile in (_SIM_TOML, _PI_TOML):
+        config = load_config(profile)
+        assert config.ai.turn_detection.type == "none"
+        assert config.ai.turn_detection.server_is_an_authority is False
 
 
 def test_both_shipped_profiles_carry_the_measured_margin() -> None:

@@ -26,7 +26,12 @@ max_output_tokens = 512                                  # §6.10 guardrail
 personality       = "config/personality/default.toml"    # §6.5
 
 [ai.turn_detection]
-type                = "server_vad"
+# "none" since AVID-194: the SERVER's VAD is off and the local Silero gate is the single
+# turn-taking authority. Two detectors over one microphone is a race, not redundancy — a
+# 500-900 ms pause is ordinary speech, and the server used to commit inside it and answer a
+# fragment. The three tuning values below are inert while type = "none"; they are kept so
+# switching back to the two-authority behaviour for comparison stays a config edit.
+type                = "none"
 threshold           = 0.5
 prefix_padding_ms   = 300
 silence_duration_ms = 500

@@ -136,7 +136,7 @@ async def test_empty_session_captures_an_empty_manifest(tmp_path: Path) -> None:
 async def test_capture_delegates_control_calls_to_the_inner_client(
     tmp_path: Path,
 ) -> None:
-    """send_audio/truncate/cancel pass straight through to the wrapped client (a decorator)."""
+    """send_audio/truncate/cancel/end_user_turn pass straight through (a decorator)."""
     clock = FakeClock()
     inner = ReplayRealtimeClient(clock=clock, timeline=())
     capturing = CapturingRealtimeClient(
@@ -148,7 +148,11 @@ async def test_capture_delegates_control_calls_to_the_inner_client(
     await capturing.truncate("item_0", 480)
     await capturing.cancel()
     await capturing.send_tool_output("call_0", '{"facts": []}')
+    await capturing.end_user_turn()
     assert len(inner.sent) == 1
     assert inner.truncations == [("item_0", 480)]
     assert inner.cancels == 1
     assert inner.tool_outputs == [("call_0", '{"facts": []}')]
+    # AVID-194: a capture run must record the commit too, or a captured fixture would replay a
+    # conversation whose turns nothing ever ended.
+    assert inner.committed_turns == 1

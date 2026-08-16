@@ -355,6 +355,7 @@ async def _drive_session(
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         think_timeout_s=think_timeout_s,
+        server_turn_detection=False,
     )
 
     collector = _Collector()
@@ -519,6 +520,7 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         think_timeout_s=300.0,
+        server_turn_detection=False,
     )
     collector = _Collector()
     for sub in conversation.subscriptions():
