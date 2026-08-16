@@ -302,6 +302,9 @@ class ReplayRealtimeClient:
         self.injected: list[str] = []
         self.cancels = 0
         self.committed_turns = 0
+        # §10.7 opens counted like the commits above: the M10 gate asserts the proactive path
+        # reached the port, and that no audio accompanied it.
+        self.proactive_turns = 0
         self.opened = False
         self.closed = False
 
@@ -371,6 +374,16 @@ class ReplayRealtimeClient:
         it never recorded. Counted, like :attr:`cancels`, so the dispatch tests can assert that the
         falling edge reached the port at all. Non-blocking (P8)."""
         self.committed_turns += 1
+
+    async def begin_proactive_turn(self) -> None:
+        """Record the §10.7 proactive open. A replay does not act on it.
+
+        Same reasoning as :meth:`end_user_turn`: the recorded timeline already contains whatever
+        the model said, on its own schedule, so asking a fixture to answer would mean inventing a
+        reply it never recorded. Counted so the M10 gate can assert the proactive path reached the
+        port **and** that no ``send_audio`` accompanied it — the negative half of §10.7 is the one
+        worth guarding. Non-blocking (P8)."""
+        self.proactive_turns += 1
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): record the truncation. Non-blocking (P8)."""
@@ -1047,6 +1060,20 @@ class OpenAIRealtimeClient:
         await self._send({"type": "input_audio_buffer.commit"})
         await self._create_response()
 
+    async def begin_proactive_turn(self) -> None:
+        """§10.7 step 3: a bare ``response.create``, with **no** ``input_audio_buffer`` frame.
+
+        The third caller of :meth:`_create_response`, and the only one that sends nothing before
+        it — :meth:`end_user_turn` commits the buffer first and :meth:`send_tool_output` creates a
+        conversation item first. The #284 in-flight guard is inherited rather than re-implemented,
+        which is the reason this is three lines instead of thirty.
+
+        Cost, for scale (§10.7): ~10 s of audio out is roughly 200 tokens, about $0.004. Five a day
+        is $0.60/month against §6.10.3's $4.30. **The expensive thing about proactivity is never
+        the tokens.**
+        """
+        await self._create_response()
+
     async def _create_response(self) -> None:
         """Send ``response.create``, waiting for any in-flight response to finish first (#284).
 
@@ -1136,6 +1163,10 @@ class CapturingRealtimeClient:
 
     async def end_user_turn(self) -> None:
         await self._inner.end_user_turn()
+
+    async def begin_proactive_turn(self) -> None:
+        """Delegate the §10.7 proactive open, so a captured session replays as one."""
+        await self._inner.begin_proactive_turn()
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         await self._inner.truncate(item_id, audio_end_ms)

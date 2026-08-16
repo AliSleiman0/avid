@@ -121,6 +121,19 @@ async def test_end_user_turn_is_accepted_by_every_adapter(
     await client.end_user_turn()
 
 
+async def test_begin_proactive_turn_is_accepted_by_every_adapter(
+    client: RealtimeClient,
+) -> None:
+    """§10.7 step 3 is part of the contract on every adapter (#313, P6).
+
+    Shallow for the same reason ``end_user_turn`` is: the port's promise is *"speak, though nobody
+    spoke"*, and what that becomes on the wire is the adapter's business (ADR-003). The one thing
+    the port promises about frames is a **negative** — no input audio buffer — and that is asserted
+    against the real client below, where the frames are visible.
+    """
+    await client.begin_proactive_turn()
+
+
 # --- ReplayRealtimeClient tail (#101): the behaviour the fake owns (AC-5) ------------------
 
 
@@ -1429,3 +1442,64 @@ def test_no_language_key_is_sent_when_the_hint_is_unset() -> None:
     assert client._session_config()["audio"]["input"]["transcription"] == {  # type: ignore[index]
         "model": "whisper-1"
     }
+
+
+# --- §10.7: a turn nobody asked for (#313) ------------------------------------------------
+
+
+async def test_a_proactive_turn_sends_one_bare_response_create() -> None:
+    """⚠️ The negative is the whole point of the method.
+
+    §10.7 step 3: *"Send ``response.create`` directly. ← no ``input_audio_buffer`` at all."* The
+    real client's other two callers both send something first — ``end_user_turn`` commits the
+    buffer, ``send_tool_output`` creates a conversation item — so this is the only path where the
+    create stands alone.
+
+    Committing an empty buffer here would not merely be redundant: it would ask the model for a
+    reply to silence, on a turn where the *point* is that nobody spoke.
+    """
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+
+    await client.begin_proactive_turn()
+
+    assert [p["type"] for p in ws.sent] == ["response.create"]
+    assert not any(str(p["type"]).startswith("input_audio_buffer") for p in ws.sent), (
+        "§10.7: no input audio buffer may be committed or appended on the proactive path"
+    )
+
+
+async def test_a_proactive_turn_waits_for_an_in_flight_response() -> None:
+    """The #284 guard is inherited, not re-implemented — which is why this method is three lines.
+
+    A proactive turn firing while the model is mid-reply would earn
+    ``conversation_already_has_active_response``; the shared wait means the third caller gets the
+    same protection the other two already had, for free.
+    """
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+    client._response_idle.clear()
+    client._active_response = "resp_1"
+
+    task = asyncio.ensure_future(client.begin_proactive_turn())
+    await asyncio.sleep(0)
+    assert ws.sent == [], "it must not create a response while one is in flight"
+
+    client._response_idle.set()
+    await task
+    assert [p["type"] for p in ws.sent] == ["response.create"]
+
+
+async def test_the_replay_client_counts_proactive_turns_without_audio() -> None:
+    """The fake's half, and what the M10 gate asserts on: the proactive path reached the port, and
+    **nothing was streamed up with it**. A replay answers on its own recorded schedule, so there is
+    nothing for the call to trigger — the count is the observable."""
+    replay = ReplayRealtimeClient(clock=FakeClock(), timeline=())
+    await replay.open()
+    await replay.begin_proactive_turn()
+
+    assert replay.proactive_turns == 1
+    assert replay.sent == [], "no mic audio may accompany a proactive open"
+    assert replay.committed_turns == 0, "and no user turn may be committed"
