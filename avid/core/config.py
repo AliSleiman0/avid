@@ -32,6 +32,22 @@ from pydantic import (
 _LOOPBACK: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
+def _to_minutes(wall_clock: str) -> int | None:
+    """``"22:00"`` → 1320 minutes since local midnight; ``None`` if it is not ``HH:MM``.
+
+    Deliberately strict — ``"7:30"``, ``"22:00:00"`` and ``"24:00"`` are all rejected. A quiet-hours
+    bound is hand-typed into ``/etc/robot/config.toml`` on a Pi and read once a night; being
+    permissive here trades a loud parse failure at boot for a quiet behavioural one at 22:00.
+    """
+    hh, sep, mm = wall_clock.partition(":")
+    if sep != ":" or len(hh) != 2 or len(mm) != 2 or not (hh + mm).isdigit():
+        return None
+    hours, minutes = int(hh), int(mm)
+    if hours > 23 or minutes > 59:
+        return None
+    return hours * 60 + minutes
+
+
 class _Section(BaseModel):
     """Base for every config section: frozen and closed to unknown keys."""
 
@@ -478,22 +494,88 @@ class MemoryConfig(_Section):
 
 
 class QuietHours(_Section):
-    """A daily do-not-disturb window (SDS §10.4)."""
+    """A daily do-not-disturb window (SDS §10.4). Rule 1, and the only non-negotiable rule.
+
+    Wall-clock ``HH:MM`` in :attr:`BehaviorConfig.timezone`, **not** UTC and not an offset —
+    22:00 means the user's evening on whichever side of a DST boundary today falls (§8.1: "local
+    time appears in exactly one place", and this is the second, for the same reason).
+
+    The window **wraps midnight** in the shipped default (22:00 → 07:30), which is the case worth
+    stating: a naive ``start <= now < end`` comparison is false all night and quiet hours never
+    apply. :meth:`covers` is the one implementation, so the gate cannot re-derive it wrongly.
+    """
 
     start: str = "22:00"
     end: str = "07:30"
 
+    @field_validator("start", "end")
+    @classmethod
+    def _well_formed_wall_clock(cls, value: str) -> str:
+        """Reject anything that is not ``HH:MM`` at load, not at 22:00 (SDS §10.4).
+
+        A malformed window is not a degraded robot, it is a robot with **no quiet hours at all** —
+        rule 1 is the one the user notices, at night, once. `deploy/PI_OPERATIONS.md`'s standing
+        lesson applies with force here: `/etc/robot/config.toml` is a hand-edited copy, and a
+        missing or fat-fingered key falls back to a schema default silently.
+        """
+        if _to_minutes(value) is None:
+            raise ValueError(
+                f"quiet-hours bound {value!r} is not HH:MM wall clock (SDS §10.4). "
+                f"Expected 24-hour local time, e.g. '22:00'."
+            )
+        return value
+
+    @property
+    def start_minutes(self) -> int:
+        """``start`` as minutes since local midnight. Non-``None`` — the validator guaranteed it."""
+        minutes = _to_minutes(self.start)
+        assert minutes is not None  # noqa: S101 - guaranteed by _well_formed_wall_clock
+        return minutes
+
+    @property
+    def end_minutes(self) -> int:
+        """``end`` as minutes since local midnight."""
+        minutes = _to_minutes(self.end)
+        assert minutes is not None  # noqa: S101 - guaranteed by _well_formed_wall_clock
+        return minutes
+
+    def covers(self, minutes_since_midnight: int) -> bool:
+        """Whether local ``minutes_since_midnight`` falls inside the window.
+
+        Half-open ``[start, end)``, and **midnight-aware**: when ``start > end`` the window wraps,
+        so it covers everything at or after ``start`` *or* before ``end``. ``start == end`` is
+        rejected by :meth:`Config._behavior_windows_are_usable` rather than guessed at here — it
+        could mean "always" or "never" and neither reading is safe to assume.
+        """
+        start, end = self.start_minutes, self.end_minutes
+        if start <= end:
+            return start <= minutes_since_midnight < end
+        return minutes_since_midnight >= start or minutes_since_midnight < end
+
 
 class BehaviorConfig(_Section):
-    """Proactive-behavior budget and cadence (SDS §10.4)."""
+    """Proactive-behavior budget and cadence (SDS §10.4).
+
+    Every number here is a *ceiling* rather than a target: §10.1's whole design rests on the
+    asymmetry that a missed reminder is disappointing and a robot that talks over your call gets
+    unplugged. G3 asks for ≥1 useful proactive event per day against a ``daily_budget`` of 5.
+    """
 
     quiet_hours: QuietHours = QuietHours()
     timezone: str = "Asia/Beirut"
-    global_cooldown_s: int = 900
-    daily_budget: int = 5
-    presence_window_s: int = 300
-    ambient_speech_threshold_s: int = 60
-    ignore_streak_limit: int = 3
+    global_cooldown_s: int = Field(default=900, gt=0)
+    daily_budget: int = Field(default=5, ge=1)
+    # One window serves rules 3 and 4 — §10.4 gives both "in the last 5 min", and splitting them
+    # into two keys would invite them to drift apart for no stated reason.
+    presence_window_s: int = Field(default=300, gt=0)
+    ambient_speech_threshold_s: int = Field(default=60, gt=0)
+    ignore_streak_limit: int = Field(default=3, ge=1)
+    # §10.7 step 5 and §10.5's "wait 30 s" are the same 30 seconds, read by two owners: the
+    # session hold-open (a socket) and the ignore bookkeeping (a database row). One key.
+    hold_open_s: int = Field(default=30, gt=0)
+    # §10.5: cooldown_s *= this, per consecutive ignore. 1 disables the backoff without
+    # disabling the streak counting, which is a legitimate (if timid) configuration.
+    ignore_backoff_multiplier: int = Field(default=2, ge=1)
 
 
 class VisionConfig(_Section):
@@ -762,6 +844,39 @@ class Config(_Section):
                 f"vision.fps ({self.vision.fps}) must be <= camera.fps "
                 f"({self.camera.fps}): the capture loop cannot sample faster than the sensor "
                 f"is configured to deliver (SDS §2.7.1, §3.9.3)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _behavior_windows_are_usable(self) -> Config:
+        # Two ways to configure a proactivity engine that never speaks, neither of which errors
+        # anywhere else and neither of which is visible without a multi-morning run.
+        #
+        # 1. A degenerate quiet window. start == end could mean "quiet all day" or "never quiet",
+        #    and the two readings differ by the entire feature. Reject rather than pick one — the
+        #    same argument api.bind makes about 0.0.0.0: a config whose meaning is ambiguous is
+        #    not a config, it is a coin flip taken at 22:00.
+        if self.behavior.quiet_hours.start == self.behavior.quiet_hours.end:
+            raise ValueError(
+                f"behavior.quiet_hours.start and .end are both "
+                f"{self.behavior.quiet_hours.start!r}: a zero-width window is ambiguous — it "
+                f"reads as 'always quiet' or 'never quiet' and the two differ by the whole "
+                f"feature. Set an explicit window (SDS §10.4 rule 1)."
+            )
+        # 2. A presence window shorter than the time vision needs to *conclude* presence. §10.4
+        #    rule 3 vetoes unless someone was seen within presence_window_s; §9.1.3's hysteresis
+        #    does not publish vision.presence_gained until lose_window_s worth of evidence has
+        #    settled. Set the policy's window below that and the freshest possible presence is
+        #    already too stale to pass — rule 3 vetoes every proposal, forever, silently. It is
+        #    the exact shape of the vision asymmetry check below: a knob that quietly does nothing
+        #    is worse than one that is loudly wrong.
+        if self.behavior.presence_window_s < self.vision.lose_window_s:
+            raise ValueError(
+                f"behavior.presence_window_s ({self.behavior.presence_window_s}) must be >= "
+                f"vision.lose_window_s ({self.vision.lose_window_s}): rule 3 requires presence "
+                f"newer than its window, and presence is not concluded until the exit window "
+                f"closes, so a shorter policy window vetoes every proactive proposal "
+                f"(SDS §10.4 rule 3)."
             )
         return self
 
