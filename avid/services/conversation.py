@@ -101,6 +101,7 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    BehaviorTriggerFired,
     ConversationAssistantResponded,
     ConversationSessionLost,
     ConversationTurnEnded,
@@ -184,6 +185,7 @@ class ConversationService:
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
         default_timezone: str,
+        hold_open_s: float,
         think_timeout_s: float,
         server_turn_detection: bool,
         thinking_delay_ms: int,
@@ -204,6 +206,11 @@ class ConversationService:
         # [behavior] timezone, injected (P7) purely to fill in remember_fact's schedule when the
         # model omits one. This service never reads it itself.
         self._default_timezone = default_timezone
+        # §10.7 step 5. Shorter than session_idle_close_s on purpose — see _arm_idle.
+        self._hold_open_s = hold_open_s
+        # Whether the open session was started by a trigger rather than by speech. Read once, at
+        # the idle close, to say whether the proactive turn went unanswered (§10.5's feed).
+        self._proactive = False
         self._think_timeout_s = think_timeout_s
         # Whether the SERVER is also deciding when a turn ends (AVID-194). Required, never
         # defaulted — the #180 lesson: a defaulted turn-taking knob is one the bench silently
@@ -291,6 +298,13 @@ class ConversationService:
                 handler=cast(Handler, self._on_speech_ended),
                 name="ConversationService.speech_ended",
                 policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=BehaviorTriggerFired,
+                handler=cast(Handler, self._on_trigger_fired),
+                name="ConversationService.trigger_fired",
+                policy=OverflowPolicy.DROP_NEWEST,
                 maxsize=DEFAULT_MAXSIZE,
             ),
             Subscription(
@@ -496,17 +510,83 @@ class ConversationService:
         The machine follows ``audio.speech_ended`` instead — AudioService's own falling edge,
         which is local, always fires, and is what §3.10.1 has always called "turn end detected".
         """
-        self._turn_active = True
-        self._turn_started_ns = self._clock.monotonic_ns()
-        self._turn_approximate = (
-            ev.is_approximate
-        )  # gates remember_fact this turn (#125)
-        await self._publish(ConversationTurnStarted(**self._env(), initiator="user"))
+        await self._begin_turn("user", approximate=ev.is_approximate)
         await self._publish(
             ConversationUserTranscribed(
                 **self._env(), text=ev.text, is_approximate=ev.is_approximate
             )
         )
+
+    async def _begin_turn(self, initiator: str, *, approximate: bool) -> None:
+        """Open a turn: latch the timing marks and publish ``conversation.turn_started``.
+
+        Extracted from :meth:`_on_user_transcript` for #239, and the extraction is the fix rather
+        than tidying. Before it, this was the **only** place a turn was ever opened — so a
+        proactive turn, which produces no user transcript, never reached it: ``_turn_active`` and
+        ``_turn_started_ns`` would have stayed unset, ``conversation.turn_ended`` would have
+        reported ``duration_ms=0``, and the whole turn would have been invisible to
+        ``EpisodeRecorder``. The ``initiator`` literal has been legal since M5
+        (:class:`~avid.domain.ConversationTurnStarted`); nothing had ever constructed the
+        ``"proactive"`` half.
+        """
+        self._turn_active = True
+        self._turn_started_ns = self._clock.monotonic_ns()
+        self._turn_approximate = approximate  # gates remember_fact this turn (#125)
+        await self._publish(
+            ConversationTurnStarted(**self._env(), initiator=initiator)  # type: ignore[arg-type]
+        )
+
+    async def _on_trigger_fired(self, event: BehaviorTriggerFired) -> None:
+        """The robot speaks first — §10.7, and the seam this service has carried since M5.
+
+        The five steps §10.7 lists, in order, minus the one that does not apply:
+
+        1. the policy already passed — ``BehaviorService`` would not have published otherwise;
+        2. open a session exactly as the user-initiated path does, with the same §6.7 memory
+           injection, because a proactive turn that has forgotten the user is worse than silence;
+        3. ``begin_proactive_turn()`` — a bare ``response.create``, **no input audio buffer**;
+        4. the model speaks, and the ordinary ``THINKING → SPEAKING`` row carries it (#313's
+           contract test guards the "no buffer" half; no new state-machine branch is needed);
+        5. the session is held open ``hold_open_s`` for a reply.
+
+        **The correlation_id is adopted, never minted.** ``behavior.trigger_fired`` is the head of
+        this turn (§9.1.1) and ``BehaviorService`` minted it there — exactly as
+        :meth:`_on_speech_started` adopts the one ``AudioService`` minted at the other origin. A
+        second mint here would split one turn into two in every log and every episode.
+
+        A failure to open is logged and swallowed, like the reactive path's: a proactive turn the
+        network refused is a missed reminder, and §10.1's asymmetry says a missed reminder is the
+        cheap error. Raising into a bus handler would be the expensive one.
+        """
+        async with self._lock:
+            if self._session_open:
+                # Something is already talking. The gate's rule 2 should have vetoed, so reaching
+                # here means the world moved between the check and the fire — drop it rather than
+                # interleave two turns on one socket.
+                _log.info(
+                    "proactive trigger arrived with a session already open; ignoring "
+                    "[correlation_id=%s]",
+                    event.correlation_id,
+                )
+                return
+            self._turn_id = event.correlation_id
+            try:
+                await self._client.open(memory=self._compose_memory_block())
+            except OSError as exc:
+                _log.warning(
+                    "proactive session open failed, staying quiet: %s [correlation_id=%s]",
+                    exc,
+                    event.correlation_id,
+                )
+                return
+            self._session_open = True
+            self._pump_task = spawn(self._pump(), name="ConversationService.pump")
+            self._mic_task = spawn(self._forward_mic(), name="ConversationService.mic")
+            self._proactive = True
+            self._arm_idle(self._hold_open_s)
+
+        await self._begin_turn("proactive", approximate=False)
+        await self._client.begin_proactive_turn()
 
     async def _on_assistant_transcript(self, ev: AssistantTranscript) -> None:
         """The assistant reply's transcript (``conversation.assistant_responded``). Text only —
@@ -706,21 +786,41 @@ class ConversationService:
 
     # --- idle close ----------------------------------------------------------------------
 
-    def _arm_idle(self) -> None:
-        """(Re)start the idle-close countdown from *now*. Caller holds the lock."""
-        self._cancel_task(self._idle_task)
-        self._idle_task = spawn(self._idle_timer(), name="ConversationService.idle")
+    def _arm_idle(self, window_s: float | None = None) -> None:
+        """(Re)start the idle-close countdown from *now*. Caller holds the lock.
 
-    async def _idle_timer(self) -> None:
+        ``window_s`` overrides the ordinary ``session_idle_close_s`` — §10.7 step 5 holds a
+        proactive session open for ``[behavior] hold_open_s`` instead, which is a much shorter
+        wait. It is shorter for a reason worth stating: a reactive session is quiet because the
+        user is thinking; a proactive one is quiet because nobody answered, and holding a socket
+        open on the chance that they will is how you pay for silence.
+        """
+        self._cancel_task(self._idle_task)
+        self._idle_task = spawn(
+            self._idle_timer(window_s), name="ConversationService.idle"
+        )
+
+    async def _idle_timer(self, window_s: float | None = None) -> None:
         """Close the session after ``session_idle_close_s`` of quiet (AC-3).
 
         Sleeps on the injected clock (fakeable), so tests advance virtual time instead of
         waiting. On expiry it tears the session down; the timer cancels itself as part of that,
         which :meth:`_cancel_task` makes a no-op (a task never cancels itself)."""
-        await self._clock.sleep(self._idle_close_s)
-        _log.info("closing idle Realtime session after %ss", self._idle_close_s)
+        window = self._idle_close_s if window_s is None else window_s
+        await self._clock.sleep(window)
+        _log.info("closing idle Realtime session after %ss", window)
         async with self._lock:
+            was_proactive = self._proactive
             await self._teardown_locked()
+        if was_proactive:
+            # §10.7 step 6: no reply inside the window. Said out loud rather than swallowed,
+            # because §10.5's backoff turns on exactly this signal — and a robot that cannot
+            # tell "ignored" from "never fired" is the robot §10.6 exists to prevent.
+            _log.info(
+                "proactive turn went unanswered after %ss [correlation_id=%s]",
+                window,
+                self._corr(),
+            )
 
     # --- the §6.9 first-token deadline (AVID-171) ----------------------------------------
 
@@ -783,6 +883,9 @@ class ConversationService:
         client. The thinking cue is stopped; other best-effort cue tasks are left to finish
         (they release themselves) but are swept on :meth:`stop`."""
         self._session_open = False
+        # ...nor a stale proactive latch: the next session may well be a user-initiated one, and
+        # an inherited latch would report an ordinary quiet session as an ignored reminder.
+        self._proactive = False
         # A fresh cold session must not inherit a stale barge-in mute (#104).
         self._muted_item = None
         self._cancel_task(self._idle_task)

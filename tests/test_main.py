@@ -52,6 +52,7 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    BehaviorTriggerFired,
     ConversationAssistantResponded,
     ConversationTurnEnded,
     ConversationTurnStarted,
@@ -107,6 +108,8 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ConversationService.speech_started",
     "ConversationService.speech_ended",
     "ConversationService.playback_finished",
+    # #239: the second turn origin, a declared seam from M5 until M10.
+    "ConversationService.trigger_fired",
     "CostMeterService.turn_ended",
     # EpisodeRecorder (#123): the write-only §7.5 transcript observer of the four conversation.* facts
     "EpisodeRecorder.turn_started",
@@ -469,6 +472,7 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         MemoryFactStored,
         MemoryFactSuperseded,
         MemoryFactDeleted,
+        BehaviorTriggerFired,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]
@@ -478,6 +482,7 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     # a dropped `memory.fact_stored` is a routine that never becomes a schedule, so the OLDEST
     # queued one is the one worth keeping.
     _drop_newest = {
+        "ConversationService.trigger_fired",
         "BehaviorService.system_started",
         "BehaviorService.degraded_entered",
         "BehaviorService.degraded_exited",
