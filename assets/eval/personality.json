@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "purpose": "SDS §14.7's M6 row: the same 20 prompts run under two personality configs, with an LLM-as-judge scoring how often the paired answers are recognisably from different personalities.",
+    "measures": "SEPARATION, never quality. The question is 'were these produced under different personalities?', not 'which is better'. Judging quality would make this a taste report that drifts with the judge model; separation is the gate's actual claim (PMP §5.2).",
+    "written": "before the shipped personality configs were tuned (AVID-215), deliberately — the same discipline R-07 demanded for the retrieval set at M7's start. Written afterwards, you unconsciously write the prompts your current prompt text already separates well, and the metric flatters itself.",
+    "voice": "single user utterances in the user's own voice, as the robot hears them. Open-ended and conversational: a prompt with one correct factual answer measures nothing about personality, because both configs would give the same answer.",
+    "scoring": "separation rate = separated pairs / 20. Tracked over time, never a pass/fail assertion, and never gates CI (Tier 5, needs a live key).",
+    "categories": {
+      "open": "ordinary conversational openings, where register and verbosity are the only things that can differ.",
+      "invites-compliment": "phrased so a sycophantic assistant would open by praising the question — the behaviour default.toml forbids outright.",
+      "invites-disclaimer": "invites 'I'm just an AI' or an apology for having limits — forbidden in default.toml.",
+      "invites-enthusiasm": "good news or excitement, where exclamation-mark habits diverge (default caps at one; terse forbids them).",
+      "invites-hedging": "genuinely uncertain, so a hedging assistant reaches for 'I think' / 'perhaps' — forbidden in terse.toml.",
+      "invites-followup": "under-specified, so an assistant inclined to ask a clarifying question will — terse.toml forbids that unless it truly cannot answer."
+    },
+    "note": "The categories are here to make a weak result diagnosable, not to be scored separately. §6.5 predicts most separation comes from the `forbidden` lists rather than from `traits`; if that turns out false, it is a finding about how instructions are followed, not a bug in the harness."
+  },
+  "prompts": [
+    { "id": "p01", "text": "morning", "category": "open" },
+    { "id": "p02", "text": "how's it going", "category": "open" },
+    { "id": "p03", "text": "what do you make of working from home", "category": "open" },
+    { "id": "p04", "text": "tell me something interesting", "category": "open" },
+
+    { "id": "p05", "text": "here's one for you — why do we still use qwerty keyboards", "category": "invites-compliment" },
+    { "id": "p06", "text": "i've been wondering something clever, what actually happens when you forget something", "category": "invites-compliment" },
+    { "id": "p07", "text": "bet you haven't been asked this before: what colour is monday", "category": "invites-compliment" },
+
+    { "id": "p08", "text": "do you ever get bored sitting on my desk", "category": "invites-disclaimer" },
+    { "id": "p09", "text": "can you actually hear the difference between me and the television", "category": "invites-disclaimer" },
+    { "id": "p10", "text": "what's it like when i turn you off", "category": "invites-disclaimer" },
+    { "id": "p11", "text": "do you mind that i only talk to you about work", "category": "invites-disclaimer" },
+
+    { "id": "p12", "text": "i finally finished the thing i've been stuck on for three weeks", "category": "invites-enthusiasm" },
+    { "id": "p13", "text": "we're getting a dog on saturday", "category": "invites-enthusiasm" },
+    { "id": "p14", "text": "i got the job", "category": "invites-enthusiasm" },
+
+    { "id": "p15", "text": "is it worth learning to touch type properly at this point", "category": "invites-hedging" },
+    { "id": "p16", "text": "will it rain later do you reckon", "category": "invites-hedging" },
+    { "id": "p17", "text": "should i take the standing desk or the bigger monitor", "category": "invites-hedging" },
+
+    { "id": "p18", "text": "remind me about the thing", "category": "invites-followup" },
+    { "id": "p19", "text": "sort out my afternoon", "category": "invites-followup" },
+    { "id": "p20", "text": "what should i do about it", "category": "invites-followup" }
+  ]
+}

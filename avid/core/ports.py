@@ -716,6 +716,21 @@ class TextModel(Protocol):
         superseded — *unknown* is a valid "not superseded", never a guess."""
         ...
 
+    async def judge_separation(self, *, prompt: str, first: str, second: str) -> bool:
+        """Were ``first`` and ``second`` — two answers to the same ``prompt`` — produced under
+        **different personalities**? (§14.7's M6 row, AVID-215.)
+
+        ⚠️ **Separation, never quality.** The question is emphatically not *"which is better"*.
+        Judging quality would make the metric a taste report and drift with the judge model; the
+        M6 gate's actual claim is that two configs are *distinguishable*, so that is what is asked.
+        A judge that preferred one personality would score a perfectly separated pair the same as
+        an identical one.
+
+        The port grows here because §14.7 requires the judge to run behind it — no second vendor
+        surface, and a fake that lets the harness's own logic be tested offline in CI while the
+        live scoring never runs there."""
+        ...
+
 
 @runtime_checkable
 class AffectTools(Protocol):

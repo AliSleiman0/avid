@@ -108,6 +108,67 @@ class FakeTextModel:
                 superseded.append(fact_id)
         return superseded
 
+    async def judge_separation(self, *, prompt: str, first: str, second: str) -> bool:
+        """Call two answers separated iff their content words overlap **less** than ``threshold``.
+
+        The mirror image of the supersession judgment above, and deliberately the same crude
+        instrument: lexical distance is a poor proxy for "different personality" — two configs can
+        differ sharply in register while using the same words — so this is not a stand-in for the
+        real judge. It exists so the harness's loading, pairing, scoring and report shaping can be
+        tested in CI without a key, which is the split §14.7 requires."""
+        first_tokens, second_tokens = _tokens(first), _tokens(second)
+        if not first_tokens or not second_tokens:
+            # Nothing to compare. "Not separated" is the honest answer and the conservative one:
+            # a metric that counted empty responses as a success would reward a broken run.
+            return False
+        overlap = len(first_tokens & second_tokens) / len(first_tokens | second_tokens)
+        return overlap < self._threshold
+
+
+_SEPARATION_SYSTEM_PROMPT = (
+    "You compare two answers to the same question, each written by a different assistant "
+    "persona. Decide ONLY whether the two answers appear to come from DIFFERENT personalities "
+    "- different register, verbosity, warmth, or habits. Do NOT judge which answer is better, "
+    "more accurate, or more helpful; quality is irrelevant and must not affect your decision. "
+    'Reply with JSON: {"separated": true} or {"separated": false}.'
+)
+
+
+def _build_separation_messages(
+    prompt: str, first: str, second: str
+) -> list[dict[str, str]]:
+    """The judge's messages (AVID-215). Pure, so the wording is asserted offline in CI.
+
+    The answers are labelled A and B rather than by config name: naming them would invite the
+    judge to reason about which personality is which, and the question is only whether they
+    differ."""
+    return [
+        {"role": "system", "content": _SEPARATION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "\n\n".join(
+                (f"Question: {prompt}", f"Answer A: {first}", f"Answer B: {second}")
+            ),
+        },
+    ]
+
+
+def _parse_separated(content: str) -> bool:
+    """Read the judge's JSON reply. Raises :class:`ValueError` on anything unparseable.
+
+    Never defaults to ``True``: a judge that failed would otherwise inflate the separation rate,
+    which is the one direction a broken measurement must not fail in."""
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"judge reply is not JSON: {content!r}") from exc
+    if not isinstance(payload, dict) or "separated" not in payload:
+        raise ValueError(f"judge reply has no 'separated' key: {content!r}")
+    value = payload["separated"]
+    if not isinstance(value, bool):
+        raise ValueError(f"judge 'separated' is not a boolean: {value!r}")
+    return value
+
 
 # --- OpenAiTextModel (#121): the real chat-completions client ------------------------------
 
@@ -214,6 +275,27 @@ class OpenAiTextModel:
         )
         content = response.choices[0].message.content or ""
         return _parse_superseded(content, {cid for cid, _ in candidates})
+
+    async def judge_separation(self, *, prompt: str, first: str, second: str) -> bool:
+        """Ask whether two answers to one prompt came from different personalities (AVID-215).
+
+        ``temperature=0`` and a JSON response, like the supersession judge above, so a score shift
+        means the robot changed rather than the ruler wobbled. The model is **pinned to a dated
+        snapshot** through ``[ai] text_model`` for the same reason: a judge is a model, and models
+        change."""
+        from openai import (
+            AsyncOpenAI,  # lazy, adapter-local optional group (AC-2, ADR-008)
+        )
+
+        if self._client is None:
+            self._client = AsyncOpenAI(api_key=self._api_key)
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=_build_separation_messages(prompt, first, second),
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        return _parse_separated(response.choices[0].message.content or "")
 
 
 __all__ = ["FakeTextModel", "OpenAiTextModel"]
