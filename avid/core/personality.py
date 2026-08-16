@@ -113,3 +113,34 @@ def _join(items: tuple[str, ...]) -> str:
     if len(items) == 1:
         return items[0]
     return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def compose_instructions(*, identity: str, personality: str, capabilities: str) -> str:
+    """Assemble §6.4's **static prefix** — layers 1, 2 and 3, in that order (AVID-213).
+
+    ```
+    1. IDENTITY       (static, ~150 tok)   who the robot is
+    2. PERSONALITY    (config, ~250 tok)   §6.5, from TOML
+    3. CAPABILITIES   (static, ~200 tok)   what tools exist and when to use them
+    -- everything above is identical across every session on a build --
+    4. INJECTED MEMORY (dynamic, ~600 tok) §6.7, per session, appended by the adapter
+    ```
+
+    **The order is load-bearing and getting it wrong is financially invisible** (§6.4). Prompt
+    caching works on *prefixes*: layers 1–3 are identical across every session on a given build, so
+    they cache across sessions; layer 4 changes per session and must come last or it invalidates
+    everything behind it. §6.10.3 is blunt about the consequence — **broken caching looks identical
+    to working caching until the invoice**, $12/month against $85/month, with no symptom in
+    between. The robot behaves the same either way. There is no failing test unless one is written,
+    which is why AVID-213 wrote one.
+
+    **Layer 4 is not assembled here, and that is deliberate rather than an omission.** It is
+    per-session and arrives as an awaitable resolved *concurrently with the connect* (§6.7 path 1),
+    so it belongs to :meth:`OpenAIRealtimeClient._session_config`, which appends it after this
+    string and never interleaves. This function owns the order of 1–3; that method owns "4 goes
+    last"; nothing else joins instruction text at all. Two places, one rule each, and the seam
+    between them is asserted by ``test_the_memory_block_never_precedes_the_static_prefix``.
+
+    Pure, like :func:`compose`, and for the same caching reason.
+    """
+    return "\n\n".join((identity, personality, capabilities))

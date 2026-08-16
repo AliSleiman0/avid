@@ -262,9 +262,13 @@ class AiConfig(_Section):
 
     ``instructions`` is the **static** session prompt the ``openai`` adapter seeds at connect
     (SDS §6.2.2) — it must stay frozen for a session's life to hold the ~98.75% caching discount
-    (§6.10.2, Fact 1). M5 seeds a minimal identity string only; the full four-layer §6.4
-    composition (identity/personality/capabilities/memory) and ``personality`` TOML loading are a
-    later milestone (M6/M7), so the seam is here but the layering is not yet built.
+    (§6.10.2, Fact 1). It is **layer 1** of §6.4's four-layer block, and only layer 1: layer 2 is
+    :func:`~avid.core.personality.compose` over the ``personality`` TOML (AVID-211/212), layer 3 is
+    ``CAPABILITY_INSTRUCTIONS``, and layer 4 is the per-session memory block the adapter appends
+    **last** (§6.7). The three static layers are joined by
+    :func:`~avid.core.personality.compose_instructions`, which owns their order — most static
+    first, so the prefix caches across sessions (§6.10.2). This docstring used to end *"the seam is
+    here but the layering is not yet built"*; AVID-213 built it.
     """
 
     model: str = "gpt-realtime-mini-2025-12-15"
