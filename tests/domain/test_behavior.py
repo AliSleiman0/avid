@@ -17,6 +17,7 @@ quietly attributes them to the wrong cause.
 from __future__ import annotations
 
 import math
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -29,13 +30,22 @@ from avid.domain.behavior import (
     PROACTIVE_STATES,
     QUIET_HOURS,
     STATE,
+    AmbientWindow,
+    BehaviorProactiveDelivered,
+    BehaviorProactiveSuppressed,
+    BehaviorTriggerDisabled,
+    BehaviorTriggerFired,
     Delivered,
     PolicyContext,
     PolicyLimits,
     Suppressed,
+    ambient_speech_s,
+    attribute_speech,
     evaluate_policy,
+    record_speech,
     within_quiet_window,
 )
+from avid.domain.events import Event
 from avid.domain.state import RobotState
 
 # The shipped [behavior] numbers (SDS §9.6, config/pi.toml). Written out rather than loaded, because
@@ -327,3 +337,146 @@ def test_the_gate_reads_nothing_but_its_arguments() -> None:
     assert evaluate_policy(context, limits=_LIMITS) == evaluate_policy(
         context, limits=_LIMITS
     )
+
+
+# ── The four facts, and rule 4's accumulator (#237, SDS §9.1.3, §10.4) ───────────────────────
+
+_CORR = UUID("11111111-1111-1111-1111-111111111111")
+_OTHER = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _envelope() -> dict[str, object]:
+    return {
+        "event_id": uuid4(),
+        "correlation_id": _CORR,
+        "timestamp_ms": 1_800_000_000_000,
+        "monotonic_ns": 0,
+        "source": "BehaviorService",
+    }
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected"),
+    [
+        (BehaviorTriggerFired, "behavior.trigger_fired"),
+        (BehaviorProactiveDelivered, "behavior.proactive_delivered"),
+        (BehaviorProactiveSuppressed, "behavior.proactive_suppressed"),
+        (BehaviorTriggerDisabled, "behavior.trigger_disabled"),
+    ],
+)
+def test_the_names_match_the_catalog(event_type: type[Event], expected: str) -> None:
+    """§9.1.3's spellings, and the four `tests/domain/test_events.py` has asserted are valid names
+    since before any of these classes existed — the catalog was written first, deliberately."""
+    assert event_type.name == expected
+
+
+def test_the_events_are_frozen_and_slotted() -> None:
+    """Handlers dispatch concurrently (§3.5), so a mutable event is a data race with extra steps."""
+    fired = BehaviorTriggerFired(**_envelope(), trigger_id=7, fact_id=42)  # type: ignore[arg-type]
+    with pytest.raises((AttributeError, TypeError)):
+        fired.trigger_id = 8  # type: ignore[misc]
+
+
+def test_a_trigger_with_no_fact_behind_it_is_expressible() -> None:
+    """A presence greeting (§3.7.5) has no routine and therefore no fact. ``None`` rather than a
+    sentinel id, so the schema's nullable FK and the event agree."""
+    fired = BehaviorTriggerFired(**_envelope(), trigger_id=7)  # type: ignore[arg-type]
+    assert fired.fact_id is None
+
+
+def test_a_suppression_carries_no_utterance_by_default() -> None:
+    """Not an omission: the gate runs *before* a session exists, so on almost every suppression
+    there is nothing the robot would have said yet — §10.8 composes the words only once the model
+    is on the line."""
+    vetoed = BehaviorProactiveSuppressed(**_envelope(), trigger_id=7, rule=QUIET_HOURS)  # type: ignore[arg-type]
+    assert vetoed.would_have_said is None
+    assert vetoed.rule in POLICY_RULES
+
+
+# ── AmbientWindow ────────────────────────────────────────────────────────────────────────────
+
+
+def test_speech_that_never_became_a_conversation_counts_as_ambient() -> None:
+    """The user is on a call. The VAD hears them constantly and no transcript ever arrives."""
+    window = AmbientWindow()
+    for i in range(4):
+        window = record_speech(
+            window,
+            correlation_id=uuid4(),
+            at_s=float(i * 20),
+            duration_s=20.0,
+            keep_s=300.0,
+        )
+    assert ambient_speech_s(window, now_s=80.0, window_s=300.0) == 80.0
+
+
+def test_speech_that_became_a_conversation_is_retracted() -> None:
+    """The user was talking *to the robot*. Counting it would suppress the next proactive turn for
+    the crime of having had a conversation — and §10.6's histogram would blame rule 4."""
+    window = record_speech(
+        AmbientWindow(), correlation_id=_CORR, at_s=0.0, duration_s=90.0, keep_s=300.0
+    )
+    assert ambient_speech_s(window, now_s=10.0, window_s=300.0) == 90.0
+
+    window = attribute_speech(window, _CORR)
+    assert ambient_speech_s(window, now_s=10.0, window_s=300.0) == 0.0
+
+
+def test_retraction_touches_only_its_own_turn() -> None:
+    """Both are needed at once: the user finishes a call (ambient) and then speaks to the robot
+    (attributed). Only the second is retracted."""
+    window = record_speech(
+        AmbientWindow(), correlation_id=_OTHER, at_s=0.0, duration_s=70.0, keep_s=300.0
+    )
+    window = record_speech(
+        window, correlation_id=_CORR, at_s=10.0, duration_s=5.0, keep_s=300.0
+    )
+    window = attribute_speech(window, _CORR)
+    assert ambient_speech_s(window, now_s=20.0, window_s=300.0) == 70.0
+
+
+def test_attributing_an_unknown_turn_is_a_no_op() -> None:
+    """A transcript can arrive for an utterance already pruned out of the window. Not an error."""
+    window = record_speech(
+        AmbientWindow(), correlation_id=_OTHER, at_s=0.0, duration_s=30.0, keep_s=300.0
+    )
+    assert attribute_speech(window, _CORR) == window
+
+
+def test_speech_outside_the_window_does_not_count() -> None:
+    """Rule 4 asks about the *last five minutes*. A meeting that ended an hour ago is not a reason
+    to stay quiet now."""
+    window = record_speech(
+        AmbientWindow(), correlation_id=_CORR, at_s=0.0, duration_s=200.0, keep_s=3600.0
+    )
+    assert ambient_speech_s(window, now_s=100.0, window_s=300.0) == 200.0
+    assert ambient_speech_s(window, now_s=400.0, window_s=300.0) == 0.0
+
+
+def test_the_window_stays_bounded_under_an_always_on_vad() -> None:
+    """The case that would otherwise grow forever: a busy room, a VAD that never stops. Pruning
+    happens on write, so there is no second pass and no timer."""
+    window = AmbientWindow()
+    for i in range(1000):
+        window = record_speech(
+            window,
+            correlation_id=uuid4(),
+            at_s=float(i),
+            duration_s=0.5,
+            keep_s=300.0,
+        )
+    assert len(window.entries) <= 302
+
+
+def test_the_accumulator_is_a_pure_fold() -> None:
+    """No clock, no I/O — time arrives as ``at_s``. An hour of a real room replays identically on
+    a laptop, which is the same property ``domain/vision.py``'s presence filter has."""
+    window = AmbientWindow()
+    first = record_speech(
+        window, correlation_id=_CORR, at_s=0.0, duration_s=10.0, keep_s=300.0
+    )
+    second = record_speech(
+        window, correlation_id=_CORR, at_s=0.0, duration_s=10.0, keep_s=300.0
+    )
+    assert first == second
+    assert window.entries == ()  # the input was not mutated
