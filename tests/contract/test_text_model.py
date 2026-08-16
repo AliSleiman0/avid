@@ -24,6 +24,8 @@ from avid.adapters.text_model import (
     FakeTextModel,
     OpenAiTextModel,
     _build_messages,
+    _build_separation_messages,
+    _parse_separated,
     _parse_superseded,
 )
 from avid.core.ports import TextModel
@@ -159,3 +161,62 @@ def test_build_messages_lists_the_candidates_and_the_new_fact() -> None:
     assert "the user switched to tea" in user
     assert "1: the user drinks coffee" in user
     assert "2: the user likes jazz" in user
+
+
+# --- judge_separation: the §14.7 M6 row (AVID-215) --------------------------
+
+
+async def test_identical_answers_are_not_separated(model: TextModel) -> None:
+    """The floor of the metric, and the one every adapter must agree on.
+
+    Two byte-identical answers cannot have come from different personalities. An adapter that
+    said otherwise would report separation that is not there, which is the direction a gate
+    measurement must never fail in."""
+    assert not await model.judge_separation(
+        prompt="how's it going", first="Fine, thanks.", second="Fine, thanks."
+    )
+
+
+async def test_an_empty_answer_is_not_separated(model: TextModel) -> None:
+    """A missing reply is an absent measurement, not a successful one. Counting a blank as
+    separated would let a broken run inflate the tracked number."""
+    assert not await model.judge_separation(
+        prompt="how's it going", first="", second="Fine."
+    )
+
+
+def test_the_separation_prompt_asks_about_difference_not_quality() -> None:
+    """AC-3, asserted on the wording rather than trusted to it.
+
+    §14.7's claim is that two configs are *distinguishable*, not that one is better. A judge
+    asked which answer it preferred would drift with the judge model and turn a milestone
+    criterion into a taste report — so the instruction to ignore quality is explicit, and pinned
+    here so a later prompt edit cannot quietly remove it."""
+    messages = _build_separation_messages("Q", "A", "B")
+    system = messages[0]["content"].lower()
+
+    assert "different personalities" in system
+    assert "not judge which answer is better" in system
+    assert "quality is irrelevant" in system
+
+
+def test_parse_separated_reads_the_judges_verdict() -> None:
+    assert _parse_separated('{"separated": true}') is True
+    assert _parse_separated('{"separated": false}') is False
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        '{"separated": "yes"}',
+        '{"verdict": true}',
+        "not json at all",
+        "[]",
+        '{"separated": 1}',
+    ],
+)
+def test_parse_separated_raises_rather_than_guessing(reply: str) -> None:
+    """Never defaults to ``True``. A judge that failed would otherwise inflate the separation
+    rate — the same one-sided caution ``_parse_superseded`` applies to hallucinated ids."""
+    with pytest.raises(ValueError):
+        _parse_separated(reply)
