@@ -48,7 +48,8 @@ from avid.core.hal import (
     Frame,
 )
 from avid.core.realtime import RealtimeEvent
-from avid.domain import Affect, Event, Fact, RetrievalMatch
+from avid.core.schedule import Routine
+from avid.domain import Affect, Event, Fact, RetrievalMatch, TriggerRecord
 
 
 @runtime_checkable
@@ -590,6 +591,153 @@ class EpisodeStore(Protocol):
         seconds), returning how many were removed — the §7.5 90-day retention. **Bounded per call**
         (AC-3): a huge backlog drains over successive passes rather than stalling the loop on one
         giant ``DELETE`` (P8). ``older_than`` and ``limit`` are injected from config (P7)."""
+        ...
+
+    async def aclose(self) -> None:
+        """Close the connection and shut the writer thread down. Idempotent."""
+        ...
+
+
+@runtime_checkable
+class TriggerRepository(Protocol):
+    """The ``triggers`` and ``routines`` tables, as ``BehaviorService`` needs them (SDS §8.3, §10.3).
+
+    Defined by what the behaviour engine does, never by what SQLite offers: turn a stored routine
+    fact into a live schedule, rebuild the scheduler's heap after a restart, and record what a
+    trigger has done to itself — fired, been ignored, been switched off.
+
+    Async for the same reason :class:`EpisodeStore` is: ``sqlite3`` is blocking I/O and must never
+    touch the loop (P8, §3.8.2). Timestamps are epoch **seconds**, UTC (§8.2) — never the ``Event``
+    envelope's ``timestamp_ms``; do not cross the two.
+
+    ⚠️ **Writes here are direct awaited calls, never bus events.** §4's rule: the bus carries
+    notifications, not obligations, and losing a "this trigger is now disabled" would leave a
+    trigger the robot has decided to stop firing still firing every morning.
+    """
+
+    async def upsert_routine_trigger(
+        self, fact_id: int, *, next_fire_at: int | None, cooldown_s: int, at: int
+    ) -> int:
+        """Create or update the ``schedule`` trigger for ``fact_id``, returning its id (§10.3).
+
+        Idempotent per fact: ``memory.fact_superseded`` must **move** a routine's schedule rather
+        than add a second one, or "coffee at 08:00" corrected to 08:30 leaves the robot mentioning
+        coffee twice every morning — §7.8's supersession arriving as a duplicate instead of an edit.
+
+        Re-arming clears :attr:`TriggerRecord.ignore_streak` and restores ``cooldown_s``: the user
+        has just restated the routine, which is the strongest possible evidence that §10.5's backoff
+        was reading a stale intent rather than an unwanted one.
+        """
+        ...
+
+    async def remove_for_fact(self, fact_id: int) -> None:
+        """Drop the trigger for ``fact_id`` — ``memory.fact_deleted``, and UC-07's hard delete.
+
+        Idempotent; a fact with no trigger is not an error. The ``ON DELETE CASCADE`` in §8.3
+        already removes the rows when the *fact* goes, so this exists for the case where the fact
+        survives and only its schedule should not."""
+        ...
+
+    async def enabled_triggers(self) -> Sequence[TriggerRecord]:
+        """Every enabled trigger with a scheduled time — the boot rebuild (§10.3).
+
+        Exactly ``idx_triggers_due``'s partial predicate (``enabled = 1 AND next_fire_at IS NOT
+        NULL``), so a trigger §10.5 switched off stays off across a restart. That is the whole
+        point of persisting the streak: a backoff that resets on reboot is not a backoff."""
+        ...
+
+    async def get(self, trigger_id: int) -> TriggerRecord | None:
+        """One trigger by id, or ``None`` if it has been deleted since the heap was built."""
+        ...
+
+    async def routine_for(self, fact_id: int) -> Routine | None:
+        """The ``routines`` row for ``fact_id`` as a resolvable :class:`~avid.core.schedule.Routine`,
+        or ``None`` if the fact carries no schedule.
+
+        ``None`` is a normal answer, not a failure: not every routine fact has a clock time. It is
+        the *caller's* job to say so out loud — a routine-kind fact with no schedule is
+        indistinguishable from a user with no routines unless someone logs the difference (§6.6)."""
+        ...
+
+    async def record_fired(
+        self, trigger_id: int, *, at: int, next_fire_at: int | None
+    ) -> None:
+        """Stamp ``last_fired_at``, increment ``fire_count``, and set the next occurrence (§10.3).
+
+        ``next_fire_at=None`` means the rule has run out (a finite ``COUNT=``/``UNTIL=``); the row
+        then falls outside ``idx_triggers_due`` and the scheduler stops considering it."""
+        ...
+
+    async def set_backoff(
+        self, trigger_id: int, *, ignore_streak: int, cooldown_s: int
+    ) -> None:
+        """Persist §10.5's backoff after a delivered turn: the new streak and doubled cooldown.
+
+        Both columns, one call, because they change together — a streak that advanced without its
+        cooldown widening is a robot that noticed it was being ignored and did nothing about it."""
+        ...
+
+    async def disable(self, trigger_id: int) -> None:
+        """Switch a trigger off — §10.5's ``ignore_streak >= limit`` (``enabled = 0``).
+
+        The caller publishes ``behavior.trigger_disabled`` alongside: §10.5 requires this be *"logged
+        loudly, never silent"*, because a trigger that turned itself off is diagnostic information
+        about the design and you will never learn which of your ideas were bad if it happens
+        quietly."""
+        ...
+
+    async def aclose(self) -> None:
+        """Close the connection and shut the writer thread down. Idempotent."""
+        ...
+
+
+@runtime_checkable
+class ProactiveLog(Protocol):
+    """R-08's instrument — the ``proactive_log`` table (SDS §8.3, §10.6).
+
+    §10.6 is blunt about what this is for: *"This is not an audit trail. It's the only way to tune
+    §10.4 without guessing."* **Every considered proposal is written, delivered or not**, with the
+    vetoing rule and the utterance it would have made — because *"if `ambient_speech` vetoed 40 times
+    last week, rule 4 is too aggressive. If nothing was ever suppressed, the rules are decorative,
+    and without this table both look identical from the outside."*
+
+    The two read methods exist so a :class:`~avid.domain.behavior.PolicyContext` survives a restart.
+    Rules 5 and 6 are the only ones with memory, and rebuilding them from an in-process counter
+    would mean a reboot at 07:00 silently resets the day's budget — a robot that becomes five times
+    more talkative every time it restarts.
+    """
+
+    async def record(
+        self,
+        *,
+        trigger_id: int | None,
+        considered_at: int,
+        outcome: str,
+        reason: str | None,
+        utterance: str | None,
+    ) -> int:
+        """Write one decision and return its row id.
+
+        ``outcome`` is ``"delivered"`` or ``"suppressed"`` (§8.3's CHECK). ``reason`` is the vetoing
+        rule and must be a member of :data:`~avid.domain.behavior.POLICY_RULES` — the column is
+        spelled ``reason`` and the event field ``rule``, which are deliberately the same vocabulary
+        under two normative names (§10.6). ``utterance`` is what it said, or would have said."""
+        ...
+
+    async def set_reaction(self, log_id: int, reaction: str) -> None:
+        """Record whether the user engaged after a delivery: ``"engaged"`` or ``"ignored"`` (§10.5).
+
+        Deferred rather than written with the row, because it is not known until the hold-open
+        window closes — which is the same signal §10.5's backoff turns on."""
+        ...
+
+    async def delivered_since(self, *, since: int) -> int:
+        """How many proposals were **delivered** at or after ``since`` — rule 6's daily budget."""
+        ...
+
+    async def last_delivered_at(self) -> int | None:
+        """When the last delivery was considered, or ``None`` if there has never been one — rule 5's
+        global cooldown. Survives a restart, which an in-process timestamp would not."""
         ...
 
     async def aclose(self) -> None:
