@@ -1336,6 +1336,20 @@ The M4 loopback (`loopback=True`, the #91 transport gate) is the one path that s
 
 **Cost of the gate:** ~200 ms of session-open latency on the first utterance of a conversation, paid once per conversation rather than per turn (the session stays open between turns). Against the §2.8.1 budget this pushes first-turn P50 to ~810 ms — marginally over the 800 ms target, in range on subsequent turns. §6.9 covers this with the thinking-cue mitigation.
 
+⚠️ **The ~200 ms above is wrong, and the measured figure is ~1.08 s (AVID-157).** Measured on the Pi, 2026-08-16, `tools/probe_realtime_open.py`, warm medians:
+
+| phase | ms | what it is |
+|---|---|---|
+| WebSocket **upgrade** | **849–881** | OpenAI's HTTP upgrade handshake |
+| `session.created` | 1.5–2.2 | the server's own session bootstrap — **free** |
+| `session.update` send | ~1 | a local socket write |
+| `session.updated` ack | 199–219 | one round trip |
+| **total** | **~1.08 s** | |
+
+Full DNS+TCP+TLS to the host is **188 ms** on the Pi and 172 ms on the laptop, so **~660–700 ms of the upgrade is the vendor's handshake** — not our code, not the payload, not the hardware. Three candidates were ruled out by that table: the server's session bootstrap (1.5 ms), the payload size (**a full four-layer §6.4 prefix of 1326 characters costs ~20 ms**, which is why M6's layer 2 does not make this worse), and Pi-specific cost.
+
+The number is **kept as a named gap rather than quietly widened to fit**: the only remaining lever is a pre-warmed or pooled connection, and that reopens ADR-007 — this gate exists precisely to avoid holding a socket while nobody is speaking. §6.9's thinking cue is what makes ~1 s tolerable in the meantime, and it is the mitigation R-01 always intended to be carrying this.
+
 **Value of the gate:** see §6.10. It is the difference between $4/month and $108/month.
 
 > **As measured on hardware (AVID-91).** The door-slam claim above is the one this section
