@@ -76,7 +76,17 @@ CAPABILITY_INSTRUCTIONS = (
     # instruction now LEADS with the action and keeps a single short constraint behind it.
     "When your reply carries a clear emotional tone, call set_affect so your face matches your "
     "words — happy for good news, sad for bad, confused when you do not follow. Do this as well "
-    "as replying, not instead of it. Skip it for neutral replies."
+    "as replying, not instead of it. Skip it for neutral replies. "
+    # M10 (#243) — §10.4's manual override. Scoped hard, and the *constraint* is the load-bearing
+    # half here, which is the opposite of the set_affect clause above. That one needed
+    # encouragement because the model would not call the tool at all; this one rides a request the
+    # user makes explicitly, so the risk is a model that self-quiets speculatively — because the
+    # user sounded busy, or answered curtly — producing a robot that goes silent for reasons the
+    # user never asked for and cannot see. Under-firing is §10.1's cheap error; **unexplained**
+    # silence is not, because the user has no way to tell it from a broken robot.
+    "If the user asks to be left alone or says they are busy right now, call set_quiet with "
+    "roughly how long they asked for. Only when they ask — never because you think they might "
+    "want it."
 )
 
 
