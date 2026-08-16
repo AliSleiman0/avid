@@ -72,6 +72,7 @@ from avid.domain import (
     Event,
     Fact,
     RobotState,
+    RoutineSpec,
     StateTransitioned,
     SystemDegradedEntered,
     SystemDegradedExited,
@@ -191,6 +192,7 @@ class _EmptyMemory:
         kind: str,
         importance: int,
         *,
+        schedule: RoutineSpec | None = None,
         correlation_id: UUID | None = None,
     ) -> int:
         return 0
@@ -373,6 +375,7 @@ async def _drive_session(
         memory=_EmptyMemory(),
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
+        default_timezone="Asia/Beirut",
         think_timeout_s=think_timeout_s,
         server_turn_detection=False,
         thinking_delay_ms=0,
@@ -540,6 +543,7 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         memory=_EmptyMemory(),
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
+        default_timezone="Asia/Beirut",
         think_timeout_s=300.0,
         server_turn_detection=False,
         thinking_delay_ms=0,

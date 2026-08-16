@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from avid.core.realtime import ToolCallRequested
-from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact
+from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact, RoutineSpec
 from avid.services.tools import (
     CAPABILITY_INSTRUCTIONS,
     FORGET,
@@ -44,6 +44,7 @@ class _RecordingMemory:
         self.forgotten: list[tuple[str, UUID | None]] = []
         self._recall_result = recall_result
         self._fact_id = fact_id
+        self.schedule: RoutineSpec | None = None
         self._deleted = deleted
 
     async def remember_fact(
@@ -52,9 +53,11 @@ class _RecordingMemory:
         kind: str,
         importance: int,
         *,
+        schedule: RoutineSpec | None = None,
         correlation_id: UUID | None = None,
     ) -> int:
         self.remembered.append((text, kind, importance, correlation_id))
+        self.schedule = schedule
         return self._fact_id
 
     async def recall(
@@ -99,6 +102,7 @@ class _BoomMemory:
         kind: str,
         importance: int,
         *,
+        schedule: RoutineSpec | None = None,
         correlation_id: UUID | None = None,
     ) -> int:
         raise RuntimeError("store exploded")
@@ -127,12 +131,18 @@ def _fact(text: str, *, kind: str = "other", importance: int = 5) -> Fact:
     )
 
 
+# The [behavior] timezone the composition root injects (P7). Named once here so the fixture is
+# obviously a stand-in for injected config rather than a literal anyone should copy.
+_TEST_TZ = "Asia/Beirut"
+
+
 async def _dispatch(
     memory: object,
     call: ToolCallRequested,
     *,
     approximate: bool = False,
     affect: object | None = None,
+    default_timezone: str = _TEST_TZ,
 ) -> dict[str, object]:
     """Dispatch and parse the tool output back to a dict for assertion."""
     output = await dispatch_tool_call(
@@ -141,6 +151,7 @@ async def _dispatch(
         affect=affect or _RecordingAffect(),  # type: ignore[arg-type]
         correlation_id=uuid4(),
         approximate=approximate,
+        default_timezone=default_timezone,
     )
     parsed = json.loads(output)
     assert isinstance(parsed, dict)
@@ -162,6 +173,7 @@ async def test_remember_fact_maps_to_the_port_and_returns_the_id() -> None:
         affect=_RecordingAffect(),
         correlation_id=corr,
         approximate=False,
+        default_timezone=_TEST_TZ,
     )
     assert json.loads(out) == {"ok": True, "fact_id": 42}
     assert memory.remembered == [("the user likes tea", "preference", 6, corr)]
@@ -376,3 +388,100 @@ def test_capability_instructions_carry_the_load_bearing_clause() -> None:
     # AC-4: without this final clause the model confabulates facts from context (§7.6).
     assert "anything you inferred rather than were told" in CAPABILITY_INSTRUCTIONS
     assert "remember_fact" in CAPABILITY_INSTRUCTIONS
+
+
+# --- remember_fact's schedule argument (#314, SDS §6.6, §10.3) -------------------------------
+
+
+async def test_the_schema_declares_schedule_as_optional_with_a_required_shape() -> None:
+    """Optional at the top level — most facts are not routines — but ``rrule`` and ``local_time``
+    are required *within* it, because a schedule missing either is not a schedule and would fail at
+    the resolver instead of at the model, one layer too late to be correctable."""
+    schema = next(s for s in TOOL_SCHEMAS if s["name"] == REMEMBER_FACT)
+    params = schema["parameters"]
+    assert "schedule" not in params["required"]
+    schedule = params["properties"]["schedule"]
+    assert schedule["required"] == ["rrule", "local_time"]
+    assert set(schedule["properties"]) == {"rrule", "local_time", "timezone"}
+
+
+async def test_the_capability_instruction_scopes_the_schedule_rather_than_urging_it() -> (
+    None
+):
+    """The M6 finding cuts the other way here. ``set_affect`` needed encouragement because the
+    model would not call the tool at all; ``schedule`` rides a tool the model already calls
+    reliably, so the risk is over-attachment — "I usually get coffee in the mornings" has no clock
+    time, and a schedule invented for it fires at a moment nobody chose. Under-filling is
+    recoverable; a wrong hour is a reminder at the wrong hour."""
+    assert "schedule argument" in CAPABILITY_INSTRUCTIONS
+    assert "do not guess" in CAPABILITY_INSTRUCTIONS.lower()
+
+
+async def test_a_schedule_reaches_the_port_as_a_domain_value() -> None:
+    memory = _RecordingMemory(fact_id=7)
+    out = await _dispatch(
+        memory,
+        _call(
+            REMEMBER_FACT,
+            '{"text": "coffee at 8", "kind": "routine", "importance": 6, '
+            '"schedule": {"rrule": "FREQ=DAILY", "local_time": "08:00", '
+            '"timezone": "Europe/London"}}',
+        ),
+    )
+    assert out == {"ok": True, "fact_id": 7}
+    assert memory.schedule == RoutineSpec(
+        rrule="FREQ=DAILY", local_time="08:00", timezone="Europe/London"
+    )
+
+
+async def test_an_omitted_timezone_falls_back_to_the_injected_default() -> None:
+    """A default rather than a required field: the common case is a user in their own timezone
+    describing their own morning, and making the model restate it every time is one more field it
+    can get wrong for no benefit. The value is injected (P7), never read here."""
+    memory = _RecordingMemory(fact_id=7)
+    await _dispatch(
+        memory,
+        _call(
+            REMEMBER_FACT,
+            '{"text": "coffee at 8", "kind": "routine", "importance": 6, '
+            '"schedule": {"rrule": "FREQ=DAILY", "local_time": "08:00"}}',
+        ),
+    )
+    assert memory.schedule is not None
+    assert memory.schedule.timezone == _TEST_TZ
+
+
+async def test_no_schedule_means_none_not_an_empty_spec() -> None:
+    """Absent and empty are different, and only one of them means "this fact has no time"."""
+    memory = _RecordingMemory(fact_id=7)
+    await _dispatch(
+        memory,
+        _call(
+            REMEMBER_FACT,
+            '{"text": "the user likes tea", "kind": "preference", "importance": 4}',
+        ),
+    )
+    assert memory.schedule is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        '"schedule": "every day"',  # a string, not an object
+        '"schedule": {"local_time": "08:00"}',  # no rrule
+        '"schedule": {"rrule": "FREQ=DAILY"}',  # no local_time
+    ],
+)
+async def test_a_malformed_schedule_is_a_tool_error_not_a_crash(bad: str) -> None:
+    """Same discipline as ``kind`` and ``importance``: the turn continues and the model is told,
+    because a bad tool call must never reach the pump (AC-6)."""
+    memory = _RecordingMemory(fact_id=7)
+    out = await _dispatch(
+        memory,
+        _call(
+            REMEMBER_FACT,
+            '{"text": "x", "kind": "routine", "importance": 5, ' + bad + "}",
+        ),
+    )
+    assert out["ok"] is False
+    assert memory.remembered == [], "nothing may be written on a malformed schedule"

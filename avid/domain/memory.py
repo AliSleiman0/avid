@@ -48,6 +48,33 @@ FACT_KINDS: tuple[FactKind, ...] = (
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineSpec:
+    """The machine-readable half of a routine fact — one ``routines`` row, as written (§8.3, §10.3).
+
+    A ``routine``-kind fact says *"the user drinks coffee every day at 08:00"* in the user's own
+    words. That sentence is what §7.7 retrieves and what the model reads; it is not something §10.3
+    can put in a min-heap. This is the other half: the same routine, in RFC 5545, so a scheduler can
+    resolve it.
+
+    It arrives **from the model**, on ``remember_fact``'s ``schedule`` argument (§6.6). The model has
+    already parsed "every day at 8 AM" out of speech in order to write the fact text, so this asks
+    for the structured form of something it demonstrably had in hand — rather than reading the text
+    back and re-deriving it locally, where a heuristic that reads "8" as 20:00 delivers the coffee
+    reminder at night.
+
+    ⚠️ No ``dtstart``. RFC 5545 needs one and the resolver requires it, but it is not stored here
+    because it is not a new fact: it is the owning fact's ``created_at``, the day the user told us.
+    Anchoring it anywhere else changes what the rule *means*
+    (see :func:`avid.core.schedule.next_occurrence`).
+    """
+
+    rrule: str  # RFC 5545, e.g. 'FREQ=DAILY'
+    local_time: str  # 'HH:MM' wall clock, in `timezone`
+    timezone: str  # IANA, e.g. 'Asia/Beirut'
+    lead_time_s: int = 300  # §8.3's default: an 08:00 routine fires at 07:55
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Fact:
     """A single durable thing the robot was told about the user (§8.3).
 

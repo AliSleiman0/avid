@@ -34,12 +34,14 @@ from avid.core.ports import (
     Retriever,
     TextModel,
 )
+from avid.core.schedule import Routine, next_occurrence
 from avid.domain import (
     FACT_KINDS,
     Fact,
     MemoryFactDeleted,
     MemoryFactStored,
     MemoryFactSuperseded,
+    RoutineSpec,
     deletable_ids,
     select_top_facts,
 )
@@ -91,6 +93,11 @@ class MemoryService:
         self._forget_k = forget_k
         self._top_facts_max = top_facts_max
         self._top_facts_token_budget = top_facts_token_budget
+        # How many `routine`-kind facts arrived with no schedule this session (§6.6, M10). A plain
+        # attribute rather than an event, like ExpressionService's staleness counters: the point is
+        # that the number exists at all. A zero from an absent instrument and a real zero read
+        # identically, and #310 cost six live runs to that exact confusion.
+        self.routines_without_schedule = 0
 
     # --- SDS §9.2 service shape ----------------------------------------------------------
 
@@ -116,7 +123,11 @@ class MemoryService:
     # --- the §9.1.4 direct-call surface --------------------------------------------------
 
     async def store_fact(
-        self, fact: Fact, *, correlation_id: UUID | None = None
+        self,
+        fact: Fact,
+        *,
+        routine: RoutineSpec | None = None,
+        correlation_id: UUID | None = None,
     ) -> int:
         """Store ``fact`` durably, resolving §7.8 supersession first, then publish (AC-2). Returns its id.
 
@@ -141,7 +152,7 @@ class MemoryService:
             created_at=fact.created_at or now,
             last_accessed_at=fact.last_accessed_at or now,
         )
-        new_id = await self._repo.add(to_store, embedding=blob)
+        new_id = await self._repo.add(to_store, embedding=blob, routine=routine)
 
         for old_id in superseded_ids:
             await self._repo.mark_superseded(old_id, new_id, at=now)
@@ -185,6 +196,7 @@ class MemoryService:
         kind: str,
         importance: int,
         *,
+        schedule: RoutineSpec | None = None,
         correlation_id: UUID | None = None,
     ) -> int:
         """The `remember_fact` tool (§7.6, UC-02, AC-3): build a :class:`~avid.domain.Fact` from the
@@ -206,6 +218,22 @@ class MemoryService:
                 f"importance {importance} out of range "
                 f"{self._IMPORTANCE_MIN}–{self._IMPORTANCE_MAX} (§7.6)"
             )
+        if schedule is not None:
+            self._validate_schedule(schedule)
+        elif kind == "routine":
+            # ⚠️ A routine fact with no schedule is a legitimate outcome — not every routine has a
+            # clock time — but it is indistinguishable from a model that has quietly stopped
+            # filling the field, and that is exactly the shape of #310: `set_affect` dispatched
+            # perfectly against every fake and fired zero times in six live runs, because nothing
+            # counted the difference between "no calls" and "no instrument". Counted here, loudly.
+            self.routines_without_schedule += 1
+            _log.warning(
+                "routine fact stored with no schedule (%r) — it will never fire; "
+                "%d so far this session [correlation_id=%s]",
+                text,
+                self.routines_without_schedule,
+                correlation_id,
+            )
         fact = Fact(
             id=0,  # assigned by the store on insert (§8.2); ignored here
             text=text,
@@ -214,7 +242,26 @@ class MemoryService:
             created_at=0,  # store_fact defaults unset timestamps to now
             last_accessed_at=0,
         )
-        return await self.store_fact(fact, correlation_id=correlation_id)
+        return await self.store_fact(
+            fact, routine=schedule, correlation_id=correlation_id
+        )
+
+    def _validate_schedule(self, schedule: RoutineSpec) -> None:
+        """Resolve the schedule once, now, so an unusable one never reaches the database.
+
+        The resolver is the authority on what is usable — a bad RRULE, a malformed ``HH:MM`` or an
+        unknown IANA zone all raise :class:`~avid.core.schedule.InvalidRoutine`, which is a
+        ``ValueError`` and therefore already the shape the tool dispatcher turns into a tool error
+        (AC-6). Re-checking any of it here would be a second, drifting copy of §10.3's rules.
+        """
+        probe = Routine(
+            rrule=schedule.rrule,
+            local_time=schedule.local_time,
+            timezone=schedule.timezone,
+            dtstart_epoch=self._clock.now(),
+            lead_time_s=schedule.lead_time_s,
+        )
+        next_occurrence(probe, after=self._clock.now())
 
     async def recall(
         self, query: str, *, k: int = 5, correlation_id: UUID | None = None
