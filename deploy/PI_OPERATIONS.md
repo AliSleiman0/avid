@@ -23,6 +23,30 @@ non-interactive SSH shell can't see it.
 `eth0` is **UP with no IP address** — the LAN cable carries nothing. Everything runs over `wlan0`
 (`192.168.10.172`). Don't design around the cable without configuring it first.
 
+### ⚠️ The Pi cannot fetch from GitHub — push to it, don't pull from it
+
+`/opt/avid`'s `origin` is an **HTTPS** URL with no stored credentials, so on the Pi:
+
+```
+$ git fetch origin
+fatal: could not read Username for 'https://github.com': No such device or address
+```
+
+Worse than the error is what follows it: in a `cmd && cmd && cmd` chain the failure **silently
+skips every later step**, so a "reset the Pi to `main`" one-liner reports nothing alarming and
+leaves the machine on whatever branch the last gate used. Code reaches the Pi from the **laptop**:
+
+```sh
+git push ssh://alisleiman0@192.168.10.172/opt/avid <branch> --follow-tags
+ssh alisleiman0@192.168.10.172 'cd /opt/avid && git checkout <branch>'
+```
+
+Pushing over SSH uses your existing key and needs no credentials on the Pi. Git refuses to push to
+a branch that is **currently checked out** there, so either push a branch the Pi is not sitting on
+(then check it out), or check out something else first. Always confirm with
+`git rev-parse --short HEAD` on the far side — the push succeeding says nothing about which commit
+the working tree holds.
+
 ---
 
 ## 1. ⚠️ Stop `robot.service` before ANY gate or test run
