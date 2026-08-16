@@ -396,6 +396,26 @@ class RealtimeClient(Protocol):
         """
         ...
 
+    async def begin_proactive_turn(self) -> None:
+        """Ask the model to speak when **nobody has spoken** — §10.7 step 3, and UC-03's whole trick.
+
+        Every other session in this system opens because a person made a sound. This one opens
+        because a clock did: *"the Realtime API doesn't care that nobody spoke."*
+
+        **Named for what the application needs, not for the frames it becomes** (ADR-003), exactly
+        as :meth:`end_user_turn` is. The one thing this port *does* promise about frames is a
+        negative, because it is the whole point of the method: **no input audio buffer is committed
+        or appended on this path, ever.** The session carries instructions, injected memory and the
+        §10.8 context block, and nothing else — there is no user utterance to commit, and
+        committing an empty one would be a request for a reply to silence.
+
+        Idempotence and in-flight handling are the adapter's business. The real client already has
+        the machinery: it waits for any active response to finish before creating another (the #284
+        guard), and that wait fails *open* — on timeout the create goes out anyway, because a
+        dropped reply is a turn the user waited on and never got.
+        """
+        ...
+
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): tell the model the user cut ``item_id`` off at
         ``audio_end_ms`` — **what the speaker actually played** (from
