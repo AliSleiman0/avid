@@ -401,6 +401,32 @@ is the exact failure the AC-0 guard exists to prevent.
 
 ---
 
+## 5b. Cutting the network on purpose (AC-6 / AVID-189)
+
+The recovery arc needs a real outage *inside* a turn, and hand-unplugging cannot be triggered from
+the laptop driving the gate — nor timed well enough to land mid-turn.
+
+```sh
+sudo deploy/cut_wan.sh 30        # 30 s outage, restores itself
+sudo deploy/cut_wan.sh --restore # panic button
+```
+
+It blocks egress to everything **outside the LAN**, so the SSH session driving the gate survives
+while every route to the API dies. Taking `wlan0` down would also work and would strand you: the
+interface carrying the fix is the one you just switched off.
+
+⚠️ **The failsafe is the important half.** A `systemd-run` transient timer is armed *before* the
+block goes on and removes it regardless of what happens to the script — verified by `SIGKILL`ing
+the script mid-cut and watching the Pi restore itself. A diagnostic that can leave a Pi with no
+internet and no obvious cause is worse than the thing it diagnoses.
+
+Verified on this rig: API 401 → unreachable → 401, SSH alive throughout, no `nft` table left
+behind, and a reconnect *during* an active cut works.
+
+⚠️ CLAUDE.md §7.1: a stimulus the harness induces is not a measurement of the robot. **A run that
+cuts the network cannot also claim a latency result** — grade recovery on that run and O1 on
+another.
+
 ## 6. Shell & SSH traps
 
 **`pkill -f <pattern>` kills its own SSH session** when the pattern appears in the remote command
