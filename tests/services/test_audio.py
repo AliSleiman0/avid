@@ -778,16 +778,25 @@ async def test_barge_in_is_gated_on_live_playback_not_on_the_state_machine() -> 
     and silently dropped the truncated ``audio.playback_finished`` the model half of §6.2.4
     depends on.
 
-    Driven from IDLE since AVID-161 gave the LISTENING overlap a legal row: the property under
-    test is *"the speaker is live and the machine disagrees"*, so it needs a state the machine
-    still refuses to move out of on ``audio.playback_started``. That the set of such states keeps
-    shrinking is the point of AVID-161; that the guard does not care is the point of this test."""
-    async with _rig(vad_script=[False], initial=RobotState.IDLE) as rig:
+    Driven from a state the machine still refuses to move out of on ``audio.playback_started``:
+    the property under test is *"the speaker is live and the machine disagrees"*, so it needs one
+    to exist. That the set of such states keeps shrinking is the point of AVID-161; that the guard
+    does not care is the point of this test.
+
+    ⚠️ It shrank again at **AVID-189**, which rooted ``(IDLE, playback_started) -> SPEAKING`` after
+    the M6 gate run observed a reply starting with the machine already idle. This test was driven
+    from IDLE until then — and the paragraph above predicted exactly that, which is why moving it
+    is a one-line change rather than an argument.
+
+    SLEEPING, not DEGRADED: §3.10.3 justifies DEGRADED having no playback rows on the grounds that
+    every path into it tears the pump down first, so a playback edge there is genuinely unreachable
+    and testing it would prove nothing about a live speaker."""
+    async with _rig(vad_script=[False], initial=RobotState.SLEEPING) as rig:
         rig.service._turn_id = uuid4()
-        # Playback opens from IDLE: the transition is illegal and logged-and-ignored, so the
+        # Playback opens from SLEEPING: the transition is illegal and logged-and-ignored, so the
         # machine never reaches SPEAKING — but the speaker is live either way.
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
-        assert rig.state.state is RobotState.IDLE
+        assert rig.state.state is RobotState.SLEEPING
 
         await rig.service._begin_speech()
         await rig.collector.wait_for_type(AudioPlaybackFinished, 1)

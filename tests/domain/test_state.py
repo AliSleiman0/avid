@@ -293,6 +293,59 @@ def test_a_turn_that_ended_while_degraded_leaves_the_next_one_somewhere_legal() 
     ]
 
 
+def test_a_reply_arriving_after_the_machine_went_idle_still_composes() -> None:
+    """AVID-189, observed on the M6 gate run — two playback edges in IDLE after a reconnect.
+
+    The route to IDLE is the AVID-161 overlap doing what it was built for: recovery parks in
+    LISTENING, the user speaks again (AVID-173's self-loop), their falling edge moves to THINKING,
+    and a *stale* reply from before the drop drains — ``(THINKING, playback_finished) -> IDLE``.
+    The machine is now idle with a reply still coming, and the real reply's ``playback_started``
+    used to have nowhere to go.
+
+    ⚠️ The arc deliberately continues **past** the row under test to a completed turn. Stopping at
+    the gap is exactly how AVID-173 fixed the rising edge on this same arc and left the playback
+    edges unrooted — the run that proved that fix is the run that exposed this one."""
+    assert (
+        _walk(
+            RobotState.DEGRADED,
+            Trigger.AUDIO_SPEECH_STARTED,  # absorbed while the socket is down
+            Trigger.AUDIO_SPEECH_ENDED,  # absorbed; that turn is over
+            Trigger.SYSTEM_DEGRADED_EXITED,  # reconnect -> LISTENING (AVID-162)
+            Trigger.AUDIO_SPEECH_STARTED,  # they carry on talking (AVID-173's self-loop)
+            Trigger.AUDIO_SPEECH_ENDED,
+            Trigger.AUDIO_PLAYBACK_FINISHED,  # a pre-drop reply drains: THINKING -> IDLE
+            Trigger.AUDIO_PLAYBACK_STARTED,  # AVID-189's gap: the real reply starts, from IDLE
+            Trigger.AUDIO_PLAYBACK_FINISHED,  # ...and completes, through the SPEAKING row
+        )
+        == [
+            RobotState.DEGRADED,
+            RobotState.DEGRADED,
+            RobotState.DEGRADED,
+            RobotState.LISTENING,
+            RobotState.LISTENING,
+            RobotState.THINKING,
+            RobotState.IDLE,
+            RobotState.SPEAKING,
+            RobotState.IDLE,
+        ]
+    )
+
+
+def test_playback_finished_in_idle_stays_illegal() -> None:
+    """The row AVID-189 deliberately did **not** add.
+
+    The gate logged *two* illegal transitions and the obvious response is two rows. But with
+    ``(IDLE, playback_started) -> SPEAKING`` in place, the machine is in SPEAKING when the reply
+    drains, so ``(SPEAKING, playback_finished) -> IDLE`` already carries the second edge — and an
+    ``(IDLE, playback_finished)`` row would be **unreachable**.
+
+    ``domain/state.py``'s own rule is that an unreachable row is a lie, and AVID-173 had just
+    finished correcting that mistake in the other direction. This test is what stops someone
+    "completing" the fix by adding it."""
+    with pytest.raises(IllegalTransition):
+        next_state(RobotState.IDLE, Trigger.AUDIO_PLAYBACK_FINISHED)
+
+
 def test_the_think_timeout_arc_degrades_and_the_next_turn_recovers() -> None:
     """AVID-171 / SDS §6.9: the turn whose first token never arrives, as one journey.
 
