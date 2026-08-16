@@ -6,126 +6,76 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-02 · `main = 62fdb64` · tag **`v0.M5.0` pushed** · gh `AliSleiman0`.
+**As of:** 2026-08-16 · `main = bc05261` · tag **`v0.M6.0`** · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**M7's laptop work is finished. Everything left in the milestone is on the Pi, and every
-instrument now exists.** This is a hardware session — a live key, a mic, and someone at it.
+**M6 is sealed. 8 of 11 milestones done.** Nothing is in flight, no open PRs. The next milestone
+by value is **M10** (proactivity — the coffee scenario); PMP §5.4 puts it directly behind M6 on the
+critical path. M9 (motion) and M11 (product) are the others outstanding.
 
-### The run, in order
+Before starting new scope, there is a short, well-specified queue of things this milestone
+surfaced and deliberately did not absorb:
 
-**#127 first** (settled on #129's AC-6, and it also produces #168's AC-3 numbers in the same pass):
+### The queue, in the order I would take it
 
-```sh
-/opt/avid/.venv/bin/python tools/spk3_retrieval_scan.py --config /etc/robot/config.toml \
-    --counts 1000,5000,10000 --queries 50
-```
-
-Reports scan / embed / full-recall / FTS5 separately against §7.7's two different budgets (<50 ms
-for the inline scan, ~150 ms for the whole `recall`). **The shape to check:** on the laptop FTS5 was
-5.29 of the scan's 6.29 ms — the time goes to SQLite, not the cosine scan ADR-005 worried about. If
-that holds, §7.7's int8-quantisation escape hatch addresses the wrong component. Fold the numbers
-into §7.7's scale table (AC-5) and record the post-fix per-embed median + cores-busy on **#168**
-(expect ~192 ms / ~1.93 cores; the table in that issue was measured *before* the fix).
-
-**Then the gate, #129 — and the harness runs TWICE, which is the whole design:**
-
-1. State the 20 declared facts (`docs/demos/m7_evidence/facts.json` — read them naturally, do not
-   read the file aloud), then `systemctl restart robot`, then:
-   `memory_pi.py --config /etc/robot/config.toml --mode recall --json m7_recall.json` → **AC-1/2/3**
-2. *Then* the supersession turn ("I've switched to tea") and the forget turn, then:
-   `memory_pi.py --config /etc/robot/config.toml --mode mutations --json m7_mutations.json` → **AC-4/5**
-3. **AC-7** is `conversation_pi.py --memory real` — it already stands up the full M7 stack.
-
-⚠️ **Do not run `--mode recall` after the mutation turns.** Supersession and forgetting destroy the
-evidence AC-2 is scored on; a correct robot scores 2/4 and it reads as a model that forgot half of
-what it was told. There is deliberately no mode that grades both.
+1. **#310 — `set_affect` never fires.** M6's one functional gap. §6.8 pre-authorised the fallback
+   (local inference behind the existing `AffectTools` port, "a one-file change"), but **do the
+   cheap diagnostic first**: compare `remember_fact`'s firing rate against `set_affect`'s in one
+   live session. That separates "this tool" from "tools in speech-to-speech" and decides whether
+   any inference code is warranted at all. ⚠️ §6.8's objection to local inference is not a
+   formality — *"I'm sorry to hear that"* is textually negative and the correct face is
+   *concerned*, not *sad*.
+2. **#157 — session-open latency.** Now measured, not suspected: ~660–700 ms is OpenAI's WebSocket
+   upgrade, the server's own bootstrap is 1.5 ms, and payload size costs ~20 ms. §6.3's budget has
+   been corrected to the measurement. The only lever left is a pre-warmed or pooled connection,
+   which reopens ADR-007 — an architectural decision, not a fix.
+3. **The transcript is ordered by event arrival, not by turn** (`docs/demos/conversation_pi.py`),
+   so a gate transcript reads jumbled — robot lines before the user lines they answer. AVID-158
+   established transcription is a slower separate pass; order by `correlation_id` and turn index.
+   Small, and it makes the gate artefact readable.
+4. **#289** — `Pca9685Servo` shares AVID-266's lazy-open shape. Latent until M9 wires preemption,
+   so it wants doing *before* M9 rather than during it.
+5. **M7 follow-ups #264 / #265 / #267**, untouched since that milestone.
 
 ### Two open loops that are NOT tasks
 
-- **#168 and #127 are merged but stay OPEN.** Their code/instrument shipped; their ACs are the
-  on-device measurements above. **Do not close them on the strength of the merge** — an earlier
-  baton said to, and it was wrong.
-- **`docs/handoff.md` was being written by two sessions at once** on 2026-08-02, which is how this
-  file came to describe a merged branch as "uncommitted, never run". If you are one of two, say so.
-
-### After M7
-
-**#194 opens M6** — read [`enhancement-single-turn-authority.md`](enhancement-single-turn-authority.md)
-first, do not re-derive it. Two VADs disagree whose turn it is; ~1 day; a new `RealtimeClient.commit()`
-across three adapters. ⚠️ **It moves O1's baseline** (~1530 → ~990 ms projected), which is precisely
-why M7 seals first: O1 gets measured once per baseline, not twice against a moving one. Then #170,
-#173, #188, #189, #157 — M5 debt parked in M6's milestone, and #216 AC-1 requires them closed before
-anyone judges personality. Then M6's own scope, epic #210 (#211–#216).
-
-**M8 (epic #217) and M9 (epic #198) are fully filed** — 9 children each, all Backlog. **M10 "It
-initiates" is now filed too** — epic #230 + 14 children (#231–#245, no #233 — that number went to an
-unrelated PR), all Backlog, none started, the largest single milestone in the register (children sum
-to 13.5 IED against PMP's 13 IED). M11 has only #21.
+- **O1 regressed and that is expected**, not a defect: with AVID-194 the commit and `speech_ended`
+  now coincide, so O1 covers a round trip the server's own clock used to hide. P50 landed 2287 /
+  2912 ms on two gate passes and **passed** on the third (8 turns). It is measured differently now
+  and old figures are not comparable.
+- **`barge_in_margin_db = 3.0` is UNCALIBRATED**, marked as such in `config/pi.toml` and SDS §9.6.
+  It was tuned with capture AGC in an unknown state, and AGC moves this rig's floor ~20 dB.
+  Re-derive it at the provisioned setting before anyone treats it as a measurement.
 
 ## Current state
 
-**Every milestone from M6 through M10 now has a filed epic + full child breakdown; only M11 is
-thin.** Summary:
-
-| Milestone | Issues | Notes |
-|---|---|---|
-| M0–M5 | closed | Sealed, tags through `v0.M5.0` |
-| **M6 — It has a personality** | 13 open | Epic #210 + 6 new (#211–#216) + **6 inherited M5 defects** (#157/#170/#173/#188/#189/#194) |
-| **M7 — It remembers** | 4 open | **All laptop work done; every remaining AC needs the Pi.** #168 (fix merged, AC-2/3 owed), #127 (bench merged, all ACs owed), #129 (ACs settled + harness merged), epic #114 |
-| **M8 — It sees** | 10 open | Epic #217 + 9 (#218–#226) — ONNX face detection, ADR-013 pending, presence hysteresis |
-| **M9 — It moves** | 10 open | Epic #198 + 9 (#199–#207) — 2-servo pan/tilt, `look_at` voice tool |
-| **M10 — It initiates** | 15 open | Epic #230 + 14 (#231–#245) — scheduler, pure interruption-policy gate, `BehaviorService`, proactive turn initiation, `set_quiet`; on the critical path (`M6→M10→M11`), 13.5 IED against PMP's 13 |
-| M11 — It's a product | 1 | Only #21 (security doc) |
-
-**M5 sealed** as `v0.M5.0` @ `23b4670`, milestone closed 19/0, epic #98 closed. **Sealed with two
-gaps recorded rather than closed** — say this plainly, it is in the tag message, the journal, the
-demos README and PMP §5.2:
-
-- **O1's P95 is NOT met.** P50 1530 ms passes M5's *provisional* ceiling (1600/2700 ms). The
-  800/1500 design **target is unchanged** and the harness prints it on every run beside the line it
-  grades, so it cannot quietly become whatever was last measured. Pooled flagship runs (n=10) show
-  **1 turn in 10 above 2700 ms** where a P95 allows 1 in 20. Cause is #194.
-- **AC-7's 60-second recorded demo was deferred.**
-
-A 20-turn run to establish a real P95 was **considered and deliberately skipped**: it would measure
-the variance of an already-diagnosed, deferred defect, and the pooled exceedance rate says it would
-fail anyway. If you want the number, `--turns 20` is the command — but know what it buys.
-
-**The robot on the bench works.** Six-turn conversations, barge-in that cuts the speaker without
-losing the session, degrade-and-recover across a real socket drop, **O7 at $8–11/month** against $25.
+- `main = bc05261`; **1127 passed / 60 skipped** on 3.11 and 3.13; ruff, `mypy --strict` (56 files)
+  and `lint-imports` (4/4) clean. CI green.
+- **The Pi is ON**, `robot.service` **inactive and disabled**, on `main`. ⚠️ The hostname `AVID`
+  intermittently stops resolving — `192.168.10.172` works.
+- `/etc/robot/config.toml` reconciled with the repo at the gate: `turn_detection = "none"`
+  (AVID-194 — it was still `server_vad`, which would have invalidated the whole session), plus the
+  high-pass keys stated explicitly.
+- Capture mixer provisioned and `alsactl store`d: **AGC off**, `Mic` 10/62%. ⚠️ Read #296 before
+  touching it.
+- Gate evidence on the Pi in `~/vision_traces/m6_gate/` (both passes, both configs, sealed order).
 
 ## What just shipped (this session)
 
-**#168 fixed** (PR #227, `d8b25dd`) — the MiniLM embedder's ONNX session now gets the same
-`intra_op_num_threads=1` / `inter_op_num_threads=1` / spinning-disabled treatment `SileroVad`
-already carried. Not yet closed by hand (see Next session).
+**M6 in full** — #211 personality schema + two shipped configs, #212 the pure composer, #213 the
+four-layer §6.4 assembly with its cache-prefix tests, #214 `set_affect` + the `AffectTools` port,
+#215 the adherence eval, #216 the gate.
 
-**Three planning epics filed, all Backlog, none started** — M6 (#210), M8 (#217), M9 (#198), 26
-child issues total. Each is designed against the *current* code, not just the SDS/PMP text, and each
-epic documents specific things the codebase already half-built:
+**The whole inherited stabilisation package** — #194 (one turn-taking authority; the server VAD is
+off and we commit from the local falling edge), #173, #170, #188, and #189 (found *again* at the
+gate after I had argued it was structurally impossible).
 
-- **M6** — `AffectService` already implements both §6.8 affect tiers and a `set_affect()` surface;
-  what's missing is the tool-call wire (#214). `AiConfig.personality` points at
-  `config/personality/default.toml`, **which does not exist** (#211).
-- **M8** — two state-table rows (`VISION_PRESENCE_GAINED`, `PRESENCE_LOST_TIMEOUT`) already exist
-  with no driver; `FakeCamera.person_present` was already built for this milestone. New: **ADR-013**
-  (proposed in #218, not yet written into the SDS) pins ONNX face detection over MediaPipe/Haar/
-  motion-only, and amends PMP's "Full UC-04" wording (greeting is M10, not M8).
-- **M9** — the rig is now physically 2-servo (pan ch0 + tilt ch13), resolving ADR-009; a
-  voice-callable `look_at` tool was added to the milestone above the PMP register line, via a
-  `GestureTools` port mirroring `MemoryTools`.
+**Three defects from outside the plan** — #284, #266, and #283/#296, where the "50 Hz mains hum"
+turned out to be one ALSA capture switch.
 
-⚠️ Filing mistake caught and fixed in-session: an early loop update wrote M8's child bodies at an
-off-by-one issue number and clobbered the epic's own body; re-verified all ten M8 issues individually
-by fetching each body's opening line before moving on.
-
-## Previously
-
-Earlier seals are not re-summarised here — `docs/journal.md` carries one honest line per milestone
-(M0, M2, M3, M5) and `git log --oneline v0.M4.0..v0.M5.0` carries the rest. ⚠️ **M1 and M4 have
-tags but no journal entry**; nobody should invent one after the fact, but the gap is real.
+**Four harness defects the gate surfaced**, all of the same family: a report describing something
+other than what ran. See `journal.md`.
 
 ## Standing gotchas (carry forward)
 

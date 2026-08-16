@@ -105,3 +105,74 @@ at 0.482 and nothing else above 0.013, 2.99 fps held with a face in frame, +0.0 
 minutes, a conversation at **347 ms** median first-token against M5's 328 with **zero** slow-callback
 warnings, and a threshold that travels — 74.4% detected at night against 78.1% in the afternoon.
 Sealed with three defects open and named, none of them in the vision path.
+
+## M6 — It has a personality (`v0.M6.0`)
+
+The gate's headline criterion is a *difference*, and the honest way to grade a difference is to
+not tell the listener which side they are on. So the two configs were shuffled into `gate_1` and
+`gate_2`, the mapping written to a file nobody read, and the same six questions asked twice. **The
+listener identified the terse pass, blind.** Sealed order: `pass1=default, pass2=terse`. Everything
+else in this milestone is downstream of that working; if it had not, no amount of green CI would
+have mattered.
+
+What green CI *did* buy was the two checks a fixture structurally cannot make. A replay client
+replays *recorded* instructions, so a composition bug produces a perfect suite and a
+personality-free robot — the real `session.update` payload was inspected instead, and carried all
+four §6.4 layers in order with memory last, in both configs, and `turn_detection: null`. And
+caching held at 50–70% cached-input, which was the thing most likely to break: layer 2 inserts ~250
+tokens into the middle of the cached prefix, and §6.10.3's whole warning is that breaking that
+looks *identical* to not breaking it until the invoice arrives.
+
+**Six of the eight defects fixed this milestone were found by running it, not by reading it.** The
+harness printed *"of which 500 ms is the configured server-VAD commit delay"* on a run where
+AVID-194 had switched the server VAD off — arithmetic on a key that still parses and no longer
+applies. It recorded every number *about* the conversation and none of the conversation, so the
+blind identification above rested on a listener's memory until it was fixed. It reported
+`set_affect` firing zero times when nothing in it recorded tool calls at all, so the zero and an
+absent instrument were indistinguishable. English speech came back transcribed as Arabic and
+Korean — invisible to the conversation, because Realtime is speech-to-speech and answered
+correctly every time, and straight into §7.6's extraction path. And AVID-189 reproduced *after* I
+had argued on the issue that #284 and #194 made it structurally impossible: two playback edges in
+IDLE on the first turn after a reconnect, with zero `conversation_already_has_active_response` in
+the same log. It was the sibling AVID-173 missed a day earlier — that fix rooted the *rising* edge
+on the degrade/recover arc and stopped there, and the run that proved it is the run that exposed
+its neighbour. The arc test now deliberately walks past the row under test to a completed turn,
+because stopping at the gap is how AVID-158, 161 and 162 each shipped their successor.
+
+The pattern under all of that: **every one of these is a report describing something other than
+what ran.** §7.1 says report the quantity you grade and read config rather than restating it; a
+milestone's worth of gate runs is what turns that from a maxim into five specific bugs.
+
+⚠️ **Sealed with two named gaps, and the second is the interesting one.**
+
+`set_affect` **never fired** — across six runs and ~30 live turns, including utterances the model
+answered with *"Man, I'm really sorry to hear that"* and *"WOO-HOO! That's huge"*. It is not
+plumbing: the tool was verified on the wire with its enum and its capability clause. My first
+clause led with the constraint — *"call it **only** when … and **not** on ordinary replies"* —
+written that way on §6.5's own finding that negative constraints are followed far more strongly
+than encouragements. That finding is right, and it operated against us: the suppression did all
+the work. Reweighting it changed nothing, which is what makes this a finding rather than a typo.
+§6.8 anticipated exactly this and pre-authorised the answer (*"revisit if `set_affect` proves
+unreliable; the port boundary makes it a one-file change"*), so it is filed as #310 with the cheap
+diagnostic first. It degrades gracefully — the Tier-1 baseline is never wrong — so nothing on the
+face is *incorrect*; there is simply less on it than §6.8 designed.
+
+The other gap is AVID-157, now measured rather than suspected: **~660–700 ms of the session open is
+OpenAI's WebSocket upgrade**, on a path whose full TLS setup is 188 ms. The server's own session
+bootstrap arrives in **1.5 ms** — one of the two candidates the issue named, killed by measurement
+— and a full 1326-character four-layer prefix costs **~20 ms**, which is why this milestone's extra
+layer does not make it worse. §6.3's 200 ms budget was corrected to the measurement rather than the
+measurement tuned toward the budget.
+
+Two things arrived from outside the plan and were worth more than the work they interrupted. The
+50 Hz hum that M8 handed over as AVID-283 turned out not to be the defect at all: `Auto Gain
+Control`, one ALSA capture switch, amplifies a *quiet* room until its own noise floor reads as
+speech — an empty room at **−16.9 dBFS with Silero calling 20% of it speech**, against **−36.4 dBFS
+and 0.16%** with it off. Every published number in that issue falls out of one bit of machine state
+that nothing in the repo owned, and `PI_OPERATIONS.md` had already *said* "AGC off" — recording the
+intent while nothing checked it. And the empty-room readings that misdiagnosed it were taken with a
+mis-set instrument and reasoned about as though they described the room; what broke the chain was
+one control recording with a person actually speaking. **Before trusting a level, capture a control
+with a human in it** — bring-up's figure is peak −3.6 dBFS, and anything far below that is the
+instrument, not the room. That is M8's "measure against a person" lesson arriving one layer further
+down, at the microphone.
