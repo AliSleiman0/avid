@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -129,6 +129,31 @@ async def _settle(rig: Rig, rounds: int = 4) -> None:
         await rig.store._run(lambda: None)  # noqa: SLF001 - a FIFO barrier on the writer thread
         for _ in range(20):
             await asyncio.sleep(0)
+        # ⚠️ And a zero-length advance, which is not decoration. FakeClock wakes only the sleepers
+        # it *crosses*, so a coroutine that registers its sleep after an advance has already gone
+        # by waits forever. The scheduler re-arms after every fire, and whether it gets there
+        # before or after the test's advance is a scheduling race — one this suite lost on Linux
+        # and won on Windows, which is the worst possible way to find out. advance(0) re-wakes
+        # anything already due without moving virtual time.
+        await rig.clock.advance(0)
+
+
+async def _wait_until(
+    rig: Rig, pred: Callable[[], bool], *, tries: int = 40, what: str = "condition"
+) -> None:
+    """Settle repeatedly until ``pred`` holds, or fail saying what never happened.
+
+    A fixed number of settle rounds is a guess about how many hops a fact needs — bus worker,
+    handler, writer thread, scheduler re-arm — and a guess that is right on one OS and wrong on
+    another is the worst kind: these two tests passed on Windows and failed on Linux CI. Waiting on
+    the condition instead removes the guess. It still cannot hang: the cap turns a real regression
+    into a named failure rather than a timeout.
+    """
+    for _ in range(tries):
+        if pred():
+            return
+        await _settle(rig, rounds=1)
+    raise AssertionError(f"{what} never happened")
 
 
 def _env(rig: Rig) -> dict[str, object]:
@@ -244,7 +269,11 @@ async def test_the_heap_is_rebuilt_from_the_store_on_boot(rig: Rig) -> None:
 
     await _make_deliverable(rig)
     await rig.clock.advance(60)
-    await _settle(rig)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+        what="the rebuilt trigger firing",
+    )
 
     fired = [e for e in rig.events if isinstance(e, BehaviorTriggerFired)]
     assert [e.trigger_id for e in fired] == [trigger_id]
@@ -266,7 +295,11 @@ async def test_a_passing_proposal_mints_a_turn_and_moves_the_machine(rig: Rig) -
     assert rig.state.state is RobotState.IDLE
 
     await rig.clock.advance(60)
-    await _settle(rig)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+        what="the proposal firing",
+    )
 
     fired = [e for e in rig.events if isinstance(e, BehaviorTriggerFired)]
     assert len(fired) == 1
@@ -290,7 +323,11 @@ async def test_a_vetoed_proposal_is_silent_but_never_unrecorded(rig: Rig) -> Non
     await _settle(rig)  # deliberately no presence
 
     await rig.clock.advance(60)
-    await _settle(rig)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorProactiveSuppressed) for e in rig.events),
+        what="the proposal being vetoed",
+    )
 
     assert [e for e in rig.events if isinstance(e, BehaviorTriggerFired)] == []
     assert rig.state.state is RobotState.IDLE
@@ -334,7 +371,23 @@ async def test_every_proposal_writes_exactly_one_row(rig: Rig) -> None:
         )
         await _settle(rig)
         await rig.clock.advance(10)
-        await _settle(rig)
+        expected = proposals + 1
+        await _wait_until(
+            rig,
+            lambda n=expected: (
+                len(  # type: ignore[misc]
+                    [
+                        e
+                        for e in rig.events
+                        if isinstance(
+                            e, (BehaviorProactiveDelivered, BehaviorProactiveSuppressed)
+                        )
+                    ]
+                )
+                >= n
+            ),
+            what=f"proposal {expected} being decided",
+        )
         proposals += 1
 
     def _rows() -> list[tuple[str, str | None]]:
@@ -364,7 +417,11 @@ async def test_the_log_row_and_the_event_agree_on_the_rule(rig: Rig) -> None:
     await rig.state.transition(Trigger.SYSTEM_STARTED, correlation_id=uuid4())
     await _settle(rig)
     await rig.clock.advance(60)
-    await _settle(rig)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorProactiveSuppressed) for e in rig.events),
+        what="the veto",
+    )
 
     def _reason() -> str:
         conn = rig.store._conn_sync()  # noqa: SLF001 - as above
