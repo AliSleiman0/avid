@@ -216,7 +216,18 @@ class _ConversationCollector:
         # and threw the conversation away — so 'recognizably different responses' rested on a
         # listener's memory and could not be re-read, quoted, or compared against a later run.
         self.transcript: list[tuple[str, str]] = []
+        # Tier-2 affect overlays the MODEL asked for (#216 AC-6/AC-7). Counted because the
+        # criterion is that set_affect *fires in a real conversation*, and nothing else in
+        # this harness could tell 'the model never called it' from 'nothing records it'.
+        # The first gate attempt reported zero and the zero meant nothing.
+        self.tier2_affects: list[str] = []
         self._arrived = asyncio.Event()
+
+    async def on_affect_changed(self, event: Event) -> None:
+        # Tier 1 is the local state machine's baseline and fires constantly; only Tier 2 is
+        # the model's opinion, which is the thing under test (§6.8).
+        if getattr(event, "tier", 1) == 2:
+            self.tier2_affects.append(str(getattr(event, "affect", "?")))
 
     async def on_user_transcribed(self, event: Event) -> None:
         self.transcript.append(("user", str(getattr(event, "text", ""))))
@@ -420,6 +431,7 @@ def _report_conversation(
     recovery: _Recovery | None = None,
     protocol_errors: Sequence[str] = (),
     transcript: Sequence[tuple[str, str]] = (),
+    tier2_affects: Sequence[str] = (),
 ) -> int:
     """Print the per-turn table, the O1 histogram and the O7 projection; return the exit code.
 
@@ -456,6 +468,16 @@ def _report_conversation(
     # before ever reaching it — so the artefact vanished in exactly the runs whose transcript you
     # most want to read. Same shape as the early-return bug this file already carries a warning
     # about: a criterion hidden behind an unrelated failure.
+    # Unconditional, including the zero, and ABOVE the verdicts for the same reason the
+    # transcript is: #216 AC-6 asks whether the model DECIDED to call set_affect, and a run that
+    # fell short on turns is exactly when you want to know whether it ever did. A criterion that
+    # prints nothing when it fails is indistinguishable from one nobody wired — which is what the
+    # first gate attempt looked like, where a zero could not be told from an absent instrument.
+    print(
+        f"AC-6 Tier-2 affects the model set (set_affect fired): "
+        f"{len(tier2_affects)} {sorted(set(tier2_affects))}"
+    )
+
     if transcript:
         print()
         print(f"--- transcript ({len(transcript)} lines) ---")
@@ -888,6 +910,7 @@ async def _run_conversation(
         recovery=collector.recovery if require_recovery else None,
         protocol_errors=protocol_errors.messages,
         transcript=collector.transcript,
+        tier2_affects=collector.tier2_affects,
     )
 
 
