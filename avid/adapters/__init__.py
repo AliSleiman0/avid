@@ -28,6 +28,7 @@ from avid.adapters.retrieval import HybridRetriever
 from avid.adapters.servo import FakeServo, Pca9685Servo
 from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
 from avid.adapters.text_model import FakeTextModel, OpenAiTextModel
+from avid.adapters.trigger_store import FakeTriggerStore, SqliteTriggerStore
 from avid.adapters.turn_sink import FakeTurnSink
 from avid.adapters.vad import FakeVoiceActivityDetector, SileroVad
 
@@ -81,6 +82,10 @@ __all__ = [
     # EpisodeStore (#123) — raw-transcript §7.5 tier, SQLite store + in-memory fake
     "SqliteEpisodeStore",
     "FakeEpisodeStore",
+    # TriggerRepository + ProactiveLog (#237a) — §10's triggers/routines/proactive_log,
+    # one class satisfying both ports, SQLite store + in-memory fake
+    "SqliteTriggerStore",
+    "FakeTriggerStore",
     # Hybrid retriever + §8.2 vector packing (#120) — the memory read path
     "HybridRetriever",
     "pack_embedding",

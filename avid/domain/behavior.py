@@ -163,6 +163,30 @@ class Suppressed:
 PolicyResult: TypeAlias = Delivered | Suppressed
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TriggerRecord:
+    """One ``triggers`` row (SDS §8.3), as a value.
+
+    Everything a trigger has done to itself. ``ignore_streak`` and ``cooldown_s`` are the two
+    columns §10.5's backoff writes, and they are **persisted rather than held in memory** for a
+    reason worth stating: a backoff that resets on reboot is not a backoff, and a robot that is
+    politely ignored every morning would go on being ignored every morning forever.
+
+    ``kind`` is ``'schedule'``, ``'presence'`` or ``'condition'`` — §8.3's CHECK constraint. Only
+    ``schedule`` has a ``routines`` row behind it; the other two are driven by events.
+    """
+
+    id: int
+    fact_id: int | None
+    kind: str
+    enabled: bool
+    next_fire_at: int | None  # epoch seconds; NULL keeps it out of idx_triggers_due
+    last_fired_at: int | None
+    fire_count: int
+    ignore_streak: int
+    cooldown_s: int
+
+
 # ── The gate ─────────────────────────────────────────────────────────────────────────────────
 
 
@@ -235,6 +259,7 @@ __all__ = [
     "PolicyLimits",
     "PolicyResult",
     "Suppressed",
+    "TriggerRecord",
     "evaluate_policy",
     "within_quiet_window",
 ]

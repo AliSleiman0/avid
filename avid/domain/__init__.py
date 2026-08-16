@@ -40,6 +40,7 @@ from avid.domain.behavior import (
     PolicyLimits,
     PolicyResult,
     Suppressed,
+    TriggerRecord,
     evaluate_policy,
     within_quiet_window,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "PolicyLimits",
     "PolicyResult",
     "Suppressed",
+    "TriggerRecord",
     "evaluate_policy",
     "within_quiet_window",
     # Affect (AVID-8)
