@@ -635,6 +635,11 @@ class ConversationService:
             # reads this latch to know it should. Setting it after (as the first draft did) opened
             # every proactive session with the memory block alone and no reason for the turn.
             self._proactive = True
+            # ⚠️ Before the session opens, because assistant audio can arrive the moment it does
+            # and AudioService mints a turn id only from its own VAD. Without this the first chunk
+            # kills the pump on a None correlation id — found live on the rig, where the robot
+            # fired its reminder, opened a session, and said nothing (#337).
+            await self._sink.adopt_turn(event.correlation_id)
             try:
                 await self._client.open(memory=self._compose_open_block())
             except OSError as exc:

@@ -473,6 +473,25 @@ class TurnSink(Protocol):
         conversation service forwards to the model via :meth:`RealtimeClient.send_audio`."""
         ...
 
+    async def adopt_turn(self, correlation_id: UUID) -> None:
+        """Tell the sink which turn the audio about to arrive belongs to (§9.1.1, #337).
+
+        ⚠️ **Only the proactive origin needs this, and that asymmetry is the point.** A user turn
+        begins with the sink's *own* VAD rising edge, so it mints the id itself and already knows.
+        A proactive turn begins with a clock — the sink hears nothing, mints nothing, and would
+        otherwise receive assistant audio belonging to a turn it has never heard of.
+
+        Found on the rig: without it ``AudioService`` asserted on a ``None`` turn id the instant the
+        first audio chunk arrived, killing the conversation pump. The robot fired its reminder,
+        opened a session, and said **nothing**.
+
+        It rides this port rather than the bus deliberately. §9.1.4 makes the ConvSvc↔AudioSvc seam
+        a direct call because audio does not belong on an at-most-once bus, and a turn's *identity*
+        travels with its audio — putting it back on the bus would reintroduce the very edge
+        ``AudioService.subscriptions`` returns ``()`` to avoid.
+        """
+        ...
+
     async def play(self, chunk: AudioChunk, *, item_id: str) -> None:
         """Play one assistant PCM delta (down), tagged with the ``item_id`` a barge-in may
         later truncate. A §9.1.4 direct call — never blocks the loop (P8)."""
@@ -771,6 +790,21 @@ class ProactiveLog(Protocol):
         rule and must be a member of :data:`~avid.domain.behavior.POLICY_RULES` — the column is
         spelled ``reason`` and the event field ``rule``, which are deliberately the same vocabulary
         under two normative names (§10.6). ``utterance`` is what it said, or would have said."""
+        ...
+
+    async def set_utterance(self, log_id: int, utterance: str) -> None:
+        """Record what the robot actually said, once it has actually said it (§8.3, §10.6).
+
+        ⚠️ ``outcome='delivered'`` is written at the moment the **gate passes**, which is several
+        seconds and one network round trip before any words exist. On the rig that gap was not
+        theoretical: a proactive turn fired, opened a session, crashed on its first audio chunk, and
+        the audit recorded ``delivered`` — then ``ignored``, because nobody replied to a robot that
+        had said nothing. §10.5 would then have doubled the cooldown and, after three mornings,
+        disabled the trigger for being ignored.
+
+        So the column §8.3 provides and nothing filled is now filled, and its **absence means
+        something**: a delivered row with a NULL utterance is a turn that never spoke.
+        """
         ...
 
     async def set_reaction(self, log_id: int, reaction: str) -> None:

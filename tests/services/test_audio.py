@@ -1285,3 +1285,53 @@ async def test_the_echo_floor_is_measured_on_FILTERED_audio() -> None:
         f"echo floor {floor:.1f} dBFS is close to the raw {raw:.1f} — the level measurement is "
         f"not being high-passed (AVID-283)"
     )
+
+
+# --- the proactive origin (#337) -------------------------------------------------------------
+
+
+async def test_playing_a_proactive_turn_without_adopting_it_is_the_crash_the_rig_found() -> (
+    None
+):
+    """⚠️ The exact failure, at the exact line, reproduced.
+
+    ``_turn_id`` is minted in one place — :meth:`_begin_speech`, the local VAD's rising edge —
+    because until M10 every turn began with someone speaking. A proactive turn begins with a clock,
+    so this service receives assistant audio for a turn it never heard start, ``_playing_corr`` is
+    ``None``, and :meth:`_playback_corr` asserts on the **first chunk**.
+
+    Live on the rig that killed ``ConversationService.pump``: the robot fired its reminder, opened a
+    session, and said nothing — while ``proactive_log`` recorded ``delivered``.
+
+    This test pins the raw behaviour deliberately, without the fix, so the assertion below is a
+    statement about ``AudioService`` rather than about who remembered to call what.
+    """
+    async with _rig(vad_script=[False]) as rig:
+        chunk = AudioChunk(
+            pcm=b"\x00" * _FRAME_BYTES, sample_rate=_SAMPLE_RATE, channels=_CHANNELS
+        )
+        with pytest.raises(AssertionError):
+            await rig.service.play(chunk, item_id="item_0")
+
+
+async def test_adopting_the_turn_lets_a_proactive_reply_play() -> None:
+    """The fix: the origin hands the id over the ``TurnSink`` port before any audio arrives.
+
+    Over the port rather than the bus, because §9.1.4 makes this seam a direct call — audio does not
+    belong on an at-most-once bus, and a turn's *identity* travels with its audio.
+    """
+    async with _rig(vad_script=[False]) as rig:
+        corr = uuid4()
+        await rig.service.adopt_turn(corr)
+        chunk = AudioChunk(
+            pcm=b"\x00" * _FRAME_BYTES, sample_rate=_SAMPLE_RATE, channels=_CHANNELS
+        )
+        await rig.service.play(chunk, item_id="item_0")
+
+        started = [
+            e for e in rig.collector.events if isinstance(e, AudioPlaybackStarted)
+        ]
+        assert started, "playback must open rather than assert"
+        assert started[0].correlation_id == corr, (
+            "and it must carry the id the trigger minted, or the turn splits in two (§9.1.1)"
+        )

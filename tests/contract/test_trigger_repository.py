@@ -465,3 +465,35 @@ async def test_set_next_fire_can_retire_a_trigger(store: SqliteTriggerStore) -> 
     )
     await store.set_next_fire(trigger_id, next_fire_at=None)
     assert await store.enabled_triggers() == []
+
+
+async def test_set_utterance_makes_silence_visible(store: SqliteTriggerStore) -> None:
+    """§8.3 provides ``utterance`` and nothing filled it until #337, which is how the audit came to
+    lie: ``delivered`` is written when the gate passes, and on the rig a turn crashed before saying
+    anything while the log recorded a delivery and then an ignore.
+
+    Filled, the column separates the two. **Its absence is the signal**: a delivered row with a NULL
+    utterance is a turn that never spoke.
+    """
+    log_id = await store.record(
+        trigger_id=None,
+        considered_at=1_800_000_000,
+        outcome="delivered",
+        reason=None,
+        utterance=None,
+    )
+
+    def _read() -> str | None:
+        row = (
+            store._conn_sync()  # noqa: SLF001 - the port has no read for this column
+            .execute("SELECT utterance FROM proactive_log WHERE id = ?", (log_id,))
+            .fetchone()
+        )
+        return None if row is None else row["utterance"]
+
+    assert await store._run(_read) is None  # noqa: SLF001 - nothing said yet
+
+    await store.set_utterance(log_id, "Morning — coffee's about due, isn't it?")
+    assert await store._run(_read) == (  # noqa: SLF001 - as above
+        "Morning — coffee's about due, isn't it?"
+    )

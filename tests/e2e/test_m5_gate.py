@@ -228,7 +228,12 @@ class _RecordingSink:
     ones were dropped. ``FakeTurnSink`` would do, but it cannot be handed a real speaker, and the
     arc reads better when the drop is visible in one list."""
 
+    async def adopt_turn(self, correlation_id: UUID) -> None:
+        """Record the proactive turn's id (#337). Only that origin hands one over."""
+        self.adopted.append(correlation_id)
+
     def __init__(self) -> None:
+        self.adopted: list[UUID] = []
         self.played: list[tuple[str, AudioChunk]] = []
         self.responses_ended = 0
         self.interrupts = 0

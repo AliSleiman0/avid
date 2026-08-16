@@ -2490,6 +2490,8 @@ GROUP BY reason ORDER BY 2 DESC;
 
 ⚠️ **`rule` and `reason` are the same value under two names, and both are normative.** The event field is `rule` (§9.1.3's `behavior.proactive_suppressed`); the column is `reason` (§8.3's `proactive_log`). Both shipped before either had a writer, and renaming a normative schema for cosmetics is not worth a migration. The values are pinned once — `POLICY_RULES` in `domain/behavior.py`, the same frozen vocabulary §10.4's gate returns — and mapped at the single write site, with a test that nothing outside that set ever reaches the column. If the two ever disagree, the query below silently under-counts, which is the one failure this table cannot afford.
 
+⚠️ **`outcome` is written when the gate passes, which is before any words exist.** That gap is not theoretical: on the M10 rig a turn was recorded `delivered` and then `ignored` after crashing on its first audio chunk, and §10.5's backoff would have disabled the trigger within three mornings for being ignored — having never spoken. So `utterance` is filled when the robot actually speaks, **its absence is the signal**, and a delivered turn that produced nothing is never counted as ignored: the turn failed, the user did not decline.
+
 If `ambient_speech` vetoed 40 times last week, rule 4 is too aggressive. If nothing was ever suppressed, the rules are decorative. **Without this table, both look identical from the outside** — which is precisely why R-08 is scored 15 and why "log every suppression so you can see what it would have said" was in the mitigation from the start.
 
 ## 10.7 Proactive turn initiation
@@ -2507,6 +2509,8 @@ The mechanism for speaking with no user audio. §3.10.3's `IDLE + behavior.trigg
 ```
 
 Step 3 is the whole trick: `response.create` with no user turn. The Realtime API doesn't care that nobody spoke.
+
+⚠️ **The sink must be told whose turn this is, before any audio arrives (#337).** ``AudioService`` mints a ``correlation_id`` in exactly one place — its own VAD's rising edge — because until M10 every turn began with someone speaking. A proactive turn begins with a clock, so the sink receives assistant audio for a turn it never heard start, and asserts. Found live on the rig: the robot fired its reminder, opened a session, and said **nothing**, while `proactive_log` recorded `delivered`. The id therefore crosses the `TurnSink` port (`adopt_turn`) rather than the bus — §9.1.4 makes that seam a direct call because audio does not belong on an at-most-once bus, and a turn's identity travels with its audio.
 
 **Cost:** ~10 s of audio out ≈ 200 tokens ≈ **$0.004** on the mini. Five a day is **$0.60/month**. Against §6.10.3's $4.30, proactivity is a rounding error. The expensive thing about proactivity is never the tokens.
 
@@ -2605,7 +2609,7 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 |---|---|---|---|---|
 | `conversation.turn_started` | `initiator: "user" \| "proactive"` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
 | `conversation.user_transcribed` | `text: str`, `is_approximate: bool` | ConversationService | EpisodeRecorder, BehaviorService (M10) | DROP_NEWEST |
-| `conversation.assistant_responded` | `text: str`, `item_id: str` | ConversationService | EpisodeRecorder, Observability | DROP_NEWEST |
+| `conversation.assistant_responded` | `text: str`, `item_id: str` | ConversationService | EpisodeRecorder, Observability, BehaviorService (M10) | DROP_NEWEST |
 | `conversation.turn_ended` | `duration_ms: int`, `usage: TokenUsage` | ConversationService | EpisodeRecorder, Observability (cost meter, §6.10.6) | DROP_NEWEST |
 | `conversation.session_lost` | `cause: str`, `was_mid_turn: bool` | ConversationService | StateManager, ExpressionService | DROP_NEWEST |
 

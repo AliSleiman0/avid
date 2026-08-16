@@ -252,6 +252,17 @@ class SqliteTriggerStore:
 
         return await self._run(_record)
 
+    async def set_utterance(self, log_id: int, utterance: str) -> None:
+        def _set() -> None:
+            conn = self._conn_sync()
+            with conn:
+                conn.execute(
+                    "UPDATE proactive_log SET utterance = ? WHERE id = ?",
+                    (utterance, log_id),
+                )
+
+        await self._run(_set)
+
     async def set_reaction(self, log_id: int, reaction: str) -> None:
         def _reaction() -> None:
             conn = self._conn_sync()

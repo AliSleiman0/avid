@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from uuid import UUID
 
 from avid.core.hal import AudioChunk
 
@@ -52,6 +53,8 @@ class FakeTurnSink:
         self.interrupts = 0
         self.responses_ended = 0
         self.mic_sent = 0
+        # Turn ids handed over by the proactive origin (#337); the user origin mints its own.
+        self.adopted: list[UUID] = []
 
     def mic(self) -> AsyncIterator[AudioChunk]:
         """Replay the scripted mic frames, one at a time (up). See :meth:`_mic`."""
@@ -65,6 +68,11 @@ class FakeTurnSink:
             await asyncio.sleep(0)
             self.mic_sent += 1
             yield chunk
+
+    async def adopt_turn(self, correlation_id: UUID) -> None:
+        """Record the adopted turn id (§9.1.1, #337). The fake plays nothing, but the M10 gate
+        asserts the proactive path told the sink whose audio it is."""
+        self.adopted.append(correlation_id)
 
     async def play(self, chunk: AudioChunk, *, item_id: str) -> None:
         """Record one assistant delta against its ``item_id`` (down). ``await``\\ s so the call
