@@ -106,6 +106,7 @@ from avid.domain import (
     AudioSpeechEnded,
     AudioSpeechStarted,
     EchoFloor,
+    HighPass,
     Trigger,
     rms_dbfs,
 )
@@ -174,6 +175,8 @@ class AudioService:
         # whatever the config held. Required turns each omission into a mypy error at the call
         # site instead of a wrong number in a gate report.
         barge_in_margin_db: float,
+        highpass_hz: float,
+        highpass_order: int,
         echo_tail_ms: int,
         loopback: bool = False,
     ) -> None:
@@ -206,6 +209,14 @@ class AudioService:
         # debugging catastrophe), and #106's AC-3 needs the number that log line carries.
         self._echo_floor = EchoFloor()
         self._barge_in_margin_db = barge_in_margin_db
+        # The level-measurement high-pass (AVID-283). Required kwargs, never defaulted — the
+        # #180 lesson: a defaulted gate knob is one the bench silently never passes, and every
+        # recorded `echo gate:` line then describes a configuration nothing ran.
+        self._level_filter = HighPass(
+            cutoff_hz=highpass_hz,
+            sample_rate=sample_rate,
+            order=highpass_order,
+        )
         self._echo_tail_ns = echo_tail_ms * 1_000_000
         self._uplink_shut_until_ns = 0
         self._suppressed_frames = 0
@@ -485,7 +496,20 @@ class AudioService:
             frame_ms = pcm_duration_ms(
                 chunk.pcm, sample_rate=chunk.sample_rate, channels=chunk.channels
             )
-            frame_dbfs = rms_dbfs(chunk.pcm)
+            # ⚠️ The level is measured on FILTERED audio; the VAD above is not (AVID-283).
+            #
+            # `EchoFloor` reads broadband RMS, and on the rig ~31 dB of what it was reading is
+            # energy no human produced: an empty room measured -18.4 dBFS broadband against
+            # -49.1 dBFS in the 300-3400 Hz band where speech lives. A floor inflated by that
+            # much defeats the barge-in margin while the robot is speaking, which is the one
+            # moment the margin is consulted at all.
+            #
+            # The filter stops here, at the level, and does NOT reach `self._vad`. Measured with
+            # a person talking: filtering Silero's input costs ~8% of real speech frames at
+            # 150 Hz x3 (445 -> 410 of 1000) and buys nothing, because Silero does not fire on
+            # the hum in the first place — 0 frames in 250 on both recordings. The phantom
+            # sessions AVID-283 was filed for were AGC (AVID-296), not this.
+            frame_dbfs = rms_dbfs(self._level_filter.apply(chunk.pcm))
             if speech:
                 if not self._speaking:
                     if not self._admits_barge_in(frame_dbfs):
@@ -586,10 +610,19 @@ class AudioService:
         answers are #163 (echo cancellation) or full half-duplex — the point of printing it is so
         nobody spends a bench session turning a knob that was never going to help.
         """
+        # ⚠️ Every level here is the FILTERED one, and the line says so (AVID-283, CLAUDE.md
+        # §7.1: report the quantity you grade). Before the filter these were broadband numbers
+        # carrying ~31 dB of energy no human produced, so a floor printed then and a floor
+        # printed now are not comparable — naming the filter inline is what makes an old bench
+        # log distinguishable from a new one. The cutoff and order are READ from the configured
+        # filter, never restated as literals: a banner quoting a value the run did not use is
+        # drift with a delay fuse.
         _log.info(
-            "echo gate: floor %.1f dBFS, loudest suppressed frame %.1f dBFS "
-            "(%d suppressed), margin %.1f dB [correlation_id=%s]",
+            "echo gate: filtered floor %.1f dBFS (high-pass %.0f Hz x%d), loudest suppressed "
+            "frame %.1f dBFS (%d suppressed), margin %.1f dB [correlation_id=%s]",
             self._echo_floor.dbfs,
+            self._level_filter.cutoff_hz,
+            self._level_filter.order,
             self._loudest_suppressed_dbfs,
             self._suppressed_frames,
             self._barge_in_margin_db,

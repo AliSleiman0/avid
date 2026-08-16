@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import wave
 from array import array
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
+from avid.core.config import Config, load_config
 from avid.domain import (
     AudioPlaybackFinished,
     AudioPlaybackStarted,
@@ -209,6 +212,17 @@ def test_an_odd_trailing_byte_is_ignored_rather_than_raising() -> None:
 
 # --- HighPass: the energy that cannot be speech (AVID-283) ------------------
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_AMBIENT = _REPO_ROOT / "tests" / "assets" / "audio" / "ambient_hum_5s.wav"
+_SIM_TOML = _REPO_ROOT / "config" / "sim.toml"
+_PI_TOML = _REPO_ROOT / "config" / "pi.toml"
+
+
+def _read_wav(path: Path) -> bytes:
+    with wave.open(str(path), "rb") as handle:
+        return handle.readframes(handle.getnframes())
+
+
 _RATE = 16_000
 _FRAME_SAMPLES = 320  # 20 ms at 16 kHz, the shipped [microphone] chunk_ms
 
@@ -403,3 +417,50 @@ def test_a_zero_margin_admits_anything_at_or_above_the_floor() -> None:
     floor.observe(-30.0)
     assert floor.exceeds(-30.0, margin_db=0.0)
     assert not floor.exceeds(-30.1, margin_db=0.0)
+
+
+def test_the_shipped_filter_lifts_the_recorded_ambient_off_the_floor() -> None:
+    """AVID-283 AC-2, asserted against the recording the issue was filed from.
+
+    ``tests/assets/audio/ambient_hum_5s.wav`` is five seconds of the empty rig room: **−18.4 dBFS
+    broadband against −49.1 dBFS in the 300–3400 Hz band where speech lives.** ~31 dB of what
+    ``EchoFloor`` was reading is energy no human produced, and that inflated floor is what defeats
+    the barge-in margin while the robot is speaking — the one moment the margin is consulted.
+
+    Asserted on the real recording rather than a synthetic tone, because a tone proves the filter
+    has a response and this proves it has the *right* response to the thing that was actually
+    measured. Frame by frame, as ``AudioService`` runs it, so the cross-frame state is exercised
+    too — applying it to the whole file in one call would measure a startup transient the running
+    robot never sees.
+
+    ⚠️ The bound is deliberately loose. This pins "the floor drops by tens of dB", not an exact
+    figure: a tighter assertion would fail on a re-recording of the same room and teach whoever
+    hit it to loosen the bound rather than ask why."""
+    pcm = _read_wav(_AMBIENT)
+    filt = HighPass(cutoff_hz=150.0, sample_rate=_RATE, order=3)
+    frame_bytes = _FRAME_SAMPLES * 2
+
+    raw = rms_dbfs(pcm)
+    filtered = rms_dbfs(
+        b"".join(
+            filt.apply(pcm[start : start + frame_bytes])
+            for start in range(0, len(pcm) - frame_bytes + 1, frame_bytes)
+        )
+    )
+
+    assert raw == pytest.approx(-18.4, abs=1.0)  # the issue's own number, reproduced
+    assert raw - filtered >= 20.0
+    assert filtered <= -38.0
+
+
+def test_the_shipped_filter_is_what_the_config_defaults_ship() -> None:
+    """The test above proves 150 Hz x3 works. This proves 150 Hz x3 is what runs.
+
+    Without it the assertion would be about a filter nobody configured — the same gap
+    AVID-180 opened when a bench harness silently never passed the margin it was grading."""
+    gate = Config().gate
+
+    assert (gate.highpass_hz, gate.highpass_order) == (150.0, 3)
+    for profile in (_SIM_TOML, _PI_TOML):
+        loaded = load_config(profile).gate
+        assert (loaded.highpass_hz, loaded.highpass_order) == (150.0, 3)

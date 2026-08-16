@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import wave
 from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
 from typing import NamedTuple
 from uuid import uuid4
 
@@ -47,6 +49,7 @@ from avid.domain import (
     SystemHandlerFailed,
     rms_dbfs,
 )
+from avid.domain.audio import SILENCE_DBFS
 from avid.domain.events import REASON_HANDLER_RAISED
 from avid.services.audio import _MIC_QUEUE_FRAMES, AudioService
 
@@ -62,6 +65,20 @@ _COLLECTED = (
     AudioPlaybackFinished,
     SystemHandlerFailed,
 )
+
+
+def _read_ambient() -> bytes:
+    """The committed empty-room recording AVID-283 was filed from (5 s, 16 kHz mono)."""
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "tests"
+        / "assets"
+        / "audio"
+        / "ambient_hum_5s.wav"
+    )
+    with wave.open(str(path), "rb") as handle:
+        return handle.readframes(handle.getnframes())
+
 
 _SAMPLE_RATE = 16000
 _CHANNELS = 1
@@ -134,6 +151,9 @@ async def _rig(
     silence_hold_ms: int = 20,
     ring_buffer_ms: int = 300,
     barge_in_margin_db: float = 6.0,
+    highpass_hz: float = 150.0,
+    highpass_order: int = 3,
+    mic_pcm: bytes | None = None,
     echo_tail_ms: int = 150,
     loopback: bool = False,
     speaker_factory: Callable[[StateManager], FakeSpeaker] | None = None,
@@ -157,7 +177,10 @@ async def _rig(
         sample_rate=_SAMPLE_RATE,
         channels=_CHANNELS,
         chunk_ms=_CHUNK_MS,
-        pcm=b"\x00" * _FRAME_BYTES,
+        # *mic_pcm* lets a test stream real recorded audio (AVID-283's ambient fixture) instead
+        # of silence. Still explicit rather than FakeMicrophone's default tone, for the reason
+        # above — a caller supplies bytes, nothing synthesises them on the loop.
+        pcm=mic_pcm if mic_pcm is not None else b"\x00" * _FRAME_BYTES,
     )
     spk = speaker_factory(state) if speaker_factory is not None else FakeSpeaker()
     vad = FakeVoiceActivityDetector(script=vad_script)
@@ -174,6 +197,8 @@ async def _rig(
         channels=_CHANNELS,
         silence_hold_ms=silence_hold_ms,
         barge_in_margin_db=barge_in_margin_db,
+        highpass_hz=highpass_hz,
+        highpass_order=highpass_order,
         echo_tail_ms=echo_tail_ms,
         loopback=loopback,
     )
@@ -1134,9 +1159,16 @@ async def test_the_echo_gate_reports_its_calibration_on_every_reply(
             rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
             await rig.service.end_response()
 
-    assert "echo gate: floor" in caplog.text
     assert "1 suppressed" in caplog.text
     assert "margin 6.0 dB" in caplog.text
+    # AVID-283 AC-5: the line reports the FILTERED floor, and names the filter that produced it.
+    # A floor logged before the high-pass and one logged after are not comparable — they differ
+    # by ~31 dB of energy no human produced — so a bench log has to say which it is, or an old
+    # number and a new one silently look like a regression. And the filter is read from the
+    # service's own configured instance, never restated: a banner quoting a value the run did not
+    # use is drift with a delay fuse (CLAUDE.md §7.1).
+    assert "echo gate: filtered floor" in caplog.text
+    assert "high-pass 150 Hz x3" in caplog.text
 
 
 async def test_the_echo_gate_reports_the_CONFIGURED_margin_not_the_default(
@@ -1206,3 +1238,41 @@ async def test_a_quiet_user_talked_over_does_not_interrupt_the_reply() -> None:
 
         assert rig.speaker.stops == 0  # the reply was not cut off
         assert rig.collector.of_type(AudioPlaybackFinished) == []
+
+
+async def test_the_echo_floor_is_measured_on_FILTERED_audio() -> None:
+    """AVID-283 AC-1: the filter is not merely constructed, it is *applied* to what the floor sees.
+
+    Driven end to end through the mic loop with the committed empty-room recording — the one the
+    issue was filed from — so this fails if the level call site ever stops filtering. It is the
+    only test here that would: the `echo gate:` line's wording comes from the configured filter
+    object and keeps printing correctly even when nothing uses it, which is exactly the shape of
+    "a banner describing something the check does not test".
+
+    ``vad_script=[False]`` keeps every frame in the idle branch, which is the one that seeds
+    ``EchoFloor`` — and is also where the real robot spends most of its life."""
+    pcm = _read_ambient()
+    raw = rms_dbfs(pcm)
+    assert raw == pytest.approx(-18.4, abs=1.0)  # the recording is what we think it is
+
+    async with _rig(vad_script=[False], mic_pcm=pcm) as rig:
+        # The mic paces frames on real time, so wait on the observable — the floor leaving its
+        # silence seed — rather than on a sleep. `EchoFloor` adopts its first frame outright, so
+        # one frame through the idle branch is enough to make this meaningful.
+        async with asyncio.timeout(_TIMEOUT_S):
+            # noqa justification (ASYNC110): the module header's "wait on an Event, never a
+            # sleep" rule exists because *publish-then-sleep* is a race. This is the other case
+            # — the condition is a service attribute the idle branch updates, and **no event is
+            # published for it**, so there is nothing to wait on. Inventing one to satisfy the
+            # linter would put test-only machinery on the hot path. Bounded by the timeout above,
+            # so a wedged loop still fails fast rather than hanging.
+            while rig.service._echo_floor.dbfs <= SILENCE_DBFS:  # noqa: ASYNC110
+                await asyncio.sleep(0.005)
+        floor = rig.service._echo_floor.dbfs
+
+    # Filtered, the same audio sits tens of dB lower. A floor anywhere near the raw level means
+    # the level path is reading broadband again, which is the defect.
+    assert floor <= -30.0, (
+        f"echo floor {floor:.1f} dBFS is close to the raw {raw:.1f} — the level measurement is "
+        f"not being high-passed (AVID-283)"
+    )

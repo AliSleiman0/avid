@@ -958,6 +958,8 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         channels=1,
         silence_hold_ms=200,
         barge_in_margin_db=6.0,
+        highpass_hz=150.0,
+        highpass_order=3,
         echo_tail_ms=150,
         loopback=False,
     )
