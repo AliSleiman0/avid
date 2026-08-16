@@ -94,8 +94,10 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioPlaybackStarted,
     AudioSpeechEnded,
+    ConversationAssistantResponded,
     ConversationSessionLost,
     ConversationTurnEnded,
+    ConversationUserTranscribed,
     Event,
     Fact,
     RobotState,
@@ -209,7 +211,18 @@ class _ConversationCollector:
         self.degraded_exited = 0
         self.downtime_s = 0.0
         self.barge_ins = 0
+        # What was actually SAID, in order (AVID-216 AC-2). The gate's wording is that the
+        # recordings *are* the artefact, and until now this harness kept latencies and costs
+        # and threw the conversation away — so 'recognizably different responses' rested on a
+        # listener's memory and could not be re-read, quoted, or compared against a later run.
+        self.transcript: list[tuple[str, str]] = []
         self._arrived = asyncio.Event()
+
+    async def on_user_transcribed(self, event: Event) -> None:
+        self.transcript.append(("user", str(getattr(event, "text", ""))))
+
+    async def on_assistant_responded(self, event: Event) -> None:
+        self.transcript.append(("robot", str(getattr(event, "text", ""))))
 
     async def on_speech_ended(self, event: Event) -> None:
         self._ended_ns[event.correlation_id] = event.monotonic_ns
@@ -406,6 +419,7 @@ def _report_conversation(
     barge_ins: int = 0,
     recovery: _Recovery | None = None,
     protocol_errors: Sequence[str] = (),
+    transcript: Sequence[tuple[str, str]] = (),
 ) -> int:
     """Print the per-turn table, the O1 histogram and the O7 projection; return the exit code.
 
@@ -431,6 +445,23 @@ def _report_conversation(
             f"{turn.elapsed_ms:>7.0f} ms"
         )
     print(f"{'-' * 6} {'-' * 14} {'-' * 10} {'-' * 10}")
+
+    # The conversation itself (AVID-216 AC-2). "Record both; the recordings are the artefact" —
+    # and until this was added the harness kept every number about the conversation and none of
+    # the conversation, so "recognizably different responses" rested on a listener's memory and
+    # could not be re-read, quoted in an issue, or compared against a later run.
+    #
+    # ⚠️ Printed BEFORE the turn-count verdicts below, and that placement is the point. My first
+    # version printed it at the end, where a short run ("FAIL: captured 1/2 turns") returned
+    # before ever reaching it — so the artefact vanished in exactly the runs whose transcript you
+    # most want to read. Same shape as the early-return bug this file already carries a warning
+    # about: a criterion hidden behind an unrelated failure.
+    if transcript:
+        print()
+        print(f"--- transcript ({len(transcript)} lines) ---")
+        for who, text in transcript:
+            print(f"  {who:<6}{text}")
+        print()
 
     if not turns_seen:
         print("FAIL: no turns captured")
@@ -508,12 +539,25 @@ def _report_conversation(
     # sitting inside every sample, not a property of our code. Printing O1 alone invites the two
     # possible failures to be read as one: a robot that is slow because the pipeline is slow, and
     # a robot that is slow because it was told to wait. Only the first is a defect here.
+    #
+    # ⚠️ Only printed when the server VAD is actually an authority (AVID-194). The caller passes
+    # 0.0 once `[ai.turn_detection] type = "none"`, because that key is then **inert** — the value
+    # is still in the file and still parses, and subtracting it from O1 would be arithmetic on a
+    # number the run did not use. Caught at the M6 gate, where the line was still claiming
+    # "500 ms is the configured server-VAD commit delay" on a run with no server VAD at all.
+    # CLAUDE.md §7.1: report the quantity you grade, and read config rather than restating it.
     if server_vad_ms:
         print(
             f"    of which {server_vad_ms:.0f} ms is the configured server-VAD commit delay "
             f"([ai.turn_detection] silence_duration_ms);\n"
             f"    P50 net of it {p50 - server_vad_ms:.0f} ms against §2.8.1's 400 ms "
             f"turn-detection + first-token line"
+        )
+    else:
+        print(
+            "    the local VAD is the only turn-taking authority "
+            '([ai.turn_detection] type = "none", AVID-194), so O1 now contains the whole\n'
+            "    commit-to-first-audio round trip that the server's own clock used to hide"
         )
     print(
         f"O7  projected ${projected_monthly_usd:.2f}/month vs ${budget_usd:.0f} budget, "
@@ -776,6 +820,16 @@ async def _run_conversation(
         (AudioSpeechEnded, collector.on_speech_ended, "speech_ended"),
         (AudioPlaybackStarted, collector.on_playback_started, "playback_started"),
         (AudioPlaybackFinished, collector.on_playback_finished, "playback_finished"),
+        (
+            ConversationUserTranscribed,
+            collector.on_user_transcribed,
+            "user_transcribed",
+        ),
+        (
+            ConversationAssistantResponded,
+            collector.on_assistant_responded,
+            "assistant_responded",
+        ),
         (ConversationTurnEnded, collector.on_turn_ended, "turn_ended"),
         (ConversationSessionLost, collector.on_session_lost, "session_lost"),
         (SystemDegradedEntered, collector.on_degraded_entered, "degraded_entered"),
@@ -821,11 +875,19 @@ async def _run_conversation(
         # legitimate bench configuration and must still be checked. FakeSpeaker.play returns
         # instantly, so elapsed-vs-played would false-fail there.
         check_playback=config.adapters.speaker != "fake",
-        server_vad_ms=float(config.ai.turn_detection.silence_duration_ms),
+        # Zero unless the server is genuinely deciding turn ends (AVID-194). The key survives in
+        # the config file when `type = "none"` and parses perfectly; passing it anyway would put
+        # a number in the report that describes a configuration this run did not have.
+        server_vad_ms=(
+            float(config.ai.turn_detection.silence_duration_ms)
+            if config.ai.turn_detection.server_is_an_authority
+            else 0.0
+        ),
         live=live,
         barge_ins=collector.barge_ins,
         recovery=collector.recovery if require_recovery else None,
         protocol_errors=protocol_errors.messages,
+        transcript=collector.transcript,
     )
 
 
