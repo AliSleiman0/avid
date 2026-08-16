@@ -431,3 +431,37 @@ def test_the_shipped_migration_already_carries_the_three_tables(tmp_path: Path) 
         assert "idx_triggers_due" in indexes
     finally:
         conn.close()
+
+
+async def test_set_next_fire_moves_the_occurrence_without_faking_a_fire(
+    store: SqliteTriggerStore,
+) -> None:
+    """Deliberately not ``record_fired``, and the distinction is load-bearing.
+
+    A **suppressed** proposal did not fire. Recording it as one would stamp ``last_fired_at`` and
+    increment ``fire_count`` — corrupting rule 5's own-cooldown arithmetic (it would think the
+    trigger had just spoken) and inflating the only counter that says how often this reminder has
+    actually said anything.
+    """
+    fact_id = await _fact(store)
+    trigger_id = await store.upsert_routine_trigger(
+        fact_id, next_fire_at=1_800_000_000, cooldown_s=3600, at=_TOLD_US
+    )
+
+    await store.set_next_fire(trigger_id, next_fire_at=1_800_086_400)
+    record = await store.get(trigger_id)
+    assert record is not None
+    assert record.next_fire_at == 1_800_086_400
+    assert record.last_fired_at is None, "nothing fired"
+    assert record.fire_count == 0, "and nothing may claim it did"
+
+
+async def test_set_next_fire_can_retire_a_trigger(store: SqliteTriggerStore) -> None:
+    """``None`` for a rule that has run out — the row leaves ``idx_triggers_due``'s partial
+    predicate and the scheduler stops considering it, with no special case anywhere."""
+    fact_id = await _fact(store)
+    trigger_id = await store.upsert_routine_trigger(
+        fact_id, next_fire_at=1_800_000_000, cooldown_s=3600, at=_TOLD_US
+    )
+    await store.set_next_fire(trigger_id, next_fire_at=None)
+    assert await store.enabled_triggers() == []

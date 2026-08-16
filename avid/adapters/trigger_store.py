@@ -194,6 +194,17 @@ class SqliteTriggerStore:
 
         await self._run(_fired)
 
+    async def set_next_fire(self, trigger_id: int, *, next_fire_at: int | None) -> None:
+        def _set() -> None:
+            conn = self._conn_sync()
+            with conn:
+                conn.execute(
+                    "UPDATE triggers SET next_fire_at = ? WHERE id = ?",
+                    (next_fire_at, trigger_id),
+                )
+
+        await self._run(_set)
+
     async def set_backoff(
         self, trigger_id: int, *, ignore_streak: int, cooldown_s: int
     ) -> None:

@@ -566,3 +566,90 @@ async def test_the_gate_fails_if_nothing_writes_the_audit_row(db: Path) -> None:
         )
     finally:
         await _teardown(rig)
+
+
+async def test_it_fires_again_the_next_morning(db: Path) -> None:
+    """⚠️ The regression that mattered, and the one every other test in this file missed.
+
+    ``SchedulerLoop`` *consumes* a heap entry when it fires it — correctly, a due time is a
+    one-shot — so something must book the next one. Nothing did. Every trigger fired **at most once
+    per process lifetime**, and the coffee reminder would have gone quiet on the second morning
+    with nothing in the log to say why.
+
+    Every test here asserted a single fire, which is exactly the mistake ``domain/state.py``'s own
+    comments describe: walking an arc only as far as the row under test. PMP's O3 asks for 7/7
+    mornings; this is two of them, which is the smallest number that can tell the difference.
+    """
+    clock = FakeClock()
+    rig = await _compose(db, clock)
+    try:
+        await _tell_it_about_coffee(rig)
+        await _settle(rig)
+
+        for morning in (1, 2):
+            await rig.clock.advance_to("07:50")
+            await _wake_and_see_someone(rig)
+            await rig.clock.advance_to("07:55")
+            await _wait_until(
+                rig,
+                lambda n=morning: (
+                    len([e for e in rig.events if isinstance(e, BehaviorTriggerFired)])
+                    >= n
+                ),
+                what=f"the reminder firing on morning {morning}",
+            )
+            # Back to IDLE the way a finished turn gets there, so rule 2 does not veto tomorrow.
+            await rig.state.transition(
+                Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=uuid4()
+            )
+            await _settle(rig)
+
+        fired = [e for e in rig.events if isinstance(e, BehaviorTriggerFired)]
+        assert len(fired) == 2, (
+            "a reminder that fires once is a reminder that stopped working"
+        )
+    finally:
+        await _teardown(rig)
+
+
+async def test_a_suppressed_morning_does_not_retire_the_trigger(db: Path) -> None:
+    """The nastier half of the same bug.
+
+    A proposal vetoed by rule 3 — nobody in the room — used to leave the trigger un-armed *and*
+    with a stale ``next_fire_at``, so one empty morning retired the reminder permanently. That is
+    the inverse of R-08's failure and every bit as fatal: the robot goes quiet, correctly the first
+    time and wrongly forever after, and §10.6's log shows a single suppression that looks entirely
+    reasonable.
+    """
+    clock = FakeClock()
+    rig = await _compose(db, clock)
+    try:
+        await _tell_it_about_coffee(rig)
+        await _settle(rig)
+
+        # Morning one: awake, but nobody has ever been seen.
+        await rig.state.transition(Trigger.SYSTEM_STARTED, correlation_id=uuid4())
+        await rig.clock.advance_to("07:55")
+        await _wait_until(
+            rig,
+            lambda: any(isinstance(e, BehaviorProactiveSuppressed) for e in rig.events),
+            what="the presence veto",
+        )
+
+        # Morning two: someone is there.
+        await rig.clock.advance_to("07:50")
+        await _wake_and_see_someone(rig)
+        await rig.clock.advance_to("07:55")
+        await _wait_until(
+            rig,
+            lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+            what="the reminder firing the morning after it was suppressed",
+        )
+
+        (trigger,) = await rig.triggers.enabled_triggers()
+        assert trigger.next_fire_at is not None, (
+            "a suppressed trigger must still hold a future occurrence, or the boot rebuild "
+            "cannot restore it either"
+        )
+    finally:
+        await _teardown(rig)

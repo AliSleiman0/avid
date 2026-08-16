@@ -394,6 +394,11 @@ async def test_every_proposal_writes_exactly_one_row(rig: Rig) -> None:
             ),
             what=f"proposal {expected} being decided",
         )
+        # ⚠️ And let the service's own re-arm land before staging the next round. Since #337 a
+        # decided proposal re-books the trigger for its next occurrence, and that `schedule()`
+        # OVERWRITES whatever this loop set — so scheduling the next round first is a race the
+        # test loses intermittently. It lost it on Linux CI and won it here, which is the tell.
+        await _settle(rig)
         proposals += 1
 
     def _rows() -> list[tuple[str, str | None]]:

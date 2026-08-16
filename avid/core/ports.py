@@ -707,6 +707,16 @@ class TriggerRepository(Protocol):
         then falls outside ``idx_triggers_due`` and the scheduler stops considering it."""
         ...
 
+    async def set_next_fire(self, trigger_id: int, *, next_fire_at: int | None) -> None:
+        """Move a trigger's next occurrence without touching its fire history.
+
+        Deliberately separate from :meth:`record_fired`, which also stamps ``last_fired_at`` and
+        increments ``fire_count``. A **suppressed** proposal did not fire — recording it as a fire
+        would corrupt rule 5's own-cooldown arithmetic and inflate the only counter that says how
+        often this trigger has actually spoken.
+        """
+        ...
+
     async def set_backoff(
         self, trigger_id: int, *, ignore_streak: int, cooldown_s: int
     ) -> None:
