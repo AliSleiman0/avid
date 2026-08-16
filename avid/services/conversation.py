@@ -310,7 +310,38 @@ class ConversationService:
                 # Cold session (§6.2.3). The §6.7-path-1 memory block is composed and injected here,
                 # overlapping the connect (#126); the client gathers the two. Empty memory / a failed
                 # fetch degrades to the stateless M5 instruction (AC-4/AC-6).
-                await self._client.open(memory=self._compose_memory_block())
+                #
+                # A failed connect is handled HERE rather than escaping to the bus (AVID-188).
+                # It used to propagate as a raw OSError out of the handler — four full tracebacks
+                # in one bench outage, one per utterance — and the bus did exactly its job:
+                # logged, swallowed, republished `system.handler_failed`. That is the reliability
+                # property working, and it is still the wrong place for this. **Speaking while
+                # the network is down is the expected outcome, not an unexpected handler crash**,
+                # and three things follow from letting it escape: the DoD's "new failure paths
+                # log with a correlation ID" is met only by luck (the id appears in the bus's own
+                # preamble); `system.handler_failed` is the event the bus reserves for genuine
+                # subscriber bugs, so routine network failure inflates the one signal that exists
+                # to catch them; and four tracebacks per outage is enough noise to hide a real
+                # defect underneath — this run had two other findings under them.
+                #
+                # ⚠️ Deliberately `OSError` at the connect, not `except Exception` around the
+                # handler body. The bus's swallow-and-republish exists precisely so genuine bugs
+                # stay visible, and widening this would re-hide them one layer down.
+                try:
+                    await self._client.open(memory=self._compose_memory_block())
+                except OSError as exc:
+                    # Stay degraded and stay quiet. The user has already been told the connection
+                    # is gone; replaying a cue on every utterance would be its own annoyance
+                    # (§6.9's phrases promise a return, and there is no background reconnect loop
+                    # to make that promise true — AVID-105). The next rising edge retries.
+                    _log.warning(
+                        "session open failed while degraded=%s, staying degraded: %s "
+                        "[correlation_id=%s]",
+                        self._degraded,
+                        exc,
+                        event.correlation_id,
+                    )
+                    return
                 self._session_open = True
                 self._pump_task = spawn(self._pump(), name="ConversationService.pump")
                 self._mic_task = spawn(

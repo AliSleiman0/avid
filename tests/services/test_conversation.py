@@ -1168,6 +1168,74 @@ async def test_no_thinking_cue_when_the_reply_is_already_playing() -> None:
         )
 
 
+class _UnreachableClient(ReplayRealtimeClient):
+    """A replay client whose ``open`` fails the way a dead network does (AVID-188).
+
+    ``OSError`` specifically, and with a message shaped like the real one, because the fix
+    catches that type at that call and nothing wider — a broad ``except Exception`` around the
+    handler would re-hide the genuine subscriber bugs the bus's swallow-and-republish exists to
+    surface."""
+
+    def __init__(self, *, clock: FakeClock) -> None:
+        super().__init__(clock=clock, timeline=())
+        self.open_attempts = 0
+
+    async def open(self, *, memory: Awaitable[str] | None = None) -> None:
+        self.open_attempts += 1
+        if memory is not None:
+            await (
+                memory
+            )  # the real client resolves it concurrently; don't leak the coroutine
+        raise OSError(
+            "Multiple exceptions: [Errno 111] Connect call failed "
+            "('162.159.140.245', 443)"
+        )
+
+
+async def test_a_failed_reconnect_stays_degraded_instead_of_escaping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AVID-188: speaking while the network is down is expected, not a handler crash.
+
+    On the #106 AC-6 recovery run the owner spoke four times while degraded, and each
+    ``client.open()`` raised ``OSError`` **out of** the handler — four full tracebacks. The bus
+    did exactly its job (logged, swallowed, republished ``system.handler_failed``), which is why
+    the run survived and is also why this is worth fixing at the source:
+
+    * the DoD requires new failure paths to *"log with a correlation ID"*, and a raw traceback
+      through the bus meets that only by luck — the id appears in the bus's own preamble;
+    * ``system.handler_failed`` is the event the bus reserves for genuine subscriber bugs, so
+      routine network failure inflates the one signal that exists to catch them;
+    * four tracebacks per outage is enough noise to hide a real defect, and that run had two
+      other findings underneath them.
+
+    The assertion is therefore about **where** the failure is handled, not merely that the robot
+    survived: no ``system.handler_failed``, one WARNING carrying the turn's correlation id, and
+    the session still closed so the next rising edge retries."""
+    clock = FakeClock()
+    client = _UnreachableClient(clock=clock)
+
+    async with _rig(client=client) as rig:
+        turn = uuid4()
+        with caplog.at_level(logging.WARNING, logger="avid.services.conversation"):
+            await _speak(rig, correlation_id=turn)
+            await rig.collector.settle()
+
+        assert client.open_attempts == 1
+        assert rig.service._session_open is False  # nothing half-opened
+        assert rig.collector.of_type(SystemHandlerFailed) == [], (
+            "a routine network failure reached system.handler_failed — the event the bus "
+            "reserves for genuine subscriber bugs"
+        )
+        assert str(turn) in caplog.text
+        assert "staying degraded" in caplog.text
+
+        # The next utterance retries rather than giving up on the session for good.
+        await _speak(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+        assert client.open_attempts == 2
+
+
 async def test_a_fast_turn_plays_no_thinking_cue_at_all() -> None:
     """AVID-170 AC-1/AC-5, the near edge: first audio at 300 ms against a 600 ms threshold.
 
