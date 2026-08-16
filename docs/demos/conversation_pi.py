@@ -818,6 +818,7 @@ async def _run_conversation(
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone="Asia/Beirut",
+        hold_open_s=30.0,
         think_timeout_s=config.gate.think_timeout_s,
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
         thinking_delay_ms=config.cues.thinking_delay_ms,

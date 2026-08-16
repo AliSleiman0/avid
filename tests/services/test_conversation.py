@@ -53,6 +53,7 @@ from avid.domain import (
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
+    BehaviorTriggerFired,
     ConversationAssistantResponded,
     ConversationSessionLost,
     ConversationTurnEnded,
@@ -196,6 +197,7 @@ async def _rig(
     think_timeout_s: float = 3600.0,
     server_turn_detection: bool = False,
     thinking_delay_ms: int = 0,
+    hold_open_s: float = 30.0,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -230,6 +232,7 @@ async def _rig(
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
         default_timezone="Asia/Beirut",
+        hold_open_s=hold_open_s,
         think_timeout_s=think_timeout_s,
         server_turn_detection=server_turn_detection,
         thinking_delay_ms=thinking_delay_ms,
@@ -334,9 +337,12 @@ async def _advance_until(
 
 
 async def test_service_shape_declares_the_audio_origins_and_barge_in_feed() -> None:
-    """AC-1/AC-2: name plus the two ``audio.*`` origins that exist at M5 and the
-    ``audio.playback_finished`` barge-in feed (#104, SDS §9.1.3). The ``behavior.trigger_fired``
-    origin has no Event type yet — it is an M6 seam."""
+    """AC-1/AC-2: name plus the two ``audio.*`` origins, the ``audio.playback_finished`` barge-in
+    feed (#104), and — since #239 — ``behavior.trigger_fired``.
+
+    That last one was a *declared seam* from M5 until M10: the second of §9.1.1's two turn origins,
+    documented in this service's own ``subscriptions()`` docstring and deliberately unwired,
+    because the event type did not exist. It exists now, and the seam is a subscription."""
     clock = FakeClock()
     async with _rig(client=_replay("two_turn", clock=clock)) as rig:
         assert rig.service.name == "ConversationService"
@@ -345,11 +351,13 @@ async def test_service_shape_declares_the_audio_origins_and_barge_in_feed() -> N
             AudioSpeechStarted,
             AudioSpeechEnded,
             AudioPlaybackFinished,
+            BehaviorTriggerFired,
         }
         assert {s.name for s in subs} == {
             "ConversationService.speech_started",
             "ConversationService.speech_ended",
             "ConversationService.playback_finished",
+            "ConversationService.trigger_fired",
         }
 
 
@@ -554,6 +562,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         default_timezone="Asia/Beirut",
+        hold_open_s=30.0,
         think_timeout_s=3600.0,
         server_turn_detection=False,
         thinking_delay_ms=0,
@@ -980,6 +989,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         default_timezone="Asia/Beirut",
+        hold_open_s=30.0,
         think_timeout_s=3600.0,
         server_turn_detection=False,
         thinking_delay_ms=0,
@@ -1641,3 +1651,134 @@ async def test_speech_ended_without_a_session_is_a_noop(event_pair: bool) -> Non
         )
         await rig.collector.settle()
         assert not rig.client.opened  # nothing opened a session
+
+
+async def _fire_trigger(rig: Rig, *, correlation_id: UUID, trigger_id: int = 7) -> None:
+    """Publish ``behavior.trigger_fired`` as ``BehaviorService`` would, and let it land."""
+    await rig.bus.publish(
+        BehaviorTriggerFired(
+            **envelope(
+                clock=rig.clock, correlation_id=correlation_id, source="BehaviorService"
+            ),
+            trigger_id=trigger_id,
+        )
+    )
+    await _yield(rig)
+
+
+async def _yield(rig: Rig, ticks: int = 40) -> None:
+    """Let the bus deliver and the opened session's tasks start, with no virtual time passing.
+
+    Deliberately not an ``advance``: the proactive path's own hold-open timer is under test in one
+    of these cases, and a drain that moved the clock would be the thing closing the session.
+    """
+    for _ in range(ticks):
+        await asyncio.sleep(0)
+
+
+# --- §10.7: the turn nobody asked for (#239) -----------------------------------------------
+
+
+async def test_a_trigger_opens_a_session_and_asks_for_a_reply() -> None:
+    """UC-03's mechanism. No speech, no mic audio, no committed buffer — a clock opened this."""
+    clock = FakeClock()
+    # An empty timeline, deliberately: the recorded fixtures replay a *user* conversation, and
+    # this path is defined by the absence of one. Nothing should happen here that the trigger did
+    # not cause.
+    async with _rig(
+        client=ReplayRealtimeClient(clock=clock, timeline=()), initial=RobotState.IDLE
+    ) as rig:
+        await _fire_trigger(rig, correlation_id=uuid4())
+
+        assert rig.client.proactive_turns == 1
+        assert rig.client.committed_turns == 0, (
+            "§10.7: no user turn may be committed on this path"
+        )
+        started = [
+            e for e in rig.collector.events if isinstance(e, ConversationTurnStarted)
+        ]
+        assert [e.initiator for e in started] == ["proactive"]
+
+
+async def test_the_proactive_turn_adopts_the_triggers_correlation_id() -> None:
+    """``behavior.trigger_fired`` is the head of this turn (§9.1.1) and ``BehaviorService`` minted
+    the id there. Minting a second one here would split one turn into two in every log, every
+    episode and every latency measurement — the one thing a correlation id exists to prevent."""
+    clock = FakeClock()
+    # An empty timeline, deliberately: the recorded fixtures replay a *user* conversation, and
+    # this path is defined by the absence of one. Nothing should happen here that the trigger did
+    # not cause.
+    async with _rig(
+        client=ReplayRealtimeClient(clock=clock, timeline=()), initial=RobotState.IDLE
+    ) as rig:
+        corr = uuid4()
+        await _fire_trigger(rig, correlation_id=corr)
+
+        started = [
+            e for e in rig.collector.events if isinstance(e, ConversationTurnStarted)
+        ]
+        assert started and started[0].correlation_id == corr
+
+
+async def test_a_proactive_turn_is_visible_to_the_episode_recorder() -> None:
+    """The bug the ``_begin_turn`` extraction fixes.
+
+    ``conversation.turn_started`` used to be published *only* from ``_on_user_transcript``, and a
+    proactive turn produces no user transcript — so before #239 the turn would have opened with
+    ``_turn_active`` unset, reported ``duration_ms=0`` at ``turn_ended``, and been invisible to
+    ``EpisodeRecorder``. A turn the robot *chose* to have, which the transcript does not contain,
+    is the worst kind to lose.
+    """
+    clock = FakeClock()
+    # An empty timeline, deliberately: the recorded fixtures replay a *user* conversation, and
+    # this path is defined by the absence of one. Nothing should happen here that the trigger did
+    # not cause.
+    async with _rig(
+        client=ReplayRealtimeClient(clock=clock, timeline=()), initial=RobotState.IDLE
+    ) as rig:
+        # Move the clock off zero first: the mark is a monotonic reading, and a fresh FakeClock
+        # reads 0, so "was it latched" and "is it still the sentinel" would be the same assertion.
+        await rig.clock.advance(1.0)
+        await _fire_trigger(rig, correlation_id=uuid4())
+
+        assert rig.service._turn_active is True
+        assert rig.service._turn_started_ns == rig.clock.monotonic_ns() > 0
+
+
+async def test_a_proactive_session_closes_after_the_hold_open_window() -> None:
+    """§10.7 steps 5-6: held open for a reply, then closed — on ``hold_open_s``, **not** on
+    ``session_idle_close_s``.
+
+    A reactive session is quiet because the user is thinking; a proactive one is quiet because
+    nobody answered, and holding a socket open on the chance that they will is how you pay for
+    silence. The idle close here is set to 600 s precisely so that a session closing on *it*
+    rather than on the 30 s hold would blow the step budget and fail.
+    """
+    clock = FakeClock()
+    async with _rig(
+        client=ReplayRealtimeClient(clock=clock, timeline=()),
+        initial=RobotState.IDLE,
+        session_idle_close_s=600,
+        hold_open_s=30.0,
+    ) as rig:
+        await _fire_trigger(rig, correlation_id=uuid4())
+        assert rig.service._session_open is True
+
+        await _advance_until(
+            rig, lambda: not rig.service._session_open, step_s=5.0, max_steps=12
+        )
+        assert rig.service._session_open is False
+
+
+async def test_a_trigger_arriving_mid_session_is_dropped() -> None:
+    """Rule 2 should have vetoed, so reaching here means the world moved between the gate's check
+    and the fire. Dropping it is right: interleaving two turns on one socket is worse than a missed
+    reminder, which §10.1 already calls the cheap error."""
+    clock = FakeClock()
+    async with _rig(client=_replay("two_turn", clock=clock)) as rig:
+        await _speak(rig, correlation_id=uuid4())
+        await _yield(rig)
+        assert rig.service._session_open is True
+
+        await _fire_trigger(rig, correlation_id=uuid4())
+        assert rig.client.proactive_turns == 0
