@@ -24,7 +24,8 @@ from typing import Protocol, runtime_checkable
 
 import pytest
 
-from avid.adapters.microphone import FakeMicrophone
+from avid.adapters.microphone import FakeMicrophone, _card_name
+from avid.core.config import load_config
 from avid.core.hal import AudioChunk
 from avid.core.ports import Microphone
 
@@ -199,3 +200,43 @@ def test_from_wav_rejects_non_16bit(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="16-bit"):
         FakeMicrophone.from_wav(path)
+
+
+_PI_TOML = Path(__file__).resolve().parents[2] / "config" / "pi.toml"
+
+
+# --- the capture-mixer check (AVID-296) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        ("plughw:CARD=Device,DEV=0", "Device"),  # the shipped pi.toml value
+        ("plughw:CARD=seeed2micvoicec,DEV=0", "seeed2micvoicec"),
+        ("hw:CARD=Device", "Device"),
+        ("default", None),  # no card named — the check skips rather than guessing
+        ("hw:1,0", None),  # index form, no CARD= to read
+        ("plughw:CARD=,DEV=0", None),  # empty is not a card name
+    ],
+)
+def test_card_name_is_parsed_from_the_device_string(
+    device: str, expected: str | None
+) -> None:
+    """The one pure piece of AVID-296's check, so it is testable off-Pi.
+
+    Everything around it needs ALSA and cannot run here; this is the part that decides *which*
+    card gets inspected, and getting it wrong would silently skip the check on the very rig it
+    was written for."""
+    assert _card_name(device) == expected
+
+
+def test_the_shipped_pi_device_names_a_card() -> None:
+    """A guard against the check quietly becoming a no-op.
+
+    If ``[microphone] device`` were ever changed to ``default`` or an index form, ``_card_name``
+    returns ``None`` and the AGC inspection skips — with a DEBUG line nobody reads. That is
+    precisely the silent-skip failure AVID-296 is about, one level up, so the shipped value is
+    asserted rather than assumed."""
+    config = load_config(_PI_TOML)
+
+    assert _card_name(config.microphone.device) == "Device"

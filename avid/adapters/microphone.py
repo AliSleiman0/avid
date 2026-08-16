@@ -33,6 +33,7 @@ only by the composition root or a test fixture (P3); everything else depends on 
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import struct
 import wave
@@ -41,6 +42,24 @@ from pathlib import Path
 from typing import Any
 
 from avid.core.hal import AudioChunk
+
+_log = logging.getLogger(__name__)
+
+# The ALSA capture control AVID-296 is about. Named once so the check, the log line and the
+# operations doc cannot drift apart.
+_AGC_CONTROL = "Auto Gain Control"
+
+
+def _card_name(device: str) -> str | None:
+    """Pull ``Device`` out of ``plughw:CARD=Device,DEV=0``. ``None`` when the string names no card.
+
+    Pure, so the parsing is unit-tested off-Pi even though everything around it needs ALSA."""
+    for part in device.split(","):
+        key, _, value = part.partition("=")
+        if key.rsplit(":", 1)[-1].upper() == "CARD" and value:
+            return value
+    return None
+
 
 # The one PCM sample format the adapters exchange: signed 16-bit little-endian, 2 bytes per
 # sample per channel — what the ReSpeaker captures and what the Realtime API / VAD expect.
@@ -186,6 +205,7 @@ class AlsaMicrophone:
         # ADR-008). pyalsaaudio has no stubs; mypy resolves it via ignore_missing_imports.
         import alsaaudio
 
+        self._warn_if_capture_gain_is_automatic()
         return alsaaudio.PCM(
             type=alsaaudio.PCM_CAPTURE,
             mode=alsaaudio.PCM_NORMAL,
@@ -195,3 +215,61 @@ class AlsaMicrophone:
             format=alsaaudio.PCM_FORMAT_S16_LE,
             periodsize=self._periodsize,
         )
+
+    def _warn_if_capture_gain_is_automatic(self) -> None:
+        """Log loudly if ALSA's capture **Auto Gain Control** is on (AVID-296).
+
+        ⚠️ **This is the check that would have saved a milestone.** AGC amplifies a quiet room
+        until the capture path's own noise floor looks like speech. Measured on this rig,
+        2026-08-16, empty room, nobody speaking:
+
+            AGC on   -18.4 .. -16.9 dBFS broadband,  151/750 frames called SPEECH by Silero
+            AGC off  -36.4 dBFS broadband,             2/1250 frames  (AVID-77's 0.16% rate)
+
+        A fifth of an *empty room* classified as speech opens sessions the user never started —
+        the model has nothing to answer, the §6.9 deadline fires at 10 s, the robot degrades and
+        reconnects, repeatedly. That is AVID-283's nine dropped turns, and it was filed as a mains
+        hum problem for a fortnight because **nothing anywhere reported this switch**.
+
+        Mixer state is *machine* state, not repo state — the class `deploy/PI_OPERATIONS.md`
+        exists for. It survives reboots via ``alsactl``, is invisible in any diff, and fails with
+        no error at all.
+
+        **Logged, not fatal** (§3.12.3: nothing but a bad key at boot stops the robot). A
+        companion that refuses to start over a mixer setting is its own defect, and this one is
+        fixable at runtime without a restart. It is ERROR rather than WARNING because the robot
+        is, at that point, hearing a room that is not there.
+
+        Entirely best-effort: any failure to inspect the mixer is a DEBUG line and nothing more.
+        A diagnostic that could break capture would be worse than the defect it looks for.
+        """
+        try:
+            import alsaaudio
+
+            card = _card_name(self._device)
+            if card is None:
+                _log.debug(
+                    "capture device %r names no CARD= — skipping the AGC check (AVID-296)",
+                    self._device,
+                )
+                return
+            index = alsaaudio.cards().index(card)
+            if _AGC_CONTROL not in alsaaudio.mixers(cardindex=index):
+                return  # this capture device has no AGC control; nothing to check
+            mixer = alsaaudio.Mixer(control=_AGC_CONTROL, cardindex=index)
+            if any(mixer.getmute()):
+                return  # muted == the switch is OFF, which is what we want
+            _log.error(
+                "ALSA capture %r has %r ENABLED on card %r. It amplifies a quiet room until the "
+                "noise floor reads as speech: measured on this rig, an empty room went -36 -> -17 "
+                "dBFS and Silero called 20%% of it speech (2/1250 -> 151/750 frames). Expect "
+                "sessions that open on nothing and degrade after the §6.9 timeout. Fix with "
+                "`amixer -c %s sset %r off && sudo alsactl store` (AVID-296, AVID-283).",
+                self._device,
+                _AGC_CONTROL,
+                card,
+                card,
+                _AGC_CONTROL,
+            )
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must never break capture
+            _log.debug("could not inspect the capture mixer (AVID-296): %s", exc)

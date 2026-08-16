@@ -107,6 +107,11 @@ session_idle_close_s = 30
 # ⚠️ One run per value, and nothing between 3 and 6 has been tried, so this is the best-supported
 # number rather than a proven optimum. ⚠️ Every figure recorded before 2026-08-01 said "6.0"
 # whatever this file held -- the bench harness never passed it (#180).
+# ⚠️ UNCALIBRATED (AVID-296). Tuned on 2026-08-15 with the capture mixer's `Auto Gain Control`
+# in an UNKNOWN state — and AGC moves this rig's empty-room floor by ~20 dB (-36 -> -17 dBFS).
+# A margin measured at one gain is not valid at another, so treat this number as provisional
+# until it is re-derived with AGC provisioned off and a person actually speaking. It is left at
+# the shipped value rather than guessed at: a guess would be indistinguishable from calibration.
 barge_in_margin_db   = 3.0
 echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
 # §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
