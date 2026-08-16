@@ -95,11 +95,15 @@ def test_speech_started_is_legal_from_every_state_a_turn_can_begin_in() -> None:
     legal source of a rising edge — IDLE and SLEEPING (a turn opens), SPEAKING (barge-in) and,
     since AVID-158, THINKING (the user resumes before the reply).
 
-    LISTENING is **absent on purpose**: the rising and falling edges strictly alternate
-    (``_run`` calls ``_begin_speech`` only when ``not self._speaking``, and only
-    ``_end_speech`` clears that), so a second rising edge from LISTENING is unreachable. It
-    appeared five times in the AVID-158 bench trace *only* because the falling edge did not
-    leave LISTENING. An unreachable self-loop would be a lie in the normative table.
+    ⚠️ **This docstring used to claim LISTENING was absent on purpose, and that claim was
+    false** (AVID-173). It read: *"the rising and falling edges strictly alternate … so a second
+    rising edge from LISTENING is unreachable. An unreachable self-loop would be a lie in the
+    normative table."* The alternation argument is correct **within ``AudioService``** and says
+    nothing about where the *machine* is. AVID-162's recovery row lands in LISTENING, and if both
+    of that turn's edges were spent while DEGRADED there is no falling edge left to move it on —
+    so the next utterance's rising edge arrives in LISTENING. Traced on the Pi, 3 times in one
+    180 s run. LISTENING is now a self-loop, and it is reachable, which is the test the table
+    applies to itself.
 
     DEGRADED is a fifth source since AVID-162, but it does **not** open a turn — it absorbs the
     edge and stays put, because the session is still opening and may yet fail."""
@@ -113,9 +117,12 @@ def test_speech_started_is_legal_from_every_state_a_turn_can_begin_in() -> None:
         next_state(RobotState.DEGRADED, Trigger.AUDIO_SPEECH_STARTED)
         == RobotState.DEGRADED
     )
-    for refuses in (RobotState.BOOTING, RobotState.LISTENING):
-        with pytest.raises(IllegalTransition):
-            next_state(refuses, Trigger.AUDIO_SPEECH_STARTED)
+    assert (
+        next_state(RobotState.LISTENING, Trigger.AUDIO_SPEECH_STARTED)
+        == RobotState.LISTENING
+    )
+    with pytest.raises(IllegalTransition):
+        next_state(RobotState.BOOTING, Trigger.AUDIO_SPEECH_STARTED)
 
 
 def test_barge_in_row() -> None:
@@ -246,6 +253,41 @@ def test_the_recovery_arc_composes_when_a_slow_open_outran_the_user() -> None:
         RobotState.DEGRADED,
         RobotState.DEGRADED,
         RobotState.LISTENING,
+        RobotState.SPEAKING,
+        RobotState.IDLE,
+    ]
+
+
+def test_a_turn_that_ended_while_degraded_leaves_the_next_one_somewhere_legal() -> None:
+    """AVID-173: the third continuation AVID-162 did not anticipate, walked whole.
+
+    AVID-162 reasoned about two ways a recovery could continue — the user still talking
+    (``LISTENING + speech_ended``) and a slow open outrun by them (``LISTENING +
+    playback_started``). This is a third: **the turn ended entirely while degraded**, so both of
+    its edges were absorbed and nothing is coming to move the machine off LISTENING. It parks
+    there, and the *next* utterance's rising edge used to have no row — 3 occurrences in one
+    180 s Pi run.
+
+    Walked as a whole journey rather than asserted row-by-row, for the reason ``_walk`` exists:
+    AVID-158, AVID-161 and this are all cases where each row was defensible alone and the
+    composition dead-ended. Note the arc continues *past* the rising edge to a complete turn —
+    stopping at the row under test is what let the previous recovery test miss this."""
+    assert _walk(
+        RobotState.DEGRADED,
+        Trigger.AUDIO_SPEECH_STARTED,  # absorbed; open() starts
+        Trigger.AUDIO_SPEECH_ENDED,  # absorbed; this turn is now OVER
+        Trigger.SYSTEM_DEGRADED_EXITED,  # recovery parks in LISTENING
+        Trigger.AUDIO_SPEECH_STARTED,  # the NEXT utterance — AVID-173's gap
+        Trigger.AUDIO_SPEECH_ENDED,
+        Trigger.AUDIO_PLAYBACK_STARTED,
+        Trigger.AUDIO_PLAYBACK_FINISHED,
+    ) == [
+        RobotState.DEGRADED,
+        RobotState.DEGRADED,
+        RobotState.DEGRADED,
+        RobotState.LISTENING,
+        RobotState.LISTENING,  # the self-loop: already listening, still listening
+        RobotState.THINKING,
         RobotState.SPEAKING,
         RobotState.IDLE,
     ]
