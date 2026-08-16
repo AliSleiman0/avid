@@ -469,6 +469,7 @@ class BehaviorService:
 
         if isinstance(verdict, Suppressed):
             await self._suppress(record.id, rule=verdict.rule, at=now)
+            await self._rearm(record.id, fact_id=record.fact_id, persist=True)
             return
         await self._deliver(
             record.id,
@@ -477,6 +478,36 @@ class BehaviorService:
             record_ignore_streak=record.ignore_streak,
             record_cooldown_s=record.cooldown_s,
         )
+        # `_deliver` has already persisted the next occurrence via record_fired; this puts it back
+        # in the heap. Both are needed and they are not the same thing — see _rearm.
+        await self._rearm(record.id, fact_id=record.fact_id, persist=False)
+
+    async def _rearm(
+        self, trigger_id: int, *, fact_id: int | None, persist: bool
+    ) -> None:
+        """Put a fired trigger back in the heap for its next occurrence.
+
+        ⚠️ **Without this a trigger fires at most once per process lifetime**, and that was the
+        shipped behaviour until the rig caught it. ``SchedulerLoop`` *consumes* a heap entry when it
+        fires — correctly, since a due time is a one-shot — so something has to book the next one,
+        and nothing did. A coffee reminder would fire on the first morning after a boot and never
+        again; worse, one suppressed by rule 3 (nobody in the room) would retire silently, which is
+        the opposite of R-08's failure but every bit as fatal to the product.
+
+        Two distinct jobs, hence ``persist``. The **database** column ``next_fire_at`` is what the
+        boot rebuild reads, and the **heap** is what fires today. ``_deliver`` already writes the
+        column through ``record_fired``, so it needs only the heap; ``_suppress`` writes nothing, so
+        it needs both. Conflating them is what makes "it works until you restart" bugs.
+
+        A trigger whose rule has run out (finite ``COUNT=``/``UNTIL=``) resolves to ``None`` and is
+        simply not re-armed — ``idx_triggers_due``'s partial predicate then excludes it for free.
+        """
+        fire_at = await self._next_fire_for(fact_id)
+        if persist:
+            await self._triggers.set_next_fire(trigger_id, next_fire_at=fire_at)
+        if fire_at is None:
+            return
+        self._scheduler.schedule(trigger_id, fire_at=fire_at)
 
     async def _suppress(self, trigger_id: int, *, rule: str, at: int) -> None:
         """Log the veto and say so on the bus — never an early return.
