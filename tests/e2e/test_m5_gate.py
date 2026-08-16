@@ -310,6 +310,8 @@ async def _drive_session(
     until: Callable[[_Collector], bool],
     then: Callable[[_Collector], bool] | None = None,
     barge_in_margin_db: float = 6.0,
+    highpass_hz: float = 150.0,
+    highpass_order: int = 3,
     # Above the 100 virtual seconds `_advance_until` can drain, so the §6.9 deadline can only
     # fire in the test that asks for it by passing a small value (AVID-171).
     think_timeout_s: float = 300.0,
@@ -354,6 +356,8 @@ async def _drive_session(
         channels=_CHANNELS,
         silence_hold_ms=_SILENCE_HOLD_MS,
         barge_in_margin_db=barge_in_margin_db,
+        highpass_hz=highpass_hz,
+        highpass_order=highpass_order,
         echo_tail_ms=_ECHO_TAIL_MS,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an M4 echo (#103).
         loopback=False,
@@ -646,6 +650,8 @@ async def test_m5_gate_the_recovery_turn_drives_a_whole_legal_arc(
             ),
             # The synthetic frame is a constant level; see _drive_session.
             barge_in_margin_db=0.0,
+            highpass_hz=150.0,
+            highpass_order=3,
         )
 
     assert collector.of_type(SystemDegradedExited), "the robot never recovered"

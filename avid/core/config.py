@@ -347,6 +347,26 @@ class GateConfig(_Section):
     # ``Speaker.stop`` closes the handle so ALSA drops the buffer outright, and the user is
     # mid-utterance, so re-opening the uplink late would clip the very words that interrupted.
     echo_tail_ms: int = Field(default=150, ge=0)
+    # The level-measurement high-pass (AVID-283). Applied to the audio `rms_dbfs` measures for
+    # `EchoFloor` — NOT to the VAD's input, which keeps raw PCM.
+    #
+    # Measured on the rig: an empty room read -18.4 dBFS broadband against -49.1 dBFS in the
+    # 300-3400 Hz speech band, so ~31 dB of what the floor was reading is energy no human
+    # produced. Response at 150 Hz, 16 kHz, relative to raw:
+    #
+    #   Hz     order1   order2   order3   order4
+    #   50     -10.0    -20.1    -30.1    -40.1
+    #   300     -1.2     -2.3     -3.5     -4.7
+    #   1000    -0.3     -0.7     -1.0     -1.4
+    #
+    # Order 3 is shipped: 30 dB at the hum for 1 dB at 1 kHz. One pole buys only ~10 dB, which
+    # would look like a fix and not be one.
+    #
+    # `ge=1` rather than allowing 0-as-disabled: `HighPass` rejects order 0 because an
+    # identity filter is not a filter, and adding a bypass here would be an untested branch
+    # in the hot path for a comparison a cutoff change already gives you.
+    highpass_hz: float = Field(default=150.0, gt=0.0)
+    highpass_order: int = Field(default=3, ge=1, le=8)
     # §6.7-path-1 memory injection (#126): the cap on the top-facts fetch at session open. Retrieval
     # is local (~30 ms) and overlaps the connect, but a hung store must not delay time-to-session-ready
     # — on timeout the session opens without memory (AC-6). Generous vs the ~30 ms norm, a safety net.

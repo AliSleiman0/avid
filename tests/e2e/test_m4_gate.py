@@ -133,6 +133,8 @@ async def _drive_one_turn(speaker: Speaker) -> _Collector:
         # all, but a harness that omits a knob reports whatever the default happens to be, and
         # that is how the margin went unmeasured for four bench runs.
         barge_in_margin_db=6.0,
+        highpass_hz=150.0,
+        highpass_order=3,
         echo_tail_ms=150,
         # The M4 gate proves the transport loopback (no AI client), so echo mode (#103).
         loopback=True,

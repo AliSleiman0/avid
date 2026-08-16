@@ -649,6 +649,8 @@ def _wire_services(
         channels=config.microphone.channels,
         silence_hold_ms=config.gate.silence_hold_ms,
         barge_in_margin_db=config.gate.barge_in_margin_db,
+        highpass_hz=config.gate.highpass_hz,
+        highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
         loopback=False,
     )

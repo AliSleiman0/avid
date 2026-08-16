@@ -2621,7 +2621,11 @@ silence_hold_ms    = 900        # silence run before a turn is declared over (Au
                                 # the turn never commits. Measured 900/500 -> 10 replies in 14
                                 # turns, vs 2 in 13 at 500/500 (AVID-176).
 session_idle_close_s = 30
-barge_in_margin_db = 6.0        # dB over the echo floor a rising edge must clear to be the USER
+barge_in_margin_db = 3.0        # dB over the echo floor a rising edge must clear to be the USER
+                                # (UNCALIBRATED - AVID-296: tuned with capture AGC in an
+                                #  unknown state, and AGC moves the floor ~20 dB)
+highpass_hz        = 150.0      # AVID-283: the LEVEL measurement is high-passed, not the VAD
+highpass_order     = 3          # 30 dB at 50 Hz for 1 dB at 1 kHz; one pole buys only ~10 dB
                                 # while the robot speaks (§6.2.4). PROVISIONAL — the M5 gate's
                                 # AC-3 records the measured value. Very large = full half-duplex.
 echo_tail_ms       = 150        # uplink stays shut this long after a reply ends (the DAC drain)

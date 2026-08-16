@@ -730,6 +730,8 @@ async def _run_conversation(
         # /etc/robot/config.toml held, so #106's AC-3 — "the margin that achieves this is measured
         # and recorded" — was reporting a number the operator could not change.
         barge_in_margin_db=config.gate.barge_in_margin_db,
+        highpass_hz=config.gate.highpass_hz,
+        highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an echo (#103).
         loopback=False,
