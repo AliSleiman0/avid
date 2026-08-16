@@ -9,6 +9,14 @@ requires-python = ">=3.11"
 # runs the suite on both 3.11 and 3.13 (AVID-4).
 dependencies = [
     "pydantic>=2.7",
+    # RFC 5545 recurrence, mandated by name in SDS §10.3 ("do not invent a schedule DSL").
+    # ⚠️ This is the second runtime dependency, and the posture until M10 was pydantic alone.
+    # It is a CORE dep rather than an extra behind one adapter -- the shape every other
+    # third-party package here takes -- for one reason: P6 would then oblige a *fake* recurrence
+    # resolver, which is a second, worse RRULE implementation grading itself against the first.
+    # That is exactly the DSL §10.3 forbids. Pure Python, no C extension, so the Pi pays nothing.
+    # The domain stays clean mechanically: `dateutil` is on import-linter's domain-purity list.
+    "python-dateutil>=2.9",
 ]
 
 [project.scripts]
@@ -72,6 +80,14 @@ dev = [
     # here; widen under AVID-2 if needed.
     "ruff>=0.6",
     "mypy>=1.11",
+    # dateutil ships no inline types; without these mypy --strict sees Any and the resolver's
+    # signature stops being checked at the one boundary where an off-by-a-timezone is silent.
+    "types-python-dateutil>=2.9",
+    # ⚠️ DEV ONLY, and deliberately not a runtime dep. Linux and the Pi carry a system tz
+    # database; Windows does not, and without this wheel `zoneinfo.ZoneInfo("America/New_York")`
+    # raises ZoneInfoNotFoundError -- so §10.3's DST tests would pass in CI and fail on a dev
+    # box, which is the worst possible way for a test to behave.
+    "tzdata>=2024.1",
 ]
 
 [tool.pytest.ini_options]
