@@ -116,6 +116,28 @@ _EXPLICIT_TRANSITIONS: dict[tuple[RobotState, Trigger], RobotState] = {
     # zero barge-ins. §3.10.1's diagram has always labelled this edge "turn end detected".
     (RobotState.LISTENING, Trigger.AUDIO_SPEECH_ENDED): RobotState.THINKING,
     (RobotState.LISTENING, Trigger.LISTEN_TIMEOUT): RobotState.IDLE,  # 30 s
+    # A *second* rising edge from LISTENING (AVID-173). This row was deliberately absent, and
+    # the argument for absence was sound but scoped too narrowly: within ``AudioService`` the
+    # edges strictly alternate (``_run`` calls ``_begin_speech`` only when ``not self._speaking``),
+    # so a second rising edge is unreachable **from there**. That says nothing about where the
+    # *machine* is, and AVID-162's recovery row is the counter-example — traced on the Pi,
+    # 3 occurrences in one 180 s run:
+    #
+    #   24.139s  AudioSpeechStarted   state=DEGRADED   <- absorbed, open() starts
+    #   24.759s  AudioSpeechEnded     state=DEGRADED   <- absorbed; the turn is now OVER
+    #   25.366s  client.open() #2 done                 <- _exit_degraded -> LISTENING
+    #   33.975s  AudioSpeechStarted   state=LISTENING  <- next utterance: NO ROW
+    #
+    # Both of that turn's edges were spent while DEGRADED, so no falling edge is coming to move
+    # the machine on; it parks in LISTENING and the *next* utterance has nowhere to go. The row
+    # is reachable, so it is not a lie — which is the test the table applies to itself.
+    #
+    # A self-loop rather than a move, because nothing about the operational state changed: the
+    # machine already believes the user is talking, and they are. Retargeting `_exit_degraded`
+    # instead was considered (AVID-173 AC-3) and rejected — it would need the service to know
+    # whether the interrupted turn was still live, which is exactly the second copy of the state
+    # machine SDS §3.8.4 exists to prevent.
+    (RobotState.LISTENING, Trigger.AUDIO_SPEECH_STARTED): RobotState.LISTENING,
     # The user starts a fresh burst before the reply begins — observed twice in the same trace
     # (t=58.986, t=60.171). Without this row the fix above only relocates the wedge from
     # LISTENING to THINKING (AVID-158).
