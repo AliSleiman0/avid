@@ -6,7 +6,8 @@ No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``Affect`` (AVID-8), the ``audio.*`` events + pre-roll ring buffer (#86), the
 degraded-mode cue vocabulary ``Cue`` (AVID-80), the ``conversation.*`` events +
 ``TokenUsage`` value (#99), the ``Fact`` value + ``memory.*`` events + §7.7 scoring
-(#116), and ``BBox`` + the ``vision.*`` events (#219).
+(#116), and ``BBox`` + the ``vision.*`` events (#219), and §10.4's interruption policy — the
+pure gate that decides whether the robot may speak first (#235).
 """
 
 from avid.domain.affect import (
@@ -24,6 +25,23 @@ from avid.domain.audio import (
     EchoFloor,
     HighPass,
     rms_dbfs,
+)
+from avid.domain.behavior import (
+    AMBIENT_SPEECH,
+    COOLDOWN,
+    DAILY_BUDGET,
+    POLICY_RULES,
+    PRESENCE,
+    PROACTIVE_STATES,
+    QUIET_HOURS,
+    STATE,
+    Delivered,
+    PolicyContext,
+    PolicyLimits,
+    PolicyResult,
+    Suppressed,
+    evaluate_policy,
+    within_quiet_window,
 )
 from avid.domain.conversation import (
     ConversationAssistantResponded,
@@ -80,6 +98,22 @@ from avid.domain.vision import (
 )
 
 __all__ = [
+    # behavior (#235) — §10.4's interruption policy
+    "AMBIENT_SPEECH",
+    "COOLDOWN",
+    "DAILY_BUDGET",
+    "POLICY_RULES",
+    "PRESENCE",
+    "PROACTIVE_STATES",
+    "QUIET_HOURS",
+    "STATE",
+    "Delivered",
+    "PolicyContext",
+    "PolicyLimits",
+    "PolicyResult",
+    "Suppressed",
+    "evaluate_policy",
+    "within_quiet_window",
     # Affect (AVID-8)
     "Affect",
     "AffectChanged",

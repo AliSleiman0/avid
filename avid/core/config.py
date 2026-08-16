@@ -27,6 +27,8 @@ from pydantic import (
     model_validator,
 )
 
+from avid.domain.behavior import within_quiet_window
+
 # Loopback addresses accepted for the local control API. SDS §9.5: localhost binding
 # *is* the authentication; ``0.0.0.0`` would expose the socket and is a security bug.
 _LOOPBACK: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -546,11 +548,17 @@ class QuietHours(_Section):
         so it covers everything at or after ``start`` *or* before ``end``. ``start == end`` is
         rejected by :meth:`Config._behavior_windows_are_usable` rather than guessed at here — it
         could mean "always" or "never" and neither reading is safe to assume.
+
+        The wrap itself lives in ``domain/behavior.py`` and this delegates to it. §10.4's policy
+        gate needs the identical predicate and cannot import ``core`` — P1 points the other way —
+        so this is the one direction the layer rule permits, and two implementations of a midnight
+        wrap is exactly one too many.
         """
-        start, end = self.start_minutes, self.end_minutes
-        if start <= end:
-            return start <= minutes_since_midnight < end
-        return minutes_since_midnight >= start or minutes_since_midnight < end
+        return within_quiet_window(
+            minutes_since_midnight,
+            start_minutes=self.start_minutes,
+            end_minutes=self.end_minutes,
+        )
 
 
 class BehaviorConfig(_Section):
