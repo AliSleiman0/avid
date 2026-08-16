@@ -2334,15 +2334,25 @@ zone is attached afterwards:
 
 ```
 after (UTC epoch) → local datetime in routines.timezone → strip tzinfo
-                  → rrulestr(rrule, dtstart=<today at local_time>) → first occurrence after
+                  → rrulestr(rrule, dtstart=<the routine's own start date at local_time>)
+                  → first occurrence after the cursor
                   → re-attach ZoneInfo → UTC epoch → minus lead_time_s
 ```
 
+⚠️ **DTSTART is the routine's start date, never "today".** It carries no column in §8.3 because it
+does not need one — it is the `facts.created_at` of the fact the routine belongs to. Anchoring it at
+the moment the scheduler happens to ask changes what the rule *means*, silently: `COUNT=2` re-counts
+from today and never exhausts, and a bare `FREQ=WEEKLY` takes its weekday from DTSTART, so "weekly"
+becomes "a week from whenever I last looked". Both still resolve, still return a plausible time, and
+are simply not the schedule the user described.
+
 Let rrule work in UTC and you get exactly the "+86400 each day" bug above, wearing a library's
-clothes. Two edges need a named policy or they become a 2 a.m. incident: a **nonexistent** local time
-(spring forward — 02:30 does not occur) advances to the first valid instant after the gap, so a
-reminder is late rather than skipped; an **ambiguous** one (fall back — 01:30 happens twice) takes
-`fold=0`, so it fires once, on the earlier. A finite rule that has run out (`COUNT=`/`UNTIL=`)
+clothes. Two edges need a named policy or they become a 2 a.m. incident, and both fall out of `fold=0`
+(the default — pinned by test, not trusted). A **nonexistent** local time (spring forward — 02:30
+does not occur) resolves on the *pre-transition* offset: the instant the old timeline would have
+reached, which lands at 03:30 on the new wall clock. **Late, never skipped** — a reminder that
+silently evaporates once a year is the worse failure, because nothing logs and nothing errors. An
+**ambiguous** one (fall back — 01:30 happens twice) fires once, on the earlier pass. A finite rule that has run out (`COUNT=`/`UNTIL=`)
 returns no occurrence, the trigger's `next_fire_at` goes NULL, and `idx_triggers_due`'s partial
 predicate drops it from the scheduler's only query for free.
 
