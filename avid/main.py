@@ -95,6 +95,7 @@ from avid.services import (
     EpisodeRecorder,
     ExpressionService,
     MemoryService,
+    ObservabilityService,
     PresenceService,
 )
 
@@ -757,6 +758,10 @@ def _wire_services(
     # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
     # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
     cost_meter = CostMeterService(bus=bus, model=config.ai.model)
+    # The structured tap (#242, §3.12.2). Three §9.1.3 rows had an `Observability` subscriber in the
+    # catalog and none in the code — state.transitioned's is even tagged (M10). Owns no task, so
+    # like the two faces it is wired for its subscriptions and then dropped.
+    observability = ObservabilityService()
     # The episode recorder (#123, SDS §7.5): the write-only transcript observer. Subscribes to the four
     # conversation.* facts and mirrors each into the episodes table, keyed by correlation_id; it
     # publishes nothing (no bus handed to it) and reads nothing back into any flow (AC-4). It owns one
@@ -801,6 +806,7 @@ def _wire_services(
         episode_recorder,
         presence,
         behavior,
+        observability,
     ):
         for sub in service.subscriptions():
             bus.subscribe(
