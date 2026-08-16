@@ -848,7 +848,6 @@ async def _run(config: Config) -> int:
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
     notifier = _build_notifier(config)
-    health = HealthServer(bind=config.api.bind, port=config.api.port)
     bus = AsyncioEventBus(clock=clock)
     # The one state machine (SDS §3.8.4). Built here so every future service shares this
     # instance rather than growing a private copy — the lifecycle drives it to IDLE.
@@ -899,6 +898,16 @@ async def _run(config: Config) -> int:
         cues=cues,
         config=config,
         adapter_health=adapter_health,
+    )
+    # The control API is built *after* the services, and that ordering is #244's: §9.5's
+    # POST /quiet sets the same state the `set_quiet` tool does, through the same
+    # `BehaviorTools` port, so the server needs the behaviour engine to exist first. Two doors,
+    # one room — §9.5 calls the route "also reachable via set_quiet tool", and the only way to
+    # make that true rather than approximately true is for both to call one method.
+    health = HealthServer(
+        bind=config.api.bind,
+        port=config.api.port,
+        behavior=next(s for s in services if isinstance(s, BehaviorService)),
     )
     # ``servo`` is the last adapter still constructed only to realize the switch and appear in the
     # health map — moving it is MotionService's job (M9). ``camera`` and ``face_detector`` left this
