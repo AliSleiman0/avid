@@ -6,88 +6,116 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-16 · `main = ea36558` · tag **`v0.M6.0`** · gh `AliSleiman0`.
+**As of:** 2026-08-16 · `main` on the M10 branch chain · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**M6 is sealed. 8 of 11 milestones done.** Nothing is in flight, **no open PRs**, milestone and
-epic #210 closed, board reconciled (the seven M6 items → Done, #157 out of `Blocked`, #310 added as
-`Ready`). The next milestone by value is **M10** (proactivity — the coffee scenario); PMP §5.4 puts
-it directly behind M6 on the critical path. M9 (motion) and M11 (product) are the others
-outstanding.
+**M10 is code-complete and unsealed.** Every no-hardware issue in the milestone has merged;
+**#245, the live multi-morning gate, is the only thing left** — and it is the one item nobody can do
+from a laptop. It needs the Pi running unattended across real mornings, and a human judging by ear
+whether the utterance sounds like a reminder app, which §10.8 says is the actual success criterion.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
 `git rev-parse --short origin/main` — three commands, and they are always right. See the
 BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
 
-Before starting new scope, there is a short, well-specified queue of things this milestone
-surfaced and deliberately did not absorb:
+### What #245 needs, concretely
 
-### The queue, in the order I would take it
+Everything mechanised is already proven by `tests/e2e/test_m10_gate.py` (#315), which is §14.5's
+`test_uc03_coffee` and runs in about a second with no hardware. **What the live run adds is only
+what a laptop cannot say:**
 
-1. **#310 — `set_affect` never fires.** M6's one functional gap. §6.8 pre-authorised the fallback
-   (local inference behind the existing `AffectTools` port, "a one-file change"), but **do the
-   cheap diagnostic first**: compare `remember_fact`'s firing rate against `set_affect`'s in one
-   live session. That separates "this tool" from "tools in speech-to-speech" and decides whether
-   any inference code is warranted at all. ⚠️ §6.8's objection to local inference is not a
-   formality — *"I'm sorry to hear that"* is textually negative and the correct face is
-   *concerned*, not *sad*.
-2. **#157 — session-open latency.** Now measured, not suspected: ~660–700 ms is OpenAI's WebSocket
-   upgrade, the server's own bootstrap is 1.5 ms, and payload size costs ~20 ms. §6.3's budget has
-   been corrected to the measurement. The only lever left is a pre-warmed or pooled connection,
-   which reopens ADR-007 — an architectural decision, not a fix.
-3. **The transcript is ordered by event arrival, not by turn** (`docs/demos/conversation_pi.py`),
-   so a gate transcript reads jumbled — robot lines before the user lines they answer. AVID-158
-   established transcription is a slower separate pass; order by `correlation_id` and turn index.
-   Small, and it makes the gate artefact readable.
-4. **#289** — `Pca9685Servo` shares AVID-266's lazy-open shape. Latent until M9 wires preemption,
-   so it wants doing *before* M9 rather than during it.
-5. **M7 follow-ups #264 / #265 / #267**, untouched since that milestone.
+1. **The utterance does not sound like a calendar notification.** §10.8: *"The gap between 'Good
+   morning! Coffee time is coming soon' and 'Reminder: coffee at 08:00' is the entire product."*
+   Judged by ear; there is no automatable proxy, and the nightly LLM-judge tier (§14.7) is
+   explicitly non-blocking, so it can inform this but never seal it.
+2. **Real wall clock across a real day boundary, with a reboot in between.** The `system.started`
+   heap rebuild is unit-proven and mechanised-proven; systemd restarting the unit at 03:00 is not.
+   ⚠️ `deploy/PI_OPERATIONS.md`'s standing rule bites here: `/etc/robot/config.toml` is a copy that
+   rots, and a missing `[behavior]` key falls back to a **schema default silently**. The run must
+   *read the config off the device and print it*, never restate it.
+3. **A human choosing not to answer.** #241's arithmetic is unit-tested; *"the robot noticed it was
+   being ignored and stopped"* is not a thing a `FakeClock` can witness.
+4. **`set_quiet` through both doors** — the tool (#243) and `POST /quiet` (#244) — each proven once,
+   live. They call one method on one port, so this confirms the wiring rather than the logic.
+
+⚠️ **Do not report a rate.** G3 asks for ≥1 useful proactive event/day and ≤1 annoying event/week.
+Three mornings cannot measure a weekly rate. State *n*, state the counts, and leave it there — this
+is the same discipline M5 learned when it printed a "P95" that was arithmetically the maximum over
+five samples. `proactive_log` plus §10.6's SQL is the instrument, and it wants ≥1 week before it
+says anything about R-08.
+
+### The queue behind it
+
+1. **#328 — the P8 `async-debug` gate grades test bodies, not the robot's callbacks.** Filed during
+   this session because it started failing on *different untouched tests* on different runs
+   (0.059–0.060 s against a 50 ms threshold). The warning names the **test coroutine** as the
+   stalling callback, so the gate cannot tell a production stall from a test doing bulk work between
+   awaits. ⚠️ Do not raise the threshold. `tests/conftest.py` already draws exactly this distinction
+   once, for hardware fixture frames.
+2. **#310 — `set_affect` never fires.** M6's functional gap, parked deliberately when M10 was
+   chosen. ⚠️ The diagnostic vehicle needs repair first: `tools/eval_extraction.py` still sends
+   `OpenAI-Beta: realtime=v1` (the beta interface is **disabled server-side**, `adapters/realtime.py:661`)
+   and pins a model the robot no longer runs. Fix the harness, count `set_affect` against
+   `remember_fact` in one text session, and only then decide whether §6.8's local inference is
+   warranted at all.
+3. **#157** — session-open latency; only lever left is pooling, which reopens ADR-007.
+4. **Transcript ordering** in `docs/demos/conversation_pi.py` — order by `correlation_id`, not
+   arrival.
+5. **#289** — `Pca9685Servo`'s lazy-open race. Do it *before* M9, not during.
+6. **M7 follow-ups #264 / #265 / #267**, untouched.
 
 ### Two open loops that are NOT tasks
 
 - **O1 regressed and that is expected**, not a defect: with AVID-194 the commit and `speech_ended`
-  now coincide, so O1 covers a round trip the server's own clock used to hide. P50 landed 2287 /
-  2912 ms on two gate passes and **passed** on the third (8 turns). It is measured differently now
-  and old figures are not comparable.
+  now coincide, so O1 covers a round trip the server's own clock used to hide. Old figures are not
+  comparable.
 - **`barge_in_margin_db = 3.0` is UNCALIBRATED**, marked as such in `config/pi.toml` and SDS §9.6.
-  It was tuned with capture AGC in an unknown state, and AGC moves this rig's floor ~20 dB.
-  Re-derive it at the provisioned setting before anyone treats it as a measurement.
+  Re-derive it at the provisioned AGC setting before treating it as a measurement.
 
 ## Current state
 
-- `main = ea36558`, tagged **`v0.M6.0`**; **1127 passed / 60 skipped** on 3.11 and 3.13; ruff,
-  `mypy --strict` (56 files) and `lint-imports` (4/4) clean. CI green. Working tree clean, no
-  unmerged local branches.
-- **The Pi is ON**, `robot.service` **inactive and disabled**, checked out on `main` at `ea36558`
-  with the tag present, and `nft` has no leftover block from `cut_wan.sh`. ⚠️ The hostname `AVID`
-  intermittently stops resolving — `192.168.10.172` works.
-- `/etc/robot/config.toml` reconciled with the repo at the gate: `turn_detection = "none"`
-  (AVID-194 — it was still `server_vad`, which would have invalidated the whole session), plus the
-  high-pass keys stated explicitly.
-- Capture mixer provisioned and `alsactl store`d: **AGC off**, `Mic` 10/62%. ⚠️ Read #296 before
-  touching it.
-- Gate evidence on the Pi in `~/vision_traces/m6_gate/` (both passes, both configs, sealed order).
+- **M10 code-complete.** 14 PRs merged this session (#316, #317, #318, #319, #320, #321, #322,
+  #323, #324, #326, #327, #329, #330, #331, #332, #333) with #334 the last. **~1360 passed /
+  61 skipped** on 3.11 and 3.13; `ruff`, `mypy --strict` and `lint-imports` (4 contracts) clean.
+- ⚠️ **`async-debug` is intermittently red on pre-existing tests** — diagnosed and filed as #328,
+  and *not* a regression from this milestone's code. Every M10 PR that merged past it says so in
+  its body rather than quietly.
+- **The Pi has not been touched this session.** It is still ON, `robot.service` **inactive and
+  disabled**, checked out at the M6 seal (`86b5285`). Nothing in M10 has ever run on it — which is
+  exactly what #245 is for. ⚠️ Hostname `AVID` intermittently stops resolving; `192.168.10.172`
+  works, and the Pi **cannot `git fetch`** (see PI_OPERATIONS §0 — push to it over SSH).
+- **New runtime dependency:** `python-dateutil` (SDS §10.3 mandates it by name). `tzdata` joined the
+  dev group — without it `zoneinfo` cannot resolve an IANA name on Windows, so the DST tests would
+  pass in CI and fail on a dev box.
 
 ## What just shipped (this session)
 
-**M6 in full** — #211 personality schema + two shipped configs, #212 the pure composer, #213 the
-four-layer §6.4 assembly with its cache-prefix tests, #214 `set_affect` + the `AffectTools` port,
-#215 the adherence eval, #216 the gate.
+**M10 in full, minus the live gate.**
 
-**The whole inherited stabilisation package** — #194 (one turn-taking authority; the server VAD is
-off and we commit from the local falling edge), #173, #170, #188, and #189 (found *again* at the
-gate after I had argued it was structurally impossible).
+- **#231** — the SDS caught up: §3.7.4 and §3.7.5 written, §10's stale TOC, `behavior.trigger_disabled`
+  missing from §3.5.3's taxonomy, a `(M6)` mislabel in §9.1.3, and three decisions recorded.
+- **#232 / #235 / #236 / #237** — the `[behavior]` config completed, the pure six-rule policy gate,
+  the RRULE resolver + scheduler loop, and `BehaviorService` itself.
+- **#314** — `remember_fact` carries the schedule. **This seam did not exist**: nothing in the repo
+  had ever written a `routines` row, so UC-02 produced a fact UC-03 could not schedule from.
+- **#313 / #239 / #240** — the `RealtimeClient` port method for a turn nobody asked for, the
+  proactive path in `ConversationService`, and §10.8's context block.
+- **#241 / #243 / #244 / #242** — ignore backoff, `set_quiet`, `POST /quiet`, and the structured tap.
+- **#315** — the mechanised UC-03 gate, which §14.5 says *is* the milestone's criterion and which no
+  filed issue had owned.
 
-**Three defects from outside the plan** — #284, #266, and #283/#296, where the "50 Hz mains hum"
-turned out to be one ALSA capture switch.
+**Five things the epic had wrong**, each verified against the tree rather than inferred: the three
+tables already shipped in `0001_initial.sql` (#234 closed as obsolete); `[behavior]` already shipped
+in both TOMLs; §10.7 needed a **port change** (#239 said it did not); `StateManager` has **no**
+subscriptions (#238's AC-1 premise); and nothing created a `routines` row (#314, filed).
 
-**Four harness defects the gate surfaced**, all of the same family: a report describing something
-other than what ran. See `journal.md`.
-
-**The seal itself** — `v0.M6.0` tagged on `ea36558`, milestone and epic #210 closed, the seven M6
-board items moved to Done, #157 taken out of `Blocked` with the measurement recorded on the issue,
-and #310 added to the board as `Ready`.
+**Three decisions taken, one of them reversed on evidence.** D1 — the model supplies the schedule on
+the `remember_fact` call. D2 — `dateutil` becomes a core dep in `core/schedule.py`, with `dateutil`
+added to import-linter's domain-purity list so it can never drift into `domain/`. D3 — originally
+"add a `(SLEEPING, BEHAVIOR_TRIGGER_FIRED)` row"; **reversed** once `state.py:107` was read: presence
+already wakes SLEEPING, and rule 3's 300 s window cannot overlap the ten minutes of absence that
+produce SLEEPING, so the row would have been unreachable. §10.4 rule 2 now reads `state is not IDLE`.
 
 ## Standing gotchas (carry forward)
 
