@@ -478,6 +478,7 @@ class OpenAIRealtimeClient:
         max_output_tokens: int,
         turn_detection: dict[str, Any],
         transcription_model: str,
+        transcription_language: str | None = None,
         tools: Sequence[dict[str, Any]] = (),
     ) -> None:
         self._api_key = (
@@ -489,6 +490,7 @@ class OpenAIRealtimeClient:
         self._max_output_tokens = max_output_tokens
         self._turn_detection = turn_detection
         self._transcription_model = transcription_model
+        self._transcription_language = transcription_language
         # Tool declarations (§6.6) are session-level and part of the cached prefix (§6.2.2), so
         # they are fixed at construction, never sent per-turn. Empty until #125 supplies the
         # recall/forget/remember_fact schemas via the composition root; a vendor-shaped dict
@@ -562,7 +564,7 @@ class OpenAIRealtimeClient:
                     # `UserTranscript` never crosses the port and `conversation.user_transcribed`
                     # is never published: the robot answers aloud with no record of what was
                     # said, so §7.5/§7.6 have nothing to extract a memory from.
-                    "transcription": {"model": self._transcription_model},
+                    "transcription": self._transcription_config(),
                     # `null` when [ai.turn_detection] type = "none" — the AVID-194 setting, and
                     # the shipped one. It hands turn-taking to the local VAD alone: the server
                     # stops committing the input buffer, stops deciding when the user finished,
@@ -585,6 +587,18 @@ class OpenAIRealtimeClient:
         }
         if self._tools:
             config["tools"] = list(self._tools)  # §6.6 — static for the session's life
+        return config
+
+    def _transcription_config(self) -> dict[str, Any]:
+        """The input-transcription block, with a language hint when one is configured.
+
+        The hint exists because auto-detection is weakest on exactly what this robot hears: short
+        conversational utterances. At the M6 gate it returned English speech as Arabic and Korean.
+        That does not reach the *reply* — Realtime is speech-to-speech and answers the audio — but
+        it does reach ``conversation.user_transcribed``, which §7.6 extracts memories from."""
+        config: dict[str, Any] = {"model": self._transcription_model}
+        if self._transcription_language:
+            config["language"] = self._transcription_language
         return config
 
     def _server_turn_detection(self) -> dict[str, Any] | None:
