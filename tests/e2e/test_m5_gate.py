@@ -124,6 +124,17 @@ _COLLECTED: tuple[type[Event], ...] = (
 )
 
 
+class _StubBehavior:
+    """A :class:`~avid.core.ports.BehaviorTools` double: records the quiet requests (#243)."""
+
+    def __init__(self) -> None:
+        self.quiets: list[int] = []
+
+    async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+        self.quiets.append(duration_s)
+        return 1_800_003_600
+
+
 class _StubAffect:
     """An ``AffectTools`` double for the conversation rig (AVID-214).
 
@@ -381,6 +392,7 @@ async def _drive_session(
         server_turn_detection=False,
         thinking_delay_ms=0,
         affect=_StubAffect(),
+        behavior=_StubBehavior(),
     )
 
     collector = _Collector()
@@ -550,6 +562,7 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         server_turn_detection=False,
         thinking_delay_ms=0,
         affect=_StubAffect(),
+        behavior=_StubBehavior(),
     )
     collector = _Collector()
     for sub in conversation.subscriptions():

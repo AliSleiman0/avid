@@ -700,6 +700,31 @@ def _wire_services(
         top_facts_max=config.memory.top_facts_max,
         top_facts_token_budget=config.memory.top_facts_token_budget,
     )
+    # BehaviorService before ConversationService, and the order is load-bearing since #243: it
+    # satisfies the `BehaviorTools` port that `set_quiet` dispatches against, so conversation
+    # takes it as a constructor argument. It is also the service whose subscriptions span every
+    # other one's output (§9.1.3) — but it depends on none of them, which is what makes this
+    # ordering possible at all.
+    # ⚠️ PolicyLimits is assembled here, from config, and passed as a value — the gate never sees
+    # a Config object, because a pure function that can read configuration is not a pure function.
+    behavior = BehaviorService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        triggers=trigger_store,
+        proactive_log=trigger_store,
+        limits=PolicyLimits(
+            quiet_start_minutes=config.behavior.quiet_hours.start_minutes,
+            quiet_end_minutes=config.behavior.quiet_hours.end_minutes,
+            presence_window_s=config.behavior.presence_window_s,
+            ambient_speech_threshold_s=config.behavior.ambient_speech_threshold_s,
+            global_cooldown_s=config.behavior.global_cooldown_s,
+            daily_budget=config.behavior.daily_budget,
+        ),
+        timezone=config.behavior.timezone,
+        default_cooldown_s=config.behavior.global_cooldown_s,
+    )
+
     conversation = ConversationService(
         bus=bus,
         clock=clock,
@@ -713,6 +738,7 @@ def _wire_services(
         # AffectService satisfies AffectTools structurally — no inheritance, no edit there.
         # It is built above, before this call, so no reordering was needed (AVID-214).
         affect=affect,
+        behavior=behavior,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone=config.behavior.timezone,
@@ -762,31 +788,6 @@ def _wire_services(
         nap_after_s=config.vision.nap_after_s,
         health=adapter_health,
     )
-    # BehaviorService last: it needs the state machine, the trigger store and the policy limits,
-    # and it is the only service whose subscriptions span every other one's output (§9.1.3).
-    # ⚠️ PolicyLimits is assembled here, from config, and passed as a value — the gate never sees
-    # a Config object, because a pure function that can read configuration is not a pure function.
-    behavior = BehaviorService(
-        bus=bus,
-        clock=clock,
-        state=state,
-        triggers=trigger_store,
-        proactive_log=trigger_store,
-        limits=PolicyLimits(
-            quiet_start_minutes=config.behavior.quiet_hours.start_minutes,
-            quiet_end_minutes=config.behavior.quiet_hours.end_minutes,
-            presence_window_s=config.behavior.presence_window_s,
-            ambient_speech_threshold_s=config.behavior.ambient_speech_threshold_s,
-            global_cooldown_s=config.behavior.global_cooldown_s,
-            daily_budget=config.behavior.daily_budget,
-        ),
-        timezone=config.behavior.timezone,
-        default_cooldown_s=config.behavior.global_cooldown_s,
-        hold_open_s=config.behavior.hold_open_s,
-        ignore_backoff_multiplier=config.behavior.ignore_backoff_multiplier,
-        ignore_streak_limit=config.behavior.ignore_streak_limit,
-    )
-
     for service in (
         affect,
         expression,

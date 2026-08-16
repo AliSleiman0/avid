@@ -23,6 +23,7 @@ from avid.services.tools import (
     RECALL,
     REMEMBER_FACT,
     SET_AFFECT,
+    SET_QUIET,
     TOOL_SCHEMAS,
     dispatch_tool_call,
 )
@@ -136,12 +137,25 @@ def _fact(text: str, *, kind: str = "other", importance: int = 5) -> Fact:
 _TEST_TZ = "Asia/Beirut"
 
 
+class _RecordingBehavior:
+    """A :class:`~avid.core.ports.BehaviorTools` double — a fake, not a mock (SDS §14.3)."""
+
+    def __init__(self, *, until: int = 1_800_003_600) -> None:
+        self.quiets: list[tuple[int, UUID]] = []
+        self._until = until
+
+    async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+        self.quiets.append((duration_s, correlation_id))
+        return self._until
+
+
 async def _dispatch(
     memory: object,
     call: ToolCallRequested,
     *,
     approximate: bool = False,
     affect: object | None = None,
+    behavior: object | None = None,
     default_timezone: str = _TEST_TZ,
 ) -> dict[str, object]:
     """Dispatch and parse the tool output back to a dict for assertion."""
@@ -149,6 +163,7 @@ async def _dispatch(
         memory,  # type: ignore[arg-type]
         call,
         affect=affect or _RecordingAffect(),  # type: ignore[arg-type]
+        behavior=behavior or _RecordingBehavior(),  # type: ignore[arg-type]
         correlation_id=uuid4(),
         approximate=approximate,
         default_timezone=default_timezone,
@@ -171,6 +186,7 @@ async def test_remember_fact_maps_to_the_port_and_returns_the_id() -> None:
             '{"text": "the user likes tea", "kind": "preference", "importance": 6}',
         ),
         affect=_RecordingAffect(),
+        behavior=_RecordingBehavior(),  # type: ignore[arg-type]
         correlation_id=corr,
         approximate=False,
         default_timezone=_TEST_TZ,
@@ -370,9 +386,14 @@ def test_capability_instructions_both_invite_and_bound_set_affect() -> None:
 # --- the shipped declarations (AC-2/AC-4) ------------------------------------------------------
 
 
-def test_tool_schemas_declare_the_four_tools() -> None:
+def test_tool_schemas_declare_the_five_tools() -> None:
+    """Three memory tools, the face, and — since #243 — §10.4's manual override.
+
+    An exact-set assertion rather than a subset: the declarations are the *cached prefix* (§6.2.2),
+    so a tool appearing here that nothing dispatches is billed on every turn of every session for
+    a capability the robot does not have."""
     names = {schema["name"] for schema in TOOL_SCHEMAS}
-    assert names == {REMEMBER_FACT, RECALL, FORGET, SET_AFFECT}
+    assert names == {REMEMBER_FACT, RECALL, FORGET, SET_AFFECT, SET_QUIET}
     assert all(schema["type"] == "function" for schema in TOOL_SCHEMAS)
 
 
@@ -485,3 +506,62 @@ async def test_a_malformed_schedule_is_a_tool_error_not_a_crash(bad: str) -> Non
     )
     assert out["ok"] is False
     assert memory.remembered == [], "nothing may be written on a malformed schedule"
+
+
+# --- set_quiet (#243, SDS §6.6, §10.4) ------------------------------------------------------
+
+
+async def test_set_quiet_reaches_the_port_and_returns_the_instant() -> None:
+    """The return value is what the model tells the user, so it is the *resolved instant* rather
+    than an echo of the request: "until 3 o'clock" is checkable, "for an hour" is not."""
+    behavior = _RecordingBehavior(until=1_800_003_600)
+    out = await _dispatch(
+        _RecordingMemory(fact_id=1),
+        _call(SET_QUIET, '{"duration_s": 3600}'),
+        behavior=behavior,
+    )
+    assert out == {"ok": True, "until": 1_800_003_600}
+    assert [duration for duration, _ in behavior.quiets] == [3600]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['{"duration_s": "an hour"}', "{}", "not json", '{"duration_s": null}'],
+)
+async def test_a_malformed_quiet_duration_is_a_tool_error(arguments: str) -> None:
+    """Same discipline as every other tool: the turn continues and the model is told, because a bad
+    tool call must never reach the pump (AC-3)."""
+    behavior = _RecordingBehavior()
+    out = await _dispatch(
+        _RecordingMemory(fact_id=1), _call(SET_QUIET, arguments), behavior=behavior
+    )
+    assert out["ok"] is False
+    assert behavior.quiets == []
+
+
+async def test_a_raising_behavior_port_becomes_a_tool_error() -> None:
+    """A port that rejects the duration (zero, negative) surfaces as a tool error, not a crash."""
+
+    class _Boom:
+        async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+            raise ValueError("quiet duration must be positive")
+
+    out = await _dispatch(
+        _RecordingMemory(fact_id=1),
+        _call(SET_QUIET, '{"duration_s": 0}'),
+        behavior=_Boom(),
+    )
+    assert out["ok"] is False
+
+
+def test_the_capability_instruction_only_permits_an_explicit_request() -> None:
+    """⚠️ AC-4, and the constraint is the load-bearing half.
+
+    A model that self-quiets speculatively — because the user sounded busy, or answered curtly —
+    produces a robot that goes silent for reasons the user never asked for and cannot see.
+    Under-firing is §10.1's cheap error; **unexplained** silence is not, because the user has no way
+    to tell it from a broken robot.
+    """
+    assert "call set_quiet" in CAPABILITY_INSTRUCTIONS
+    assert "Only when they ask" in CAPABILITY_INSTRUCTIONS
+    assert "never because you think they might want it" in CAPABILITY_INSTRUCTIONS

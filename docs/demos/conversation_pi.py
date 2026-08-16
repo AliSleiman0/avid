@@ -815,6 +815,7 @@ async def _run_conversation(
         cues=_build_cue_bank(config, speaker=speaker),
         memory=memory,
         affect=affect,
+        behavior=_DemoBehavior(),
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone="Asia/Beirut",

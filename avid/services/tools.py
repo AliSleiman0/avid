@@ -26,7 +26,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from avid.core.ports import AffectTools, MemoryTools
+from avid.core.ports import AffectTools, BehaviorTools, MemoryTools
 from avid.core.realtime import ToolCallRequested
 from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact, RoutineSpec
 
@@ -38,6 +38,7 @@ REMEMBER_FACT = "remember_fact"
 RECALL = "recall"
 FORGET = "forget"
 SET_AFFECT = "set_affect"
+SET_QUIET = "set_quiet"
 
 # The default recall cutoff (§7.7, k=5) when the model omits ``k``.
 _DEFAULT_RECALL_K = 5
@@ -211,6 +212,25 @@ TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
             "required": ["affect"],
         },
     },
+    {
+        "type": "function",
+        "name": SET_QUIET,
+        "description": (
+            "Stop speaking up on your own for a while, when the user asks to be left "
+            "alone or says they are busy. Ordinary conversation is unaffected."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "duration_s": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "How long to stay quiet, in seconds.",
+                },
+            },
+            "required": ["duration_s"],
+        },
+    },
 )
 
 
@@ -229,6 +249,7 @@ async def dispatch_tool_call(
     call: ToolCallRequested,
     *,
     affect: AffectTools,
+    behavior: BehaviorTools,
     correlation_id: UUID,
     approximate: bool,
     default_timezone: str,
@@ -279,6 +300,13 @@ async def dispatch_tool_call(
                 str(args["query"]), correlation_id=correlation_id
             )
             return _result({"deleted": deleted})
+
+        if call.name == SET_QUIET:
+            args = _load_object(call.arguments)
+            until = await behavior.set_quiet(
+                int(args["duration_s"]), correlation_id=correlation_id
+            )
+            return _result({"ok": True, "until": until})
 
         if call.name == SET_AFFECT:
             args = _load_object(call.arguments)
@@ -359,6 +387,7 @@ __all__ = [
     "RECALL",
     "REMEMBER_FACT",
     "SET_AFFECT",
+    "SET_QUIET",
     "TOOL_SCHEMAS",
     "dispatch_tool_call",
 ]

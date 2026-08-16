@@ -233,6 +233,7 @@ async def _rig(
         cues=cues,
         memory=mem,
         affect=_StubAffect(),
+        behavior=_StubBehavior(),
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
         default_timezone="Asia/Beirut",
@@ -571,6 +572,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         server_turn_detection=False,
         thinking_delay_ms=0,
         affect=_StubAffect(),
+        behavior=_StubBehavior(),
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -998,6 +1000,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         server_turn_detection=False,
         thinking_delay_ms=0,
         affect=_StubAffect(),
+        behavior=_StubBehavior(),
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -1191,6 +1194,17 @@ async def test_no_thinking_cue_when_the_reply_is_already_playing() -> None:
         assert rig.service._think_task is None, (
             "the §6.9 deadline was armed for a first token that had already arrived"
         )
+
+
+class _StubBehavior:
+    """A :class:`~avid.core.ports.BehaviorTools` double: records the quiet requests (#243)."""
+
+    def __init__(self) -> None:
+        self.quiets: list[int] = []
+
+    async def set_quiet(self, duration_s: int, *, correlation_id: UUID) -> int:
+        self.quiets.append(duration_s)
+        return 1_800_003_600
 
 
 class _StubAffect:
