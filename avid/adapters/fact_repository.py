@@ -34,7 +34,7 @@ from uuid import UUID
 
 from avid.adapters.sqlite import connect, migrate
 from avid.core.ports import Clock
-from avid.domain import Fact
+from avid.domain import Fact, RoutineSpec
 
 _log = logging.getLogger("avid.adapters.fact_repository")
 
@@ -125,7 +125,13 @@ class SqliteFactRepo:
 
     # -- the port -----------------------------------------------------------------
 
-    async def add(self, fact: Fact, *, embedding: bytes | None = None) -> int:
+    async def add(
+        self,
+        fact: Fact,
+        *,
+        embedding: bytes | None = None,
+        routine: RoutineSpec | None = None,
+    ) -> int:
         derived = json.dumps(list(fact.derived_from)) if fact.derived_from else None
         corr = (
             None
@@ -156,8 +162,25 @@ class SqliteFactRepo:
                         corr,
                     ),
                 )
-            rowid = cur.lastrowid
-            assert rowid is not None  # an INSERT always assigns the rowid
+                rowid = cur.lastrowid
+                assert rowid is not None  # an INSERT always assigns the rowid
+                if routine is not None:
+                    # Same `with conn:` block, so same transaction. §6.6 promises remember_fact is
+                    # "durable before it returns"; a schedule that landed in a second transaction
+                    # would make that promise half true, and the half that fails is the one §10
+                    # needs — a routine fact with no routines row is a fact the scheduler cannot
+                    # see and nothing reports.
+                    conn.execute(
+                        "INSERT INTO routines (fact_id, rrule, local_time, timezone, lead_time_s) "
+                        "VALUES (?,?,?,?,?)",
+                        (
+                            rowid,
+                            routine.rrule,
+                            routine.local_time,
+                            routine.timezone,
+                            routine.lead_time_s,
+                        ),
+                    )
             return rowid
 
         return await self._run(_add)

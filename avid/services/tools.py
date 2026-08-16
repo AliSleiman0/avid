@@ -28,7 +28,7 @@ from uuid import UUID
 
 from avid.core.ports import AffectTools, MemoryTools
 from avid.core.realtime import ToolCallRequested
-from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact
+from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact, RoutineSpec
 
 _log = logging.getLogger(__name__)
 
@@ -55,6 +55,14 @@ CAPABILITY_INSTRUCTIONS = (
     "Do not store passing remarks, questions, or anything you inferred rather than were told. "
     "When the user asks about something they told you before that is not already in your "
     "context, call recall. When the user asks you to forget something, call forget. "
+    # M10 (#314). Deliberately phrased as a scope rather than an encouragement: `schedule` is an
+    # argument on a tool the model already calls reliably, so the risk here is not that it goes
+    # unused but that it gets attached to every routine-shaped sentence — "I usually get coffee in
+    # the mornings" has no clock time, and a schedule invented for it fires at a moment nobody
+    # chose. Under-filling is recoverable; a wrong time is a reminder at the wrong hour.
+    "If the routine happens at a specific time on a repeating schedule, fill in remember_fact's "
+    "schedule argument as well. Leave it out when the user gave no clear time or no repetition — "
+    "do not guess one. "
     # ⚠️ REWEIGHTED at the M6 gate (AVID-214/216). The first version led with the constraint —
     # "call set_affect ONLY when ... and not on ordinary replies" — on §6.5's finding that
     # negative constraints are followed far more strongly than encouragements. Measured live, that
@@ -99,6 +107,41 @@ TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
                     "minimum": 1,
                     "maximum": 10,
                     "description": "1 is trivia, 10 is core identity.",
+                },
+                # §10's machine-readable half (M10). The `routines` table exists only because
+                # §10.3 needs a time it can put in a min-heap, and this is where that time comes
+                # from: the model has already parsed "every day at 8 AM" out of speech in order
+                # to write `text`, so this asks for the structured form of what it had in hand.
+                # Reading `text` back and re-deriving it locally was the alternative, and §6.8's
+                # own objection applies — a heuristic that reads "8" as 20:00 delivers the coffee
+                # reminder at night.
+                "schedule": {
+                    "type": "object",
+                    "description": (
+                        "For recurring routines with a time of day: when it happens. "
+                        "Omit for anything that is not a scheduled routine."
+                    ),
+                    "properties": {
+                        "rrule": {
+                            "type": "string",
+                            "description": (
+                                "An RFC 5545 RRULE, e.g. 'FREQ=DAILY' or "
+                                "'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR'."
+                            ),
+                        },
+                        "local_time": {
+                            "type": "string",
+                            "description": "Time of day as HH:MM, 24-hour, e.g. '08:00'.",
+                        },
+                        "timezone": {
+                            "type": "string",
+                            "description": (
+                                "IANA timezone name, e.g. 'Asia/Beirut'. "
+                                "Omit unless the user names a different one."
+                            ),
+                        },
+                    },
+                    "required": ["rrule", "local_time"],
                 },
             },
             "required": ["text", "kind", "importance"],
@@ -188,6 +231,7 @@ async def dispatch_tool_call(
     affect: AffectTools,
     correlation_id: UUID,
     approximate: bool,
+    default_timezone: str,
 ) -> str:
     """Execute one tool call against the memory port and return the model's tool output (AC-1/AC-6).
 
@@ -216,6 +260,7 @@ async def dispatch_tool_call(
                 text=str(args["text"]),
                 kind=str(args["kind"]),
                 importance=int(args["importance"]),
+                schedule=_parse_schedule(args.get("schedule"), default_timezone),
                 correlation_id=correlation_id,
             )
             return _result({"ok": True, "fact_id": fact_id})
@@ -277,6 +322,27 @@ def _load_object(arguments: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
     return parsed
+
+
+def _parse_schedule(raw: object, default_timezone: str) -> RoutineSpec | None:
+    """``remember_fact``'s optional ``schedule`` object → a :class:`RoutineSpec`, or ``None``.
+
+    Raises :class:`ValueError` on anything malformed, which the dispatcher turns into a tool error
+    — the same treatment ``kind`` and ``importance`` get. It deliberately does **not** validate the
+    RRULE, the ``HH:MM`` or the zone: :func:`avid.core.schedule.next_occurrence` is the authority on
+    all three, ``MemoryService`` resolves the spec before writing it, and a second copy of those
+    rules here would be a copy free to drift.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("schedule must be an object with rrule and local_time")
+    spec = RoutineSpec(
+        rrule=str(raw["rrule"]),
+        local_time=str(raw["local_time"]),
+        timezone=str(raw.get("timezone") or default_timezone),
+    )
+    return spec
 
 
 def _fact_view(fact: Fact) -> dict[str, Any]:

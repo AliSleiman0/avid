@@ -49,7 +49,14 @@ from avid.core.hal import (
 )
 from avid.core.realtime import RealtimeEvent
 from avid.core.schedule import Routine
-from avid.domain import Affect, Event, Fact, RetrievalMatch, TriggerRecord
+from avid.domain import (
+    Affect,
+    Event,
+    Fact,
+    RetrievalMatch,
+    RoutineSpec,
+    TriggerRecord,
+)
 
 
 @runtime_checkable
@@ -491,8 +498,20 @@ class FactRepository(Protocol):
     :class:`~avid.domain.Event` envelope's ``timestamp_ms``.
     """
 
-    async def add(self, fact: Fact, *, embedding: bytes | None = None) -> int:
-        """Insert ``fact`` and return its assigned id. The database owns the id (an
+    async def add(
+        self,
+        fact: Fact,
+        *,
+        embedding: bytes | None = None,
+        routine: RoutineSpec | None = None,
+    ) -> int:
+        """Insert ``fact`` and return its assigned id.
+
+        ``routine`` writes the fact's ``routines`` row (§8.3, §10.3) **in the same transaction**.
+        §6.6 promises ``remember_fact`` is durable before it returns; a schedule that landed in a
+        second transaction would make that promise half true, and the failing half is the one §10
+        needs — a routine fact with no ``routines`` row is invisible to the scheduler and reports
+        nothing. The database owns the id (an
         ``INTEGER PRIMARY KEY`` rowid, §8.2), so ``fact.id`` is ignored on insert and the new
         id is returned for the caller to carry. ``embedding`` is the pre-normalised 384×f32 LE
         BLOB (§8.2), crossing as opaque ``bytes`` so the port stays ``numpy``-free; ``None``
@@ -944,13 +963,19 @@ class MemoryTools(Protocol):
         kind: str,
         importance: int,
         *,
+        schedule: RoutineSpec | None = None,
         correlation_id: UUID | None = None,
     ) -> int:
         """Store a fact the model extracted (§7.6, UC-02) and return its id — **durable before it
         returns** (§3.7.3, AC-3): the model is told "remembered" only when the row is committed.
         Runs the full §7.8 write (supersession included). Raises :class:`ValueError` on an invalid
         ``kind`` (not in ``FACT_KINDS``) or ``importance`` (outside 1–10) rather than writing a bad
-        row — the dispatcher surfaces that as a tool error (AC-6)."""
+        row — the dispatcher surfaces that as a tool error (AC-6).
+
+        ``schedule`` is the model-supplied RFC 5545 half of a ``routine``-kind fact (§6.6, added at
+        M10) and is what turns UC-02 into UC-03. It is validated before the write, so a rule the
+        scheduler could never resolve becomes a tool error the model can correct in the same turn
+        rather than a reminder that silently never fires."""
         ...
 
     async def recall(

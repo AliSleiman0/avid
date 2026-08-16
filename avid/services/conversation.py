@@ -183,6 +183,7 @@ class ConversationService:
         affect: AffectTools,
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
+        default_timezone: str,
         think_timeout_s: float,
         server_turn_detection: bool,
         thinking_delay_ms: int,
@@ -200,6 +201,9 @@ class ConversationService:
         self._affect = affect
         self._idle_close_s = session_idle_close_s
         self._memory_inject_timeout_s = memory_inject_timeout_s
+        # [behavior] timezone, injected (P7) purely to fill in remember_fact's schedule when the
+        # model omits one. This service never reads it itself.
+        self._default_timezone = default_timezone
         self._think_timeout_s = think_timeout_s
         # Whether the SERVER is also deciding when a turn ends (AVID-194). Required, never
         # defaulted — the #180 lesson: a defaulted turn-taking knob is one the bench silently
@@ -555,6 +559,7 @@ class ConversationService:
             affect=self._affect,
             correlation_id=self._corr(),
             approximate=self._turn_approximate,
+            default_timezone=self._default_timezone,
         )
         await self._client.send_tool_output(ev.call_id, output)
 

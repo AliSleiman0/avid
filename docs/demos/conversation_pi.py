@@ -101,6 +101,7 @@ from avid.domain import (
     Event,
     Fact,
     RobotState,
+    RoutineSpec,
     SystemDegradedEntered,
     SystemDegradedExited,
 )
@@ -321,6 +322,7 @@ class _NoMemory:
         kind: str,
         importance: int,
         *,
+        schedule: RoutineSpec | None = None,
         correlation_id: UUID | None = None,
     ) -> int:
         return 0
@@ -815,6 +817,7 @@ async def _run_conversation(
         affect=affect,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
+        default_timezone="Asia/Beirut",
         think_timeout_s=config.gate.think_timeout_s,
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
         thinking_delay_ms=config.cues.thinking_delay_ms,

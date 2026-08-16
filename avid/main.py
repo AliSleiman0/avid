@@ -689,6 +689,7 @@ def _wire_services(
         affect=affect,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
+        default_timezone=config.behavior.timezone,
         think_timeout_s=config.gate.think_timeout_s,
         # Who owns the turn boundary (AVID-194). False — the shipped value — means the local VAD
         # is the only authority and ConversationService commits from its falling edge.

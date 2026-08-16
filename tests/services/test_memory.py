@@ -37,6 +37,7 @@ from avid.domain import (
     MemoryFactStored,
     MemoryFactSuperseded,
     MemoryRecallCompleted,
+    RoutineSpec,
     ScoreWeights,
     SystemHandlerFailed,
 )
@@ -702,3 +703,116 @@ async def test_forgetting_a_fact_that_superseded_another_does_not_raise() -> Non
             "forgetting the newer fact must not destroy the older one"
         )
         assert freed.superseded_by is None and freed.superseded_at is None
+
+
+# --- The schedule half of a routine fact (#314, SDS §6.6, §10.3) -----------------------------
+
+
+async def test_a_routine_schedule_lands_in_the_same_transaction() -> None:
+    """UC-02 → UC-03's seam. §6.6 promises ``remember_fact`` is durable before it returns; the
+    schedule is part of what was remembered, so it commits with the fact or the promise is half
+    true — and the failing half is the one §10 needs, since a routine fact with no ``routines``
+    row is invisible to the scheduler and reports nothing."""
+    async for rig in _make_rig():
+        fact_id = await rig.memory.remember_fact(
+            "the user drinks coffee every day at 08:00",
+            "routine",
+            6,
+            schedule=RoutineSpec(
+                rrule="FREQ=DAILY", local_time="08:00", timezone="Asia/Beirut"
+            ),
+        )
+
+        def _row() -> tuple[str, str, str, int] | None:
+            conn = rig.repo._conn_sync()  # noqa: SLF001 - asserting a table this port has no read for
+            got = conn.execute(
+                "SELECT rrule, local_time, timezone, lead_time_s FROM routines "
+                "WHERE fact_id = ?",
+                (fact_id,),
+            ).fetchone()
+            return None if got is None else tuple(got)  # type: ignore[return-value]
+
+        row = await rig.repo._run(_row)  # noqa: SLF001 - as above
+        assert row == ("FREQ=DAILY", "08:00", "Asia/Beirut", 300)
+
+
+async def test_a_fact_with_no_schedule_writes_no_routine() -> None:
+    """Every other kind of fact is untouched by this. The `routines` table exists *only* because
+    §10 needs a machine-readable time (§8.3's own comment)."""
+    async for rig in _make_rig():
+        fact_id = await rig.memory.remember_fact("the user likes tea", "preference", 4)
+
+        def _count() -> int:
+            conn = rig.repo._conn_sync()  # noqa: SLF001 - as above
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM routines WHERE fact_id = ?", (fact_id,)
+                ).fetchone()[0]
+            )
+
+        assert await rig.repo._run(_count) == 0  # noqa: SLF001 - as above
+
+
+async def test_an_unresolvable_schedule_is_refused_before_anything_is_written() -> None:
+    """A rule the scheduler could never interpret becomes a tool error the model can correct in
+    the same turn — not a row that silently never fires. The check is a real resolution through
+    §10.3's resolver, so there is no second copy of its rules here to drift."""
+    async for rig in _make_rig():
+        with pytest.raises(ValueError, match="RFC 5545"):
+            await rig.memory.remember_fact(
+                "standup every morning",
+                "routine",
+                5,
+                schedule=RoutineSpec(
+                    rrule="EVERY MORNING", local_time="09:30", timezone="Asia/Beirut"
+                ),
+            )
+        assert await rig.repo.fetch_live() == []
+
+
+async def test_an_unknown_timezone_is_refused_too() -> None:
+    """`routines.timezone` is IANA and the resolver is the authority on what resolves. A zone that
+    does not exist would raise at 07:55 inside the scheduler loop, six months later."""
+    async for rig in _make_rig():
+        with pytest.raises(ValueError, match="IANA timezone"):
+            await rig.memory.remember_fact(
+                "coffee at eight",
+                "routine",
+                6,
+                schedule=RoutineSpec(
+                    rrule="FREQ=DAILY", local_time="08:00", timezone="Mars/Olympus_Mons"
+                ),
+            )
+        assert await rig.repo.fetch_live() == []
+
+
+async def test_a_routine_without_a_schedule_is_counted_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """⚠️ AC-5, and the lesson #310 paid for.
+
+    A routine fact with no schedule is a legitimate outcome — not every routine has a clock time —
+    but it is *indistinguishable* from a model that has quietly stopped filling the field. That is
+    exactly `set_affect`'s failure: it dispatched perfectly against every fake and fired zero times
+    in six live runs, and the zero was unreadable because nothing counted the difference between
+    "no calls" and "no instrument". So the difference is counted here, and said out loud.
+    """
+    async for rig in _make_rig():
+        with caplog.at_level(logging.WARNING, logger="avid.services.memory"):
+            await rig.memory.remember_fact(
+                "the user goes for a run on Tuesday mornings", "routine", 5
+            )
+        assert rig.memory.routines_without_schedule == 1
+        assert any("no schedule" in record.getMessage() for record in caplog.records)
+
+
+async def test_the_counter_distinguishes_none_from_never_asked() -> None:
+    """A zero that means "every routine had a schedule" and a zero that means "no routines were
+    ever stored" are different facts, and the counter only helps if it can tell them apart — which
+    it does by counting up from a value that was set at construction rather than inferred later."""
+    async for rig in _make_rig():
+        assert rig.memory.routines_without_schedule == 0
+        await rig.memory.remember_fact("the user likes tea", "preference", 4)
+        assert rig.memory.routines_without_schedule == 0
+        await rig.memory.remember_fact("the user swims sometimes", "routine", 4)
+        assert rig.memory.routines_without_schedule == 1
