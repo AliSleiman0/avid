@@ -293,6 +293,20 @@ class AudioService:
 
     # --- the TurnSink seam (#103, §9.1.4) ------------------------------------------------
 
+    async def adopt_turn(self, correlation_id: UUID) -> None:
+        """Adopt a turn this service did not hear begin (§9.1.1, #337).
+
+        ``_turn_id`` is otherwise minted in exactly one place — :meth:`_begin_speech`, the local
+        VAD's rising edge — because until M10 every turn started with someone speaking. A proactive
+        turn starts with a clock, so the id is minted by ``BehaviorService`` at the other origin and
+        handed here before any audio arrives.
+
+        Without it ``_playing_corr`` is ``None`` when playback opens and the assertion in
+        :meth:`_playback_corr` kills the pump on the first chunk — which is exactly what the rig
+        did on the first live proactive turn.
+        """
+        self._turn_id = correlation_id
+
     def mic(self) -> AsyncIterator[AudioChunk]:
         """Captured mic PCM, up (``TurnSink``). See :meth:`_mic_up`."""
         return self._mic_up()

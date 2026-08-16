@@ -100,6 +100,7 @@ class Rig:
     memory: MemoryService
     behavior: BehaviorService
     conversation: ConversationService
+    sink: FakeTurnSink
     triggers: SqliteTriggerStore
     facts: SqliteFactRepo
     events: list[Event]
@@ -156,6 +157,7 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
         ignore_backoff_multiplier=2,
         ignore_streak_limit=3,
     )
+    sink = FakeTurnSink()
     conversation = ConversationService(
         bus=bus,
         clock=clock,
@@ -163,7 +165,7 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
         client=ReplayRealtimeClient.from_dir(
             _SESSIONS / "proactive_coffee", clock=clock
         ),
-        sink=FakeTurnSink(),
+        sink=sink,
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
         memory=memory,
         affect=_GateAffect(),
@@ -200,7 +202,9 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
     await bus.start()
     await memory.start()
     await behavior.start()
-    return Rig(bus, clock, state, memory, behavior, conversation, triggers, facts, seen)
+    return Rig(
+        bus, clock, state, memory, behavior, conversation, sink, triggers, facts, seen
+    )
 
 
 async def _teardown(rig: Rig) -> None:
@@ -650,6 +654,54 @@ async def test_a_suppressed_morning_does_not_retire_the_trigger(db: Path) -> Non
         assert trigger.next_fire_at is not None, (
             "a suppressed trigger must still hold a future occurrence, or the boot rebuild "
             "cannot restore it either"
+        )
+    finally:
+        await _teardown(rig)
+
+
+async def test_the_proactive_turn_actually_plays_audio(db: Path) -> None:
+    """⚠️ The crash the rig found, and the one this file could not have caught before.
+
+    ``AudioService`` mints a turn id in exactly one place — its own VAD rising edge — because until
+    M10 every turn began with someone speaking. A proactive turn begins with a clock, so the sink
+    receives assistant audio for a turn it never heard start, ``_playing_corr`` is ``None``, and the
+    assertion in ``_playback_corr`` kills the conversation pump on the **first chunk**. Live, the
+    robot fired its reminder, opened a session, and said nothing.
+
+    This file went green through all of it, because the fixture had a transcript and **no audio**.
+    The exclusion was deliberate and reasoned — "playback is M4's and M5's ground" — and it was
+    exactly wrong: the thing left out of the fixture was the thing that broke. So the fixture now
+    carries a chunk, and this asserts PCM reached the speaker seam.
+    """
+    clock = FakeClock()
+    rig = await _compose(db, clock)
+    try:
+        await _tell_it_about_coffee(rig)
+        await _settle(rig)
+        await rig.clock.advance_to("07:50")
+        await _wake_and_see_someone(rig)
+        await rig.clock.advance_to("07:55")
+        await _wait_until(
+            rig,
+            lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+            what="the reminder firing",
+        )
+
+        for _ in range(30):
+            if rig.sink.played:
+                break
+            await rig.clock.advance(0.1)
+            await _settle(rig, rounds=1)
+        else:
+            raise AssertionError(
+                "the reminder fired and no audio ever reached the speaker — the pump is dead"
+            )
+
+        assert rig.sink.adopted, (
+            "the sink was never told whose turn this is, so the next chunk asserts"
+        )
+        assert rig.sink.adopted[0] == rig.events[0].correlation_id, (
+            "and the id it was told must be the one the trigger minted (§9.1.1)"
         )
     finally:
         await _teardown(rig)

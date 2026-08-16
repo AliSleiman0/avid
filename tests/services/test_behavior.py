@@ -33,6 +33,7 @@ from avid.domain import (
     BehaviorProactiveSuppressed,
     BehaviorTriggerDisabled,
     BehaviorTriggerFired,
+    ConversationAssistantResponded,
     ConversationUserTranscribed,
     Event,
     MemoryFactDeleted,
@@ -548,9 +549,10 @@ async def test_the_budget_and_the_cooldown_survive_a_restart(rig: Rig) -> None:
 
 async def test_every_subscription_is_named_for_the_drift_check(rig: Rig) -> None:
     """``name`` is mandatory so §9.1.5's check can see the subscriber — an anonymous handler is
-    invisible to it. Twelve, per §9.1.3, not the three §10's prose implies."""
+    invisible to it. Thirteen: §9.1.3's twelve, plus ``conversation.assistant_responded`` since
+    #337, which is how the audit learns whether the robot actually said anything."""
     names = {sub.name for sub in rig.behavior.subscriptions()}
-    assert len(names) == 12
+    assert len(names) == 13
     assert all(name.startswith("BehaviorService.") for name in names)
 
 
@@ -589,6 +591,20 @@ async def _deliver_once(rig: Rig, *, trigger_id: int) -> None:
         lambda: rig.behavior._pending is not None,  # noqa: SLF001 - the arming IS the event
         what="the reply window being armed",
     )
+    # ⚠️ The robot has to actually SAY something before silence can mean "ignored". Since #337 a
+    # delivered turn that produces no utterance is a fault, not a user declining, and the backoff
+    # deliberately refuses to act on it — so a test that skipped this would be asserting the
+    # broken-pump path while believing it tested the ignore path.
+    pending = rig.behavior._pending  # noqa: SLF001 - as above
+    assert pending is not None
+    await rig.bus.publish(
+        ConversationAssistantResponded(
+            **{**_env(rig), "correlation_id": pending.correlation_id},  # type: ignore[arg-type]
+            text="Morning — coffee's about due.",
+            item_id="item_0",
+        )
+    )
+    await _settle(rig)
     # ...and one more settle so the spawned window task actually *runs* and registers its sleep.
     # `_pending` is assigned before `spawn()`, so the flag can be true while the coroutine has not
     # started — and a FakeClock only wakes the sleepers it crosses, so an advance landing in that
@@ -756,9 +772,12 @@ async def test_two_ignores_then_a_reply_leaves_no_residue(rig: Rig) -> None:
         rig.behavior._pending = _PendingDelivery(  # noqa: SLF001 - the arc under test
             trigger_id=trigger_id,
             log_id=log_id,
+            correlation_id=uuid4(),
             ignore_streak=record.ignore_streak,
             cooldown_s=record.cooldown_s,
         )
+        # It spoke; only then is silence the user's choice rather than the robot's failure.
+        rig.behavior._pending_utterance = "coffee's about due"  # noqa: SLF001 - as above
         await rig.behavior._resolve_pending(engaged=engaged)  # noqa: SLF001 - as above
 
     await _resolve(engaged=False)
@@ -771,3 +790,54 @@ async def test_two_ignores_then_a_reply_leaves_no_residue(rig: Rig) -> None:
     record = await rig.store.get(trigger_id)
     assert record is not None
     assert (record.ignore_streak, record.cooldown_s) == (0, 900)
+
+
+async def test_a_delivered_turn_that_says_nothing_is_not_recorded_as_ignored(
+    rig: Rig,
+) -> None:
+    """⚠️ The audit lied on the rig, and this is the assertion that stops it.
+
+    ``outcome='delivered'`` is written when the **gate passes** — seconds and a network round trip
+    before any words exist. Live, a proactive turn fired, opened a session, crashed on its first
+    audio chunk, and the log recorded ``delivered`` then ``ignored``. §10.5 would have doubled the
+    cooldown and, after three mornings, **disabled the trigger for being ignored** — a trigger that
+    had never once spoken.
+
+    So: no utterance means the *turn* failed, not that the user declined. The streak must not move,
+    the reaction must stay NULL, and the silence must be counted where someone will see it.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+
+    # Deliver, and deliberately never publish an assistant utterance — the broken-pump case.
+    rig.behavior._scheduler.schedule(  # noqa: SLF001 - staging the fire, not the robot
+        trigger_id, fire_at=rig.clock.now() + 10
+    )
+    await _settle(rig)
+    await rig.clock.advance(10)
+    await _wait_until(
+        rig,
+        lambda: rig.behavior._pending is not None,  # noqa: SLF001
+        what="the reply window being armed",
+    )
+    await _settle(rig)
+
+    await rig.clock.advance(30)
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply window closing",
+    )
+
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.ignore_streak == 0, "a robot that said nothing was not ignored"
+    assert record.cooldown_s == 900, "and must not be punished with a doubled cooldown"
+    assert rig.behavior.silent_deliveries == 1, "the silence must be counted"
+    assert await _reaction(rig) is None, (
+        "a NULL reaction on a delivered row is the signal that nothing was said"
+    )

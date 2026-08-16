@@ -133,6 +133,7 @@ _EXPECTED_SUBSCRIPTIONS = {
     "BehaviorService.presence_lost",
     "BehaviorService.speech_started",
     "BehaviorService.speech_ended",
+    "BehaviorService.assistant_responded",
     "BehaviorService.user_transcribed",
     "BehaviorService.fact_stored",
     "BehaviorService.fact_superseded",

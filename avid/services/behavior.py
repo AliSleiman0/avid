@@ -56,6 +56,7 @@ from avid.domain import (
     BehaviorProactiveSuppressed,
     BehaviorTriggerDisabled,
     BehaviorTriggerFired,
+    ConversationAssistantResponded,
     ConversationUserTranscribed,
     MemoryFactDeleted,
     MemoryFactStored,
@@ -99,6 +100,7 @@ class _PendingDelivery:
 
     trigger_id: int
     log_id: int
+    correlation_id: UUID
     ignore_streak: int
     cooldown_s: int
 
@@ -152,12 +154,18 @@ class BehaviorService:
         # construction: rule 2 vetoes while the machine is not IDLE, and a turn in flight is
         # not IDLE.
         self._pending: _PendingDelivery | None = None
+        # What the pending proactive turn actually said, if anything. `None` while a turn is
+        # in flight is the honest state; `None` when the window closes means it never spoke.
+        self._pending_utterance: str | None = None
         self._reply_task: asyncio.Task[None] | None = None
         # How many delivered turns have been *fully* resolved — reaction written, backoff
         # persisted. A plain attribute, like ExpressionService's staleness counters. It exists
         # because `_pending` is cleared at the START of resolution and the writes follow it, so
         # anything watching `_pending` alone sees "done" while the database is still mid-update.
         self.resolved_deliveries = 0
+        # Turns that were delivered and said nothing. Should be zero; anything else is the
+        # pump dying, and it is counted because §10.6 could not otherwise tell.
+        self.silent_deliveries = 0
 
     # --- SDS §9.2 service shape -----------------------------------------------------------
 
@@ -246,6 +254,13 @@ class BehaviorService:
                 event_type=AudioSpeechEnded,
                 handler=cast(Handler, self._on_speech_ended),
                 name="BehaviorService.speech_ended",
+                policy=oldest,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=ConversationAssistantResponded,
+                handler=cast(Handler, self._on_assistant_responded),
+                name="BehaviorService.assistant_responded",
                 policy=oldest,
                 maxsize=DEFAULT_MAXSIZE,
             ),
@@ -374,6 +389,21 @@ class BehaviorService:
             duration_s=event.duration_ms / 1000.0,
             keep_s=self._limits.presence_window_s * 2,
         )
+
+    async def _on_assistant_responded(
+        self, event: ConversationAssistantResponded
+    ) -> None:
+        """Fill in what the robot actually said (§10.6, #337).
+
+        Matched on ``correlation_id`` so a *reactive* turn overlapping the hold-open window cannot
+        be mistaken for the proactive one's words — the reply to a proactive turn mints its own id
+        (§9.1.1), so anything carrying this turn's id is this turn.
+        """
+        pending = self._pending
+        if pending is None or event.correlation_id != pending.correlation_id:
+            return
+        self._pending_utterance = event.text
+        await self._log.set_utterance(pending.log_id, event.text)
 
     async def _on_user_transcribed(self, event: ConversationUserTranscribed) -> None:
         """Rule 4's retraction: this turn *was* directed at the robot, so it is not ambient."""
@@ -590,9 +620,11 @@ class BehaviorService:
         self._pending = _PendingDelivery(
             trigger_id=trigger_id,
             log_id=log_id,
+            correlation_id=correlation_id,
             ignore_streak=record_ignore_streak,
             cooldown_s=record_cooldown_s,
         )
+        self._pending_utterance = None
         self._reply_task = spawn(
             self._await_reply(self._hold_open_s), name="BehaviorService.reply_window"
         )
@@ -617,7 +649,22 @@ class BehaviorService:
         most likely to keep this thing switched on in month nine."*
         """
         pending, self._pending = self._pending, None
+        spoke, self._pending_utterance = self._pending_utterance, None
         if pending is None:  # pragma: no cover - guarded by both call sites
+            return
+
+        if spoke is None:
+            # ⚠️ The turn produced no words. That is a FAULT, not a user ignoring the robot, and
+            # §10.5's backoff must not act on it: punishing a trigger for silence the robot itself
+            # caused is how a broken pump quietly disables a working reminder after three mornings.
+            # Left unreacted in the log — a delivered row with a NULL utterance is the signal.
+            _log.error(
+                "proactive turn %d produced no utterance — not counting it as ignored; "
+                "the turn failed rather than the user declining (§10.6)",
+                pending.trigger_id,
+            )
+            self.silent_deliveries += 1
+            self.resolved_deliveries += 1
             return
         task, self._reply_task = self._reply_task, None
         # Cancel the window only when something *else* closed it. On the ignored path this method
