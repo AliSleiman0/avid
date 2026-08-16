@@ -28,8 +28,10 @@ from avid.core.event_bus import AsyncioEventBus
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AudioSpeechEnded,
+    AudioSpeechStarted,
     BehaviorProactiveDelivered,
     BehaviorProactiveSuppressed,
+    BehaviorTriggerDisabled,
     BehaviorTriggerFired,
     ConversationUserTranscribed,
     Event,
@@ -41,7 +43,7 @@ from avid.domain import (
     Trigger,
     VisionPresenceGained,
 )
-from avid.services.behavior import BehaviorService
+from avid.services.behavior import BehaviorService, _PendingDelivery
 
 # 2026-06-10 12:00 UTC. Far from any DST edge in the test zone, so a shifted expectation is a real
 # failure rather than a calendar accident.
@@ -88,6 +90,9 @@ async def rig() -> AsyncIterator[Rig]:
         limits=_LIMITS,
         timezone=_ZONE,
         default_cooldown_s=900,
+        hold_open_s=30.0,
+        ignore_backoff_multiplier=2,
+        ignore_streak_limit=3,
     )
     for sub in behavior.subscriptions():
         bus.subscribe(
@@ -101,6 +106,7 @@ async def rig() -> AsyncIterator[Rig]:
         BehaviorTriggerFired,
         BehaviorProactiveDelivered,
         BehaviorProactiveSuppressed,
+        BehaviorTriggerDisabled,
     ):
         bus.subscribe(event_type, _collect, name=f"test.{event_type.name}")
     await bus.start()
@@ -521,6 +527,9 @@ async def test_the_budget_and_the_cooldown_survive_a_restart(rig: Rig) -> None:
         limits=_LIMITS,
         timezone=_ZONE,
         default_cooldown_s=900,
+        hold_open_s=30.0,
+        ignore_backoff_multiplier=2,
+        ignore_streak_limit=3,
     )
     context = await fresh._context(  # noqa: SLF001 - as above
         now=rig.clock.now(), trigger_last_fired_s=math.inf, trigger_cooldown_s=900.0
@@ -543,3 +552,217 @@ async def test_every_subscription_is_named_for_the_drift_check(rig: Rig) -> None
 async def test_stop_is_idempotent(rig: Rig) -> None:
     await rig.behavior.stop()
     await rig.behavior.stop()
+
+
+# -- 10.5: the robot notices it is being ignored (#241) --------------------------------------
+
+
+async def _deliver_once(rig: Rig, *, trigger_id: int) -> None:
+    """Put one proposal through the gate and let it be delivered."""
+    before = len([e for e in rig.events if isinstance(e, BehaviorProactiveDelivered)])
+    rig.behavior._scheduler.schedule(  # noqa: SLF001 - re-arming by hand keeps the arc explicit
+        trigger_id, fire_at=rig.clock.now() + 10
+    )
+    await _settle(rig)
+    await rig.clock.advance(10)
+    await _wait_until(
+        rig,
+        lambda: (
+            len([e for e in rig.events if isinstance(e, BehaviorProactiveDelivered)])
+            > before
+        ),
+        what="a delivery",
+    )
+    # ⚠️ And wait for the reply window to actually be armed. `proactive_delivered` is published
+    # *before* the turn is recorded as pending, so a test that advanced the clock here would race
+    # the arming — the sleeper would register after the advance, never be crossed, and
+    # `_pending is None` would then read as "the window closed" when it means "never opened". A
+    # predicate that cannot tell *not yet* from *done* is not a predicate. That is exactly the bug
+    # the first draft of this helper shipped.
+    await _wait_until(
+        rig,
+        lambda: rig.behavior._pending is not None,  # noqa: SLF001 - the arming IS the event
+        what="the reply window being armed",
+    )
+    # ...and one more settle so the spawned window task actually *runs* and registers its sleep.
+    # `_pending` is assigned before `spawn()`, so the flag can be true while the coroutine has not
+    # started — and a FakeClock only wakes the sleepers it crosses, so an advance landing in that
+    # gap leaves the window sleeping forever.
+    await _settle(rig)
+
+
+async def _reaction(rig: Rig, log_id: int = 1) -> str | None:
+    def _read() -> str | None:
+        row = (
+            rig.store._conn_sync()
+            .execute(  # noqa: SLF001 - the port has no read for this column
+                "SELECT user_reaction FROM proactive_log WHERE id = ?", (log_id,)
+            )
+            .fetchone()
+        )
+        return None if row is None else row["user_reaction"]
+
+    return await rig.store._run(_read)  # noqa: SLF001 - as above
+
+
+async def test_silence_widens_the_cooldown_and_advances_the_streak(rig: Rig) -> None:
+    """AC-1. 10.5: *"Without this, a badly-conceived trigger annoys forever at a fixed rate. With
+    it, the robot notices it is being ignored and stops."*"""
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    await rig.clock.advance(30)  # the hold-open window, unanswered
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply window closing",
+    )
+
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.ignore_streak == 1
+    assert record.cooldown_s == 1800, "cooldown_s *= ignore_backoff_multiplier"
+    assert await _reaction(rig) == "ignored"
+
+
+async def test_a_reply_resets_the_streak_rather_than_decrementing_it(rig: Rig) -> None:
+    """AC-2, and *reset* is the design: one answered reminder means the trigger is wanted, so
+    making the user earn back three days of goodwill would be a different, worse robot.
+
+    The reply is matched by **timing, not by correlation_id**, and it cannot be otherwise: a reply
+    is a fresh utterance, so AudioService mints a new id for it at the other turn origin. The gate
+    guarantees no second proactive turn is in flight, so any speech in the window answers this one.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.store.set_backoff(trigger_id, ignore_streak=2, cooldown_s=3600)
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    await rig.bus.publish(AudioSpeechStarted(**_env(rig), ring_buffer_ms=300))  # type: ignore[arg-type]
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply being noticed",
+    )
+
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.ignore_streak == 0, "reset, not decremented"
+    assert record.cooldown_s == 900, "and the cooldown returns to its configured value"
+    assert await _reaction(rig) == "engaged"
+
+
+async def test_the_third_ignore_switches_the_trigger_off_loudly(rig: Rig) -> None:
+    """AC-3: at the limit the trigger disables itself, on the exact transition, and says so.
+
+    10.5: *"Disabling is logged loudly, never silent. A trigger that turned itself off is
+    diagnostic information about the design, and if you do not surface it you will never learn
+    which of your ideas were bad."*
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.store.set_backoff(trigger_id, ignore_streak=2, cooldown_s=3600)
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    await rig.clock.advance(30)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerDisabled) for e in rig.events),
+        what="the trigger disabling itself",
+    )
+
+    disabled = [e for e in rig.events if isinstance(e, BehaviorTriggerDisabled)]
+    assert [(e.trigger_id, e.ignore_streak) for e in disabled] == [(trigger_id, 3)]
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.enabled is False
+
+
+async def test_a_disabled_trigger_stays_disabled_across_a_restart(rig: Rig) -> None:
+    """AC-4, and the reason the streak is a *column* rather than a field: a backoff that resets on
+    reboot is not a backoff. Proven through the boot rebuild's own query."""
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=_START + 60, cooldown_s=900, at=_START
+    )
+    await rig.behavior._disable(trigger_id, ignore_streak=3)  # noqa: SLF001 - the arc under test
+
+    fresh = BehaviorService(
+        bus=rig.bus,
+        clock=rig.clock,
+        state=rig.state,
+        triggers=rig.store,
+        proactive_log=rig.store,
+        limits=_LIMITS,
+        timezone=_ZONE,
+        default_cooldown_s=900,
+        hold_open_s=30.0,
+        ignore_backoff_multiplier=2,
+        ignore_streak_limit=3,
+    )
+    assert await rig.store.enabled_triggers() == []
+    await fresh._on_started(  # noqa: SLF001 - the boot rebuild, called directly
+        SystemStarted(**_env(rig), adapters={})  # type: ignore[arg-type]
+    )
+    assert fresh._scheduler.pending == 0  # noqa: SLF001 - nothing was restored
+
+
+async def test_two_ignores_then_a_reply_leaves_no_residue(rig: Rig) -> None:
+    """The sequence AC-2 asks for: ignored, ignored, replied.
+
+    Driven through the resolution path directly rather than by staging three policy-passing
+    deliveries, and that is a deliberate choice rather than a shortcut. Three real deliveries would
+    need the global cooldown, the per-trigger cooldown and the state arc all stepped around, and
+    every one of those steps is a chance for the test to prove something about the *scaffolding*.
+    The gate is tested exhaustively in ``tests/domain/test_behavior.py``; what is under test here is
+    the arithmetic §10.5 specifies.
+
+    The streak must end at zero **and** the cooldown back at its configured value: a reset that
+    left the cooldown at 4x would keep punishing a trigger the user has just shown they want.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+
+    async def _resolve(*, engaged: bool) -> None:
+        record = await rig.store.get(trigger_id)
+        assert record is not None
+        log_id = await rig.store.record(
+            trigger_id=trigger_id,
+            considered_at=rig.clock.now(),
+            outcome="delivered",
+            reason=None,
+            utterance=None,
+        )
+        rig.behavior._pending = _PendingDelivery(  # noqa: SLF001 - the arc under test
+            trigger_id=trigger_id,
+            log_id=log_id,
+            ignore_streak=record.ignore_streak,
+            cooldown_s=record.cooldown_s,
+        )
+        await rig.behavior._resolve_pending(engaged=engaged)  # noqa: SLF001 - as above
+
+    await _resolve(engaged=False)
+    await _resolve(engaged=False)
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert (record.ignore_streak, record.cooldown_s) == (2, 3600)
+
+    await _resolve(engaged=True)
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert (record.ignore_streak, record.cooldown_s) == (0, 900)
