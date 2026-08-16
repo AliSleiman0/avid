@@ -681,6 +681,9 @@ def _wire_services(
         # The MemoryTools port for the §6.6 tool dispatch (#125) + §6.7-path-1 pre-injection (#126) —
         # the concrete MemoryService, injected as the port so ConvSvc names no service module (P2/P5).
         memory=memory,
+        # AffectService satisfies AffectTools structurally — no inheritance, no edit there.
+        # It is built above, before this call, so no reordering was needed (AVID-214).
+        affect=affect,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         think_timeout_s=config.gate.think_timeout_s,

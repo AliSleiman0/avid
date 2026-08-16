@@ -113,7 +113,12 @@ from avid.main import (
     _build_text_model,
     _build_vad,
 )
-from avid.services import AudioService, ConversationService, CostMeterService
+from avid.services import (
+    AffectService,
+    AudioService,
+    ConversationService,
+    CostMeterService,
+)
 
 _NS_PER_MS = 1_000_000.0
 
@@ -695,6 +700,13 @@ async def _run_conversation(
     # first speech_started is a legal transition — exactly as the running robot does.
     state = StateManager(bus=bus, clock=clock, initial=RobotState.IDLE)
 
+    # Real AffectService, not a null double (AVID-214). It needs only bus + clock, and wiring
+    # it for real is what lets a gate run *observe* set_affect firing: the tool call reaches
+    # this port, one affect.changed publishes, and the harness counts it. A null double would
+    # make the harness structurally unable to see #216 AC-6, which is the criterion it exists
+    # to grade.
+    affect = AffectService(bus=bus, clock=clock)
+
     speaker = _build_speaker(config)
     # A fake VAD cannot self-trigger, so off-Pi the demo scripts the turn origin (see
     # _scripted_source). On the Pi the config selects SileroVad and a human opens the turn.
@@ -732,6 +744,7 @@ async def _run_conversation(
         sink=audio,
         cues=_build_cue_bank(config, speaker=speaker),
         memory=memory,
+        affect=affect,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         think_timeout_s=config.gate.think_timeout_s,
@@ -745,7 +758,11 @@ async def _run_conversation(
 
     collector = _ConversationCollector(silence_hold_ms=config.gate.silence_hold_ms)
     # Register before the bus starts — subscription is static-at-composition (P3).
-    for sub in (*conversation.subscriptions(), *cost_meter.subscriptions()):
+    for sub in (
+        *affect.subscriptions(),
+        *conversation.subscriptions(),
+        *cost_meter.subscriptions(),
+    ):
         bus.subscribe(
             sub.event_type,
             sub.handler,

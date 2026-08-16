@@ -9,7 +9,12 @@ degraded-mode cue vocabulary ``Cue`` (AVID-80), the ``conversation.*`` events +
 (#116), and ``BBox`` + the ``vision.*`` events (#219).
 """
 
-from avid.domain.affect import Affect, AffectChanged, AffectTier
+from avid.domain.affect import (
+    SEMANTIC_AFFECTS,
+    Affect,
+    AffectChanged,
+    AffectTier,
+)
 from avid.domain.audio import (
     AudioPlaybackFinished,
     AudioPlaybackStarted,
@@ -79,6 +84,7 @@ __all__ = [
     "Affect",
     "AffectChanged",
     "AffectTier",
+    "SEMANTIC_AFFECTS",
     # audio.* events + pre-roll ring buffer (#86) + the echo gate's arithmetic (AVID-159)
     "AudioPlaybackFinished",
     "AudioPlaybackStarted",

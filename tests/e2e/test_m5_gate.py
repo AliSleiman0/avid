@@ -60,6 +60,7 @@ from avid.core.hal import AudioChunk
 from avid.core.ports import Speaker
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    Affect,
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
@@ -120,6 +121,20 @@ _COLLECTED: tuple[type[Event], ...] = (
     StateTransitioned,
     SystemHandlerFailed,
 )
+
+
+class _StubAffect:
+    """An ``AffectTools`` double for the conversation rig (AVID-214).
+
+    Records rather than renders: the service's job is to route a tool call to the port, and what
+    happens to the face afterwards is ``AffectService``'s and ``ExpressionService``'s business —
+    neither of which this service is allowed to know exists (P5)."""
+
+    def __init__(self) -> None:
+        self.applied: list[Affect] = []
+
+    async def set_affect(self, affect: Affect, *, correlation_id: UUID) -> None:
+        self.applied.append(affect)
 
 
 class _Collector:
@@ -357,6 +372,7 @@ async def _drive_session(
         think_timeout_s=think_timeout_s,
         server_turn_detection=False,
         thinking_delay_ms=0,
+        affect=_StubAffect(),
     )
 
     collector = _Collector()
@@ -523,6 +539,7 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         think_timeout_s=300.0,
         server_turn_detection=False,
         thinking_delay_ms=0,
+        affect=_StubAffect(),
     )
     collector = _Collector()
     for sub in conversation.subscriptions():

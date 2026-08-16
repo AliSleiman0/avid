@@ -44,6 +44,7 @@ from avid.core import lifecycle
 from avid.core.config import load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
 from avid.core.hal import DisplayFrame
+from avid.core.ports import AffectTools
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AffectChanged,
@@ -77,6 +78,7 @@ from avid.main import (
 )
 from avid.services import (
     TOOL_SCHEMAS,
+    AffectService,
     AudioService,
     ConversationService,
     CueBank,
@@ -485,6 +487,27 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
     assert isinstance(presence, PresenceService)
     # the ConversationService names the port; the concrete injected is the wired MemoryService
     assert conversation._memory is memory
+    # ...and the same for AffectTools (AVID-214). The wired AffectService is not in the returned
+    # tuple — it owns no task and is kept alive by its bound-method subscription — so this is
+    # asserted through the service that holds it: it must be an AffectService, satisfying the
+    # port structurally, and not some other object that happens to have the method.
+    assert isinstance(conversation._affect, AffectService)
+    assert isinstance(conversation._affect, AffectTools)
+
+
+def test_the_set_affect_wire_adds_no_subscription() -> None:
+    """AVID-214 is a *tool* wire, so the subscriber graph must be unchanged.
+
+    Asserted explicitly rather than left to the exact-set assertion elsewhere in this file, for
+    the reason #125 asserted the same thing: a tool that quietly grew a subscription would be a
+    second place the face could be driven from, and the §9.1.5 drift check would then be
+    describing a graph nobody intended."""
+    clock = FakeClock()
+    affect = AffectService(bus=AsyncioEventBus(clock=clock), clock=clock)
+
+    assert [sub.name for sub in affect.subscriptions()] == [
+        "AffectService.state_transitioned"
+    ]
 
 
 class _SignallingDisplay(FakeDisplay):

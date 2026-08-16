@@ -79,7 +79,14 @@ from avid.core.event_bus import (
     OverflowPolicy,
     Subscription,
 )
-from avid.core.ports import Clock, EventBus, MemoryTools, RealtimeClient, TurnSink
+from avid.core.ports import (
+    AffectTools,
+    Clock,
+    EventBus,
+    MemoryTools,
+    RealtimeClient,
+    TurnSink,
+)
 from avid.core.realtime import (
     AssistantAudioChunk,
     AssistantTranscript,
@@ -173,6 +180,7 @@ class ConversationService:
         sink: TurnSink,
         cues: CueBank,
         memory: MemoryTools,
+        affect: AffectTools,
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
         think_timeout_s: float,
@@ -186,6 +194,10 @@ class ConversationService:
         self._sink = sink
         self._cues = cues
         self._memory = memory
+        # The §6.6 set_affect surface (AVID-214). A Protocol, never AffectService: services
+        # may not import each other (P5, and .importlinter fails CI on it), so the
+        # composition root injects the concrete one exactly as it does for memory.
+        self._affect = affect
         self._idle_close_s = session_idle_close_s
         self._memory_inject_timeout_s = memory_inject_timeout_s
         self._think_timeout_s = think_timeout_s
@@ -540,6 +552,7 @@ class ConversationService:
         output = await dispatch_tool_call(
             self._memory,
             ev,
+            affect=self._affect,
             correlation_id=self._corr(),
             approximate=self._turn_approximate,
         )
