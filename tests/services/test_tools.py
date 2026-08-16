@@ -339,13 +339,20 @@ def test_the_set_affect_enum_is_the_domain_tier_two_tuple() -> None:
     assert "idle" not in enum
 
 
-def test_capability_instructions_tell_the_model_when_not_to_set_an_affect() -> None:
-    """AC-5, and the emphasis is deliberate. §6.5's finding is that negative constraints are
-    followed far more reliably than encouragements, so the clause that stops it firing every turn
-    matters more than the one that enables it — an affect that changes on every reply is a
-    flickering face."""
+def test_capability_instructions_both_invite_and_bound_set_affect() -> None:
+    """AC-5, with the emphasis corrected by measurement.
+
+    The first version of this test asserted only the *constraint* ("not on ordinary replies"),
+    because §6.5's finding is that negative constraints are followed far more reliably than
+    encouragements. Measured live at the M6 gate, that finding operated against us: across 20 turns
+    including an unambiguously sad utterance and an unambiguously delighted one, set_affect fired
+    **zero** times. The suppression was doing all the work.
+
+    So both halves are asserted now — the invitation *and* the bound — because a clause with only
+    one of them is what produced a tool nothing ever called."""
     assert "set_affect" in CAPABILITY_INSTRUCTIONS
-    assert "not on ordinary replies" in CAPABILITY_INSTRUCTIONS
+    assert "call set_affect so your face matches your words" in CAPABILITY_INSTRUCTIONS
+    assert "Skip it for neutral replies" in CAPABILITY_INSTRUCTIONS
 
 
 # --- the shipped declarations (AC-2/AC-4) ------------------------------------------------------
