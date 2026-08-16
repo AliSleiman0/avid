@@ -31,6 +31,7 @@ from avid.adapters import (
     FakeServo,
     FakeSpeaker,
     FakeTextModel,
+    FakeTriggerStore,
     FakeVoiceActivityDetector,
     HybridRetriever,
     OpenAIRealtimeClient,
@@ -55,7 +56,15 @@ from avid.domain import (
     ConversationTurnEnded,
     ConversationTurnStarted,
     ConversationUserTranscribed,
+    MemoryFactDeleted,
+    MemoryFactStored,
+    MemoryFactSuperseded,
     StateTransitioned,
+    SystemDegradedEntered,
+    SystemDegradedExited,
+    SystemStarted,
+    VisionPresenceGained,
+    VisionPresenceLost,
 )
 from avid.main import (
     _build_camera,
@@ -80,6 +89,7 @@ from avid.services import (
     TOOL_SCHEMAS,
     AffectService,
     AudioService,
+    BehaviorService,
     ConversationService,
     CueBank,
     EpisodeRecorder,
@@ -106,6 +116,23 @@ _EXPECTED_SUBSCRIPTIONS = {
     # PresenceService (#223) subscribes to NOTHING — it is the only clock-driven service
     # (§3.6.1, "polls camera port"), so it contributes no edge to this graph. Its absence
     # here is the assertion; tests/services/test_presence.py asserts it from the other side.
+    #
+    # BehaviorService (#237) is the opposite extreme: it hears from nearly every other service,
+    # because §9.1.3 lists it against twelve events rather than the three §10's prose implies.
+    # Shipping only the fire path would have left it structurally incomplete against its own
+    # catalog row — the gap M8's epic caught for PresenceService before it shipped.
+    "BehaviorService.system_started",
+    "BehaviorService.state_transitioned",
+    "BehaviorService.degraded_entered",
+    "BehaviorService.degraded_exited",
+    "BehaviorService.presence_gained",
+    "BehaviorService.presence_lost",
+    "BehaviorService.speech_started",
+    "BehaviorService.speech_ended",
+    "BehaviorService.user_transcribed",
+    "BehaviorService.fact_stored",
+    "BehaviorService.fact_superseded",
+    "BehaviorService.fact_deleted",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -372,6 +399,7 @@ def test_main_wires_and_delegates_to_lifecycle(
         ConversationService,
         EpisodeRecorder,
         PresenceService,
+        BehaviorService,
     ]
 
 
@@ -431,12 +459,39 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         ConversationUserTranscribed,
         ConversationAssistantResponded,
         ConversationTurnEnded,
+        # BehaviorService's own feeds (#237, §9.1.3) — the world it reconstructs a PolicyContext
+        # from, since every service that owns a piece of that state keeps it private (P5).
+        SystemStarted,
+        SystemDegradedEntered,
+        SystemDegradedExited,
+        VisionPresenceGained,
+        VisionPresenceLost,
+        MemoryFactStored,
+        MemoryFactSuperseded,
+        MemoryFactDeleted,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]
     assert {sub.name for sub in subs} == _EXPECTED_SUBSCRIPTIONS
-    # DROP_OLDEST throughout: only the latest edge is worth acting on (SDS §9.1.3).
-    assert all(sub.policy is OverflowPolicy.DROP_OLDEST for sub in subs)
+    # DROP_OLDEST for the edges where only the latest reading is worth acting on (§9.1.3).
+    # BehaviorService's memory + system feeds are DROP_NEWEST, matching the catalog's own column:
+    # a dropped `memory.fact_stored` is a routine that never becomes a schedule, so the OLDEST
+    # queued one is the one worth keeping.
+    _drop_newest = {
+        "BehaviorService.system_started",
+        "BehaviorService.degraded_entered",
+        "BehaviorService.degraded_exited",
+        "BehaviorService.fact_stored",
+        "BehaviorService.fact_superseded",
+        "BehaviorService.fact_deleted",
+    }
+    for sub in subs:
+        expected = (
+            OverflowPolicy.DROP_NEWEST
+            if sub.name in _drop_newest
+            else OverflowPolicy.DROP_OLDEST
+        )
+        assert sub.policy is expected, sub.name
 
 
 def test_wire_services_injects_the_memory_port_into_conversation() -> None:
@@ -475,10 +530,11 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         fact_store=fact_store,
         retriever=retriever,
         episode_store=FakeEpisodeStore(clock=clock),
+        trigger_store=FakeTriggerStore(clock=clock),
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
         config=config,
     )
-    memory, _audio, conversation, _episode, presence = services
+    memory, _audio, conversation, _episode, presence, _behavior = services
     assert isinstance(memory, MemoryService)
     assert isinstance(conversation, ConversationService)
     # PresenceService owns a loop, so it is returned for the lifecycle to start/stop — the
@@ -575,6 +631,7 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         fact_store=fact_store,
         retriever=retriever,
         episode_store=FakeEpisodeStore(clock=clock),
+        trigger_store=FakeTriggerStore(clock=clock),
         cues=CueBank(speaker=FakeSpeaker(out_dir=tmp_path), asset_dir=None),
         config=config,
     )

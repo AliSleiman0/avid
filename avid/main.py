@@ -37,6 +37,7 @@ from avid.adapters import (
     FakeServo,
     FakeSpeaker,
     FakeTextModel,
+    FakeTriggerStore,
     FakeVoiceActivityDetector,
     FramebufferDisplay,
     HealthServer,
@@ -51,6 +52,7 @@ from avid.adapters import (
     SileroVad,
     SqliteEpisodeStore,
     SqliteFactRepo,
+    SqliteTriggerStore,
     SystemClock,
     SystemdNotifier,
 )
@@ -79,13 +81,14 @@ from avid.core.ports import (
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
-from avid.domain import ScoreWeights
+from avid.domain import PolicyLimits, ScoreWeights
 from avid.domain.vision import PresenceParams
 from avid.services import (
     CAPABILITY_INSTRUCTIONS,
     TOOL_SCHEMAS,
     AffectService,
     AudioService,
+    BehaviorService,
     ConversationService,
     CostMeterService,
     CueBank,
@@ -426,6 +429,28 @@ def _build_episode_store(config: Config, *, clock: Clock) -> EpisodeStore:
     return store
 
 
+def _build_trigger_store(config: Config, *, clock: Clock) -> SqliteTriggerStore:
+    """Select the trigger/proactive-log store for §10 (#237, SDS §8.3).
+
+    The **same** ``[adapters] store`` switch again — facts, episodes and triggers are one SQLite
+    file, so one real/fake toggle governs all three. Returns the concrete class rather than a port
+    because it satisfies *two* Protocols (``TriggerRepository`` and ``ProactiveLog``) and the
+    composition root hands the same object to both parameters; the service still depends only on
+    the Protocols (P2).
+    """
+    match config.adapters.store:
+        case "fake":
+            store: SqliteTriggerStore = FakeTriggerStore(clock=clock)
+        case "sqlite":
+            store = SqliteTriggerStore(db_path=config.memory.db_path, clock=clock)
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"store adapter {other!r} is not available — only 'sqlite' and "
+                f"'fake' exist (#117)"
+            )
+    return store
+
+
 def _build_retriever(
     config: Config,
     *,
@@ -590,6 +615,7 @@ def _wire_services(
     fact_store: FactRepository,
     retriever: Retriever,
     episode_store: EpisodeStore,
+    trigger_store: SqliteTriggerStore,
     cues: CueBank,
     config: Config,
     adapter_health: MutableMapping[str, bool] | None = None,
@@ -734,6 +760,28 @@ def _wire_services(
         nap_after_s=config.vision.nap_after_s,
         health=adapter_health,
     )
+    # BehaviorService last: it needs the state machine, the trigger store and the policy limits,
+    # and it is the only service whose subscriptions span every other one's output (§9.1.3).
+    # ⚠️ PolicyLimits is assembled here, from config, and passed as a value — the gate never sees
+    # a Config object, because a pure function that can read configuration is not a pure function.
+    behavior = BehaviorService(
+        bus=bus,
+        clock=clock,
+        state=state,
+        triggers=trigger_store,
+        proactive_log=trigger_store,
+        limits=PolicyLimits(
+            quiet_start_minutes=config.behavior.quiet_hours.start_minutes,
+            quiet_end_minutes=config.behavior.quiet_hours.end_minutes,
+            presence_window_s=config.behavior.presence_window_s,
+            ambient_speech_threshold_s=config.behavior.ambient_speech_threshold_s,
+            global_cooldown_s=config.behavior.global_cooldown_s,
+            daily_budget=config.behavior.daily_budget,
+        ),
+        timezone=config.behavior.timezone,
+        default_cooldown_s=config.behavior.global_cooldown_s,
+    )
+
     for service in (
         affect,
         expression,
@@ -743,6 +791,7 @@ def _wire_services(
         memory,
         episode_recorder,
         presence,
+        behavior,
     ):
         for sub in service.subscriptions():
             bus.subscribe(
@@ -757,7 +806,7 @@ def _wire_services(
     # loop + store close. Memory is started first so the index is ready before a session ever asks for
     # top_facts. The reactive services (the two faces, the cost meter) own no task and are kept alive by
     # their bound-method subscriptions above.
-    return (memory, audio, conversation, episode_recorder, presence)
+    return (memory, audio, conversation, episode_recorder, presence, behavior)
 
 
 async def _run(config: Config) -> int:
@@ -785,6 +834,7 @@ async def _run(config: Config) -> int:
     embedder = _build_embedder(config)
     fact_store = _build_fact_repository(config, clock=clock)
     episode_store = _build_episode_store(config, clock=clock)
+    trigger_store = _build_trigger_store(config, clock=clock)
     text_model = _build_text_model(config)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
@@ -836,6 +886,7 @@ async def _run(config: Config) -> int:
         fact_store=fact_store,
         retriever=retriever,
         episode_store=episode_store,
+        trigger_store=trigger_store,
         cues=cues,
         config=config,
         adapter_health=adapter_health,
