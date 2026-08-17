@@ -726,6 +726,7 @@ def _wire_services(
         default_cooldown_s=config.behavior.global_cooldown_s,
         hold_open_s=config.behavior.hold_open_s,
         ignore_backoff_multiplier=config.behavior.ignore_backoff_multiplier,
+        stale_grace_s=config.behavior.stale_grace_s,
         ignore_streak_limit=config.behavior.ignore_streak_limit,
     )
 

@@ -51,6 +51,7 @@ async def tools() -> AsyncIterator[BehaviorService]:
         default_cooldown_s=900,
         hold_open_s=30.0,
         ignore_backoff_multiplier=2,
+        stale_grace_s=600,
         ignore_streak_limit=3,
     )
     try:

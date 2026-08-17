@@ -52,6 +52,22 @@ POLICY_RULES: frozenset[str] = frozenset(
     {QUIET_HOURS, STATE, PRESENCE, AMBIENT_SPEECH, COOLDOWN, DAILY_BUDGET}
 )
 
+#: Not a policy rule — the booking was too old to be worth saying (#339).
+#:
+#: Deliberately **outside** :data:`POLICY_RULES`, and that is the whole point of it having its own
+#: name. The six rules grade *the room*: is it quiet hours, is someone there, did we just speak.
+#: Staleness grades *the booking itself*, before any of that is asked, and the two must not be
+#: confused: §10.4's rules are a normative set of six that ``evaluate_policy`` enumerates
+#: exhaustively, and quietly making it seven would break both that test and the meaning.
+#:
+#: It still travels as a ``reason`` in ``proactive_log``, because §10.6's instrument must be able
+#: to tell a *skipped* morning from one that never came due — otherwise a robot that was simply
+#: switched off looks exactly like a scheduler that stopped working.
+STALE = "stale"
+
+#: Every value the ``proactive_log.reason`` column may take: the six vetoes plus the one skip.
+SUPPRESSION_REASONS: frozenset[str] = POLICY_RULES | {STALE}
+
 #: The states a proactive turn may begin from (§10.4 rule 2, §3.10.3).
 #:
 #: **IDLE alone**, and the SDS says so since M10. The cell read ``∉ {IDLE, SLEEPING}`` until this
@@ -428,6 +444,8 @@ __all__ = [
     "COOLDOWN",
     "DAILY_BUDGET",
     "POLICY_RULES",
+    "STALE",
+    "SUPPRESSION_REASONS",
     "PRESENCE",
     "PROACTIVE_STATES",
     "QUIET_HOURS",

@@ -28,10 +28,15 @@ class _Recorder:
 
     def __init__(self) -> None:
         self.fired: list[int] = []
+        #: The (trigger_id, fire_at) pairs, for the tests that care *which moment* came due —
+        #: the callback is handed both, because grading a booking's age against the store's
+        #: column would read a clock the heap is allowed to disagree with (#339).
+        self.due: list[tuple[int, int]] = []
         self.rang = asyncio.Event()
 
-    async def __call__(self, trigger_id: int) -> None:
+    async def __call__(self, trigger_id: int, fire_at: int) -> None:
         self.fired.append(trigger_id)
+        self.due.append((trigger_id, fire_at))
         self.rang.set()
 
 
@@ -257,7 +262,7 @@ async def test_a_raising_callback_does_not_end_proactivity() -> None:
     clock = FakeClock()
     fired: list[int] = []
 
-    async def _boom(trigger_id: int) -> None:
+    async def _boom(trigger_id: int, fire_at: int) -> None:
         fired.append(trigger_id)
         if trigger_id == 1:
             raise RuntimeError("this trigger is broken")
@@ -323,3 +328,29 @@ async def test_an_empty_heap_parks_on_the_idle_sleep() -> None:
     finally:
         with contextlib.suppress(Exception):
             await loop.stop()
+
+
+async def test_the_callback_is_told_which_moment_came_due(
+    rig: tuple[SchedulerLoop, FakeClock, _Recorder],
+) -> None:
+    """The deadline travels with the id, and it is the **heap's**, not the store's (#339).
+
+    Whoever handles a due trigger has to be able to ask how late it is, and the only honest source
+    for that is the entry that actually came due. Reading the store's ``next_fire_at`` instead looks
+    equivalent and is not: the heap and the column are permitted to diverge — a re-arm may schedule
+    without persisting — and the first implementation of the staleness skip read the column, which
+    made a trigger staged into the heap for *now* look fifteen hours old.
+
+    Asserted against a fire_at the loop was *late* to, so a callback simply echoing ``now`` back
+    could not pass.
+    """
+    loop, clock, recorder = rig
+    booked = int(clock.now()) + 100
+    loop.schedule(7, fire_at=booked)
+    await clock.advance(250)  # overshoot: the loop wakes well after the deadline
+    await _settle()
+
+    assert recorder.due == [(7, booked)]
+    assert recorder.due[0][1] != int(clock.now()), (
+        "the callback was handed 'now', not the booking"
+    )

@@ -165,6 +165,7 @@
 10.1 Design goals
 10.2 The central separation
 10.3 Scheduler
+10.3.1 A booking is a claim about a moment
 10.4 The interruption policy
 10.5 Ignore backoff
 10.6 Log every decision
@@ -2348,6 +2349,44 @@ from today and never exhausts, and a bare `FREQ=WEEKLY` takes its weekday from D
 becomes "a week from whenever I last looked". Both still resolve, still return a plausible time, and
 are simply not the schedule the user described.
 
+### 10.3.1 A booking is a claim about a moment (as built, M10, #339)
+
+`_fire_due` takes every heap entry whose deadline has passed, with the delay clamped at zero. That
+is right for a running robot — a loop that wakes 200 ms late must still fire — and **wrong for one
+that was switched off**, because "the deadline has passed" then means hours, not milliseconds.
+
+Found on the rig: the Pi was powered down overnight, so 07:55's coffee reminder never fired. On the
+next boot `BehaviorService._on_started` restored `next_fire_at` verbatim, the loop found it due, and
+the gate — which grades the *room*, never the clock — waved it through. The robot would have
+announced coffee at 10:43.
+
+So a due trigger is now graded on its **age** before §10.4 is consulted at all:
+
+```
+now - fire_at > behavior.stale_grace_s   →   skip, log reason='stale', book the next occurrence
+```
+
+Three things about that line are deliberate.
+
+**It is not a seventh rule.** §10.4's six are a normative, exhaustively-enumerated set that grade the
+room; this grades the booking, and one belongs before the other rather than inside it. `STALE` is
+therefore defined *outside* `POLICY_RULES`, and `SUPPRESSION_REASONS = POLICY_RULES | {STALE}` is what
+the `proactive_log.reason` column now accepts.
+
+**It is still logged.** §10.6's instrument must be able to tell a morning the robot slept through
+from a scheduler that stopped working; from an empty table those are identical, which is the
+failure mode §10.6 exists to prevent.
+
+**The grace window is not zero.** Zero would mean "only ever exactly on time", which no scheduler can
+promise: restart the service at 07:55:30 for a booking at 07:55:00 and the reminder is simply gone.
+Overshooting this fix trades a loud bug for a quiet one — the robot says less and nothing reports it.
+600 s is wide enough for an honest restart and far narrower than a night.
+
+⚠️ **The age is measured against the heap entry, not `triggers.next_fire_at`.** The two are permitted
+to diverge — a re-arm after a delivery schedules without persisting — so `SchedulerLoop` hands the
+callback `(trigger_id, fire_at)`. The first implementation read the column and made a trigger staged
+into the heap for *now* look fifteen hours old.
+
 Let rrule work in UTC and you get exactly the "+86400 each day" bug above, wearing a library's
 clothes. Two edges need a named policy or they become a 2 a.m. incident, and both fall out of `fold=0`
 (the default — pinned by test, not trusted). A **nonexistent** local time (spring forward — 02:30
@@ -2883,6 +2922,7 @@ ambient_speech_threshold_s = 60
 ignore_streak_limit = 3
 hold_open_s      = 30           # §10.7 step 5 / §10.5's "wait 30 s" — one number, two readers
 ignore_backoff_multiplier = 2   # §10.5. cooldown_s *= this, per ignore
+stale_grace_s    = 600          # §10.3. How late a booking may be and still be worth saying
 
 [vision]
 fps        = 5                  # §2.7.1: ≤1 core

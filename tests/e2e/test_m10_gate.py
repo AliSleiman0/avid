@@ -155,6 +155,7 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
         default_cooldown_s=900,
         hold_open_s=30.0,
         ignore_backoff_multiplier=2,
+        stale_grace_s=600,
         ignore_streak_limit=3,
     )
     sink = FakeTurnSink()
@@ -392,6 +393,12 @@ async def test_a_suppressed_proposal_is_silent_and_logged(
         assert trigger.next_fire_at is not None
 
         if case == "quiet_hours":
+            # Take the morning's booking off the heap *before* winding the clock past it. Without
+            # this the fast-forward to 22:55 crosses 08:00, and the robot rightly reports a
+            # `stale` skip first (#339) — a real verdict about a real booking, but not the one this
+            # arc is staging. Staging the world is the harness's job; the robot is entitled to
+            # notice everything the harness does to it.
+            rig.behavior._scheduler.cancel(trigger.id)  # noqa: SLF001 - staging, not the robot
             await rig.clock.advance_to("22:55")
             await _wake_and_see_someone(rig)
             # Move the trigger inside the static window: 23:00, well past 22:00.
