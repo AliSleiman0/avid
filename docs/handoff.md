@@ -28,12 +28,33 @@ the fire and stay there.** The robot naps to SLEEPING after ten idle minutes and
 window. `domain/behavior.py:80`: *"proactivity does not wake a sleeping robot. It speaks to someone
 already there."* It also needs the hotspot up, or there is no API and no utterance.
 
-⚠️ **The blocker is the fixture, not the code.** The `routines` row says `local_time = '08:00'` and
-the owner is not at his desk at 08:00 — so the morning fire vetoes on `presence` every day and
-**AC-1 can never land while that mismatch stands**. 08:00 is the SDS's illustration of UC-03, not a
-requirement; AC-0 asks only for "a real `routines` row for a daily coffee reminder". **Repoint
-`routines.local_time` at a time the owner is actually there.** A routine he does not have is not
-one, and §10.8's criterion is about a companion noticing a real routine.
+✅ **The fixture has been repointed at the owner's real routine (2026-08-18).** It was
+`local_time = '08:00'`, and he is not at his desk at 08:00, so the morning vetoed on `presence`
+daily and AC-1 could never land. 08:00 was the SDS's illustration of UC-03, not a requirement —
+AC-0 asks only for "a real `routines` row for a daily coffee reminder". It is now **`00:00`,
+decaf**, firing at **23:55** on the 300 s lead. `next_fire_at = 1787086500` = **2026-08-18 23:55
+EEST**, computed by `core.schedule.next_occurrence` itself rather than by hand, with
+`dtstart_epoch` taken from `facts.created_at` as its docstring requires (an anchor that moves
+changes what the rule *means*).
+
+⚠️ **That change forced a second one, and it is MACHINE-ONLY ON PURPOSE.** Midnight sits inside the
+shipped `22:00→07:30` quiet window, and rule 1 is evaluated first and overrides nothing — so the new
+routine would have been suppressed every night, swapping a permanent `presence` veto for a permanent
+`quiet_hours` one. `/etc/robot/config.toml` now runs **`02:00→09:00`** (backup
+`config.toml.bak-pre-quiet-shift`), which still covers the hours he is actually asleep. Verified via
+`within_quiet_window`: 23:55 and 00:00 are outside, 03:00 and 08:00 inside.
+
+🚫 **Do not "fix" the resulting drift in either direction**, and the machine's config now carries a
+comment saying so. Copying `config/pi.toml` over the machine restores a window that silently kills
+the routine. And changing `config/pi.toml` to match is worse: **`tests/core/test_config.py:504`
+loads that file and asserts the `22:00→07:30` window precisely because it CROSSES MIDNIGHT** — the
+case a naive implementation gets wrong. `02:00→09:00` does not wrap, so aligning the template would
+delete that coverage to suit one person's sleep schedule. This is what per-deployment config is for.
+
+⚠️ **AC-2's proof (id=10) was taken under `22:00→07:30`.** The mechanism it establishes — rule 1 plus
+`within_quiet_window` — is value-independent, so it stands. But any seal evidence citing that row
+must state the window in force at the time, or the row becomes unreadable against a machine that now
+says something else.
 
 ✅ **Missing a morning is free** — verified in code, not assumed. `ignore_streak` is incremented only
 in `_resolve`, from a `_PendingDelivery` that only `_deliver` creates (`services/behavior.py:729`),
