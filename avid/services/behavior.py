@@ -49,6 +49,7 @@ from avid.core.schedule import InvalidRoutine, next_occurrence
 from avid.core.state_manager import StateManager
 from avid.core.tasks import spawn
 from avid.domain import (
+    STALE,
     AmbientWindow,
     AudioSpeechEnded,
     AudioSpeechStarted,
@@ -123,6 +124,7 @@ class BehaviorService:
         default_cooldown_s: int,
         hold_open_s: float,
         ignore_backoff_multiplier: int,
+        stale_grace_s: int,
         ignore_streak_limit: int,
     ) -> None:
         self._bus = bus
@@ -135,6 +137,10 @@ class BehaviorService:
         self._default_cooldown_s = default_cooldown_s
         self._hold_open_s = hold_open_s
         self._ignore_backoff_multiplier = ignore_backoff_multiplier
+        self._stale_grace_s = stale_grace_s
+        # Bookings skipped for being too old. Should be zero on a robot that stays powered; on one
+        # that gets switched off it is the count of mornings nobody was home for (#339).
+        self.stale_skips = 0
         self._ignore_streak_limit = ignore_streak_limit
         self._scheduler = SchedulerLoop(clock=clock, on_due=self._on_due)
 
@@ -479,13 +485,46 @@ class BehaviorService:
 
     # --- the decision (AC-5/AC-6/AC-7) ------------------------------------------------------
 
-    async def _on_due(self, trigger_id: int) -> None:
+    async def _on_due(self, trigger_id: int, fire_at: int) -> None:
         """A trigger came due: build the context, ask the gate, and write the row either way."""
         record = await self._triggers.get(trigger_id)
         if record is None or not record.enabled:
             return  # deleted or disabled since the heap was built
 
         now = self._clock.now()
+
+        # ── Is this booking still about *now*? (§10.3, #339) ─────────────────────────────────
+        #
+        # Asked before the gate, and deliberately not as a seventh rule: §10.4's six grade the
+        # *room* — quiet hours, presence, what was just said. This grades the **booking**, and a
+        # booking whose moment has long passed is not a proposal the room should be consulted
+        # about at all.
+        #
+        # Found the expensive way. The rig was powered down overnight, so 07:55's coffee reminder
+        # never fired; by the time it was switched on the booking was three hours old, and every
+        # layer waved it through — `_on_started` restores `next_fire_at` verbatim, `_fire_due`
+        # takes everything `<= now` with the delay clamped to zero, and the gate never looks at a
+        # clock. The robot would have announced coffee at 10:43.
+        #
+        # A reminder is a claim about a moment. Delivered three hours late it is not a late
+        # reminder, it is a wrong one — and R-08 does not distinguish, because the user reaches for
+        # the plug either way. So: skip it, say so in the log where §10.6 can count it, and book
+        # tomorrow. The grace window is what keeps an honest restart *at* the appointed minute
+        # working; nothing wider than it survives a night with the power off.
+        if now - fire_at > self._stale_grace_s:
+            _log.info(
+                "trigger %d was booked for %d, %ds ago — skipping it rather than firing late "
+                "(grace %ds); the next occurrence is being booked instead",
+                trigger_id,
+                fire_at,
+                now - fire_at,
+                self._stale_grace_s,
+            )
+            self.stale_skips += 1
+            await self._suppress(trigger_id, rule=STALE, at=now)
+            await self._rearm(trigger_id, fact_id=record.fact_id, persist=True)
+            return
+
         context = await self._context(
             now=now,
             trigger_last_fired_s=(

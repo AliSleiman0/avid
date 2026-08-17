@@ -584,6 +584,12 @@ class BehaviorConfig(_Section):
     # §10.5: cooldown_s *= this, per consecutive ignore. 1 disables the backoff without
     # disabling the streak counting, which is a legitimate (if timid) configuration.
     ignore_backoff_multiplier: int = Field(default=2, ge=1)
+    # How late a booking may be and still be worth saying (#339). A reminder is a claim about a
+    # moment: delivered long enough after it, it is not a late reminder but a wrong one, and R-08
+    # does not distinguish — the user reaches for the plug either way. The window exists so that a
+    # service restart *at* the appointed minute still delivers; an overnight power-off never does.
+    # Zero would mean "only ever exactly on time", which no real scheduler can promise.
+    stale_grace_s: int = Field(default=600, gt=0)
 
 
 class VisionConfig(_Section):

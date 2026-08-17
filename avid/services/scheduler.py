@@ -60,7 +60,7 @@ class SchedulerLoop:
     """
 
     def __init__(
-        self, *, clock: Clock, on_due: Callable[[int], Awaitable[None]]
+        self, *, clock: Clock, on_due: Callable[[int, int], Awaitable[None]]
     ) -> None:
         self._clock = clock
         self._on_due = on_due
@@ -176,7 +176,12 @@ class SchedulerLoop:
                 continue  # cancelled, or moved — this entry is a ghost
             del self._scheduled[trigger_id]
             try:
-                await self._on_due(trigger_id)
+                # ``fire_at`` travels with the id: the callback needs to know which
+                # *moment* came due, not merely which trigger. The store's
+                # ``next_fire_at`` is not a substitute — the heap and the column are
+                # allowed to diverge (a re-arm may schedule without persisting), so
+                # grading the booking against the column reads the wrong clock (#339).
+                await self._on_due(trigger_id, fire_at)
             except Exception:  # noqa: BLE001 - one bad trigger must not end proactivity
                 _log.exception(
                     "scheduler callback failed for trigger %s; loop continues",

@@ -142,6 +142,7 @@ ambient_speech_threshold_s = 60
 ignore_streak_limit        = 3
 hold_open_s                = 30    # §10.7 step 5 / §10.5 — one number, two owners
 ignore_backoff_multiplier  = 2     # §10.5 — cooldown_s *= this, per ignore
+stale_grace_s              = 600   # §10.3 — how late a booking may still be worth saying
 
 [vision]
 fps = 3                         # §2.7.1: ≤1 core, and scale=1 does NOT fit a 200 ms period —

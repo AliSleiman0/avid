@@ -786,10 +786,16 @@ class ProactiveLog(Protocol):
     ) -> int:
         """Write one decision and return its row id.
 
-        ``outcome`` is ``"delivered"`` or ``"suppressed"`` (§8.3's CHECK). ``reason`` is the vetoing
-        rule and must be a member of :data:`~avid.domain.behavior.POLICY_RULES` — the column is
-        spelled ``reason`` and the event field ``rule``, which are deliberately the same vocabulary
-        under two normative names (§10.6). ``utterance`` is what it said, or would have said."""
+        ``outcome`` is ``"delivered"`` or ``"suppressed"`` (§8.3's CHECK). ``reason`` must be a
+        member of :data:`~avid.domain.behavior.SUPPRESSION_REASONS` — the column is spelled
+        ``reason`` and the event field ``rule``, which are deliberately the same vocabulary under
+        two normative names (§10.6). ``utterance`` is what it said, or would have said.
+
+        ⚠️ That set is the six :data:`~avid.domain.behavior.POLICY_RULES` **plus**
+        :data:`~avid.domain.behavior.STALE`, which is not a policy rule: the six grade the room, and
+        ``stale`` grades the booking (#339). It is written here anyway, because §10.6's instrument
+        must be able to distinguish a morning the robot was switched off for from a scheduler that
+        stopped working — from an empty table those look identical."""
         ...
 
     async def set_utterance(self, log_id: int, utterance: str) -> None:

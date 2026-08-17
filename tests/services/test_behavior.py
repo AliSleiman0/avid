@@ -27,6 +27,7 @@ from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    STALE,
     AudioSpeechEnded,
     AudioSpeechStarted,
     BehaviorProactiveDelivered,
@@ -93,6 +94,7 @@ async def rig() -> AsyncIterator[Rig]:
         default_cooldown_s=900,
         hold_open_s=30.0,
         ignore_backoff_multiplier=2,
+        stale_grace_s=600,
         ignore_streak_limit=3,
     )
     for sub in behavior.subscriptions():
@@ -535,6 +537,7 @@ async def test_the_budget_and_the_cooldown_survive_a_restart(rig: Rig) -> None:
         default_cooldown_s=900,
         hold_open_s=30.0,
         ignore_backoff_multiplier=2,
+        stale_grace_s=600,
         ignore_streak_limit=3,
     )
     context = await fresh._context(  # noqa: SLF001 - as above
@@ -732,6 +735,7 @@ async def test_a_disabled_trigger_stays_disabled_across_a_restart(rig: Rig) -> N
         default_cooldown_s=900,
         hold_open_s=30.0,
         ignore_backoff_multiplier=2,
+        stale_grace_s=600,
         ignore_streak_limit=3,
     )
     assert await rig.store.enabled_triggers() == []
@@ -841,3 +845,83 @@ async def test_a_delivered_turn_that_says_nothing_is_not_recorded_as_ignored(
     assert await _reaction(rig) is None, (
         "a NULL reaction on a delivered row is the signal that nothing was said"
     )
+
+
+async def test_a_booking_missed_while_powered_off_does_not_fire_late(rig: Rig) -> None:
+    """A trigger whose moment passed while the robot was off is **stale**, not due.
+
+    Found on the rig, 2026-08-17: the Pi was powered down overnight, so 07:55's coffee reminder
+    never fired. By the time it was booted the booking was three hours old — and every layer
+    happily fired it. ``_on_started`` restores ``next_fire_at`` verbatim, ``_fire_due`` takes
+    everything ``<= now`` with the delay clamped to zero, and none of §10.4's six rules asks
+    whether the moment has *passed*: the gate grades the room, never the clock.
+
+    A reminder is a claim about a moment. Delivered three hours late it is not a late reminder, it
+    is a wrong one — and R-08 does not care which, because the user reaches for the plug either
+    way. The next occurrence is what should be booked, and the miss recorded as a miss.
+
+    ⚠️ Every other boot test here books ``_START + 60`` — always in the future. The fixture
+    excluded the risky case, so the suite could not see this. Same shape as the three defects the
+    rig found last night.
+    """
+    fact_id = await _seed_routine(rig)
+    # The booking is in the PAST at boot: the robot was off when it came due.
+    await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=_START - 10_800, cooldown_s=900, at=_START - 10_800
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _settle(rig)
+
+    assert not [e for e in rig.events if isinstance(e, BehaviorTriggerFired)], (
+        "a booking missed while the robot was powered off fired on boot, three hours late"
+    )
+
+    # ...and it must not be silently dropped either: the next morning is still booked.
+    triggers = await rig.store.enabled_triggers()
+    assert triggers[0].next_fire_at is not None
+    assert triggers[0].next_fire_at > rig.clock.now(), (
+        "the missed trigger was not re-booked"
+    )
+
+    # ...and §10.6 can *see* the skip. A morning the robot slept through and a scheduler that
+    # stopped working are indistinguishable from an empty table, which is the whole reason this
+    # instrument exists (M6's dominant defect family: a `0` from an absent instrument reads
+    # exactly like a real zero).
+    def _rows() -> list[tuple[str, str | None]]:
+        conn = rig.store._conn_sync()  # noqa: SLF001 - reading the audit the service wrote
+        return [
+            (str(r[0]), None if r[1] is None else str(r[1]))
+            for r in conn.execute("SELECT outcome, reason FROM proactive_log")
+        ]
+
+    assert await rig.store._run(_rows) == [("suppressed", STALE)]  # noqa: SLF001
+    assert rig.behavior.stale_skips == 1
+
+
+async def test_a_booking_inside_the_grace_window_still_fires(rig: Rig) -> None:
+    """The other half, and the reason the window is not zero.
+
+    A skip rule with no grace would mean "only ever exactly on time", which no scheduler can
+    promise: restart the service at 07:55:30 for a booking at 07:55:00 and the reminder is gone.
+    Overshooting the fix is the classic way to trade a loud bug for a quiet one — the robot would
+    simply say less and nothing would report it.
+
+    Paired deliberately with the test above: together they pin *both* edges, and neither can pass
+    by accident on an implementation that always fires or always skips.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=_START - 60, cooldown_s=900, at=_START - 60
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+        what="a booking one minute late firing",
+    )
+
+    fired = [e for e in rig.events if isinstance(e, BehaviorTriggerFired)]
+    assert [e.trigger_id for e in fired] == [trigger_id]
+    assert rig.behavior.stale_skips == 0
