@@ -6,47 +6,53 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-17 · `main = a12903b` · **no tag** (M10 is unsealed) · gh `AliSleiman0`.
+**As of:** 2026-08-17 · `main = e53d8e8` · **no tag** (M10 is unsealed) · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**Start by deciding [#340](https://github.com/AliSleiman0/avid/pull/340).** It is open, complete and
-unmerged, and it is the only thing in flight. Everything else below assumes it lands.
+**The Pi is running unattended with two staged observations pending.** Nothing is in flight in the
+repo — zero open PRs. The next session's job is to *collect evidence*, not to write code.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
 `git rev-parse --short origin/main` — three commands, and they are always right. See the
 BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
 
-### The decision waiting on you
+### Collect these two first — they are time-boxed and cannot be re-run on demand
 
-#340 fixes **#339** and is green on `lint`, `test (3.11)`, `test (3.13)` and GitGuardian. It is red
-only on `async-debug`, which is **#328** — a gate defect, not a regression. Two runs of the same job
-on the same commit flagged **two different untouched tests** (`test_presence.py:229` at 0.083 s,
-`test_memory.py:216` at 0.074 s); both runs reported `1386 passed, 56 skipped`. Nothing failed. The
-gate alone reddened the job. Full evidence is on #328.
+Both are staged on trigger 1 and both are gone once the moment passes.
 
-Three ways forward, and they are not equivalent:
+1. **Tonight 23:00 EEST (20:00Z) — AC-2 under the shipped config.** `next_fire_at` is booked for
+   `1786996800`, proven `inside_quiet=True` by `within_quiet_window` itself (not by arithmetic in a
+   session log). Expect `proactive_log` → `suppressed / quiet_hours`, no audio, then a re-arm to
+   the next RRULE occurrence.
+2. **Tomorrow 07:55 EEST (04:55Z) — AC-1, the real morning.** This is the one thing no staging can
+   fake: §10.8's criterion is whether the *morning* utterance sounds like a companion rather than a
+   calendar. ⚠️ It needs **the hotspot up all night** (no API, no utterance) and **a human at the
+   desk by ~07:50** — §10.4 rule 3 vetoes into an empty room, demonstrated live this session.
 
-1. **Merge #340 past the red gate**, fix #328 separately. *Recommended.* #339 is independently
-   verified, and #328 should not be decided under the pressure of an unrelated red PR.
-2. **Fix #328 properly** — make the heavy test bodies cooperate so the gate stays strict. Note the
-   two offenders have *different* causes: `test_memory.py:216` is the first test to touch the
-   embedder and pays the one-time ONNX model load; `test_presence.py:229` runs 18 000 synthesised
-   frames in one task step. One trick will not fix both.
-3. **Carve out test-body stalls** using the existing hardware `exempt` path in `tests/conftest.py`.
-   Cheapest, and the only option that **gives up real signal** — a service that blocks when awaited
-   straight from a test would stop failing the run. ⚠️ If taken, the exempted count must stay
-   printed, or the gate quietly becomes whatever was last achieved.
+Read both with `/tmp/m10_state.py` on the Pi (also in this session's scratchpad) — it prints the
+config *as loaded* alongside the rows, so a silent schema default cannot be mistaken for a setting.
 
-### Then: #245, still the only thing between here and the seal
+### Then: #245's remaining ACs
 
-**M10 remains code-complete and unsealed.** #245, the live multi-morning gate, is the one item
-nobody can do from a laptop: the Pi running unattended across real mornings, and a human judging by
-ear whether the utterance sounds like a reminder app, which §10.8 says is the actual criterion.
+**M10 remains code-complete and unsealed.** Proven live as of this session:
 
-Proven live so far: **AC-2** (suppression, audit row, silence, under shipped config), **AC-3's HTTP
-half**, and UC-02 end to end from a real voice. **AC-1 and AC-4 are still unproven** — the one live
-attempt fired and died before speaking, which is what #337/#338 fixed.
+| AC | state | evidence |
+|---|---|---|
+| **AC-2** quiet hours | ✅ (re-proof pending tonight) | `proactive_log` id=1; tonight re-proves it under shipped config + NTP-synced clock |
+| **AC-3** HTTP door | ✅ | `health: quiet requested over HTTP` → `suppressed / quiet_hours`, cooldown ruled out |
+| **AC-3** tool door | ✅ | *"leave me alone for ten minutes"* → `quiet until … (600s requested)`, no `health` line |
+| **AC-4** ignore backoff | ✅ | streak 0→1, `cooldown_s` 900→1800, `reaction='ignored'` |
+| **AC-1** real morning | ⏳ | midday staging sounded natural but cannot substitute |
+| **AC-0** multi-morning | ⏳ | needs wall-clock days |
+| **AC-5 / AC-6** seal | ⏳ | journal, PMP §5.2, tag, close epic + 14 children |
+
+⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
+than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
+That is the point of the fix, but it means **you can no longer wind the clock past a booking to
+trigger it** — stage forward, not backward. The M10 gate learned this the hard way: its quiet-hours
+arc fast-forwarded 14 hours past the morning booking and started reporting `stale`, correctly, and
+the *harness* was what needed fixing.
 
 ⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
 than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
@@ -57,9 +63,19 @@ the *harness* was what needed fixing.
 
 ### The queue behind it
 
-1. **#328 — the P8 `async-debug` gate grades test bodies, not the robot's callbacks.** Now on the
-   critical path: load-dependent, lands on a random heavy test each run, and will redden PRs
-   indefinitely. ⚠️ Do not raise the threshold. See the three options above.
+1. **#328 — the P8 `async-debug` gate mismeasures, and its own proposed fix would gut it.**
+   ⚠️ **Read the 2026-08-17 comment before implementing anything.** The issue proposes extending the
+   fixture-frame exemption to *test*-frame warnings. That is wrong: `Task.__repr__` names the task's
+   **outermost** coroutine, and this suite drives services by direct `await` from the test function,
+   so a genuinely blocking production callback is *always* reported as `coro=<test_… running at
+   tests/…>`. The run that reddened #340 blamed `test_memory.py:216` — which is
+   `await rig.memory.start()`, i.e. `MemoryService` loading the MiniLM ONNX model. **Production code.**
+   The frame carries no information about whose callback stalled; exempting test frames would silence
+   nearly every warning the gate can produce off hardware. Remaining options: a named, printed
+   allow-list; a separate threshold for known-heavy tests; or walking `cr_await` to the innermost
+   frame and gating on whether *that* is inside `avid/` (the only one that measures what P8 names).
+   ⚠️ Do not raise the threshold. Whatever is chosen, prove it bites: a deliberate `time.sleep(0.06)`
+   inside an `avid/` coroutine reached by inline `await` must still go red.
 2. **#310 — `set_affect` never fires.** M6's functional gap, parked deliberately when M10 was
    chosen. ⚠️ The diagnostic vehicle needs repair first: `tools/eval_extraction.py` still sends
    `OpenAI-Beta: realtime=v1` (the beta interface is **disabled server-side**, `adapters/realtime.py:661`)
@@ -86,9 +102,8 @@ the *harness* was what needed fixing.
 
 ## Current state
 
-- **M10 code-complete, one PR in flight.** `main = a12903b`; **1381 passed / 61 skipped** locally on
-  3.13, **167 passed** on the touched suites under 3.11; `ruff`, `ruff format`, `lint-imports`
-  (4 contracts) clean. #340 is the only open PR; no other work in flight.
+- **M10 code-complete, nothing in flight.** `main = e53d8e8`; **zero open PRs**. #340 and #341 both
+  squash-merged this session; #339 auto-closed.
 - ⚠️ **M10 is code-complete but NOT sealed.** No `v0.M10.0` tag, no `docs/journal.md` entry, PMP
   §5.2's confidence untouched, epic #230 and milestone still open — all of that is #245's to do, and
   it is deliberate rather than forgotten. A milestone is "done done" only when its gate demo is
@@ -99,22 +114,53 @@ the *harness* was what needed fixing.
   ⚠️ Do not "fix" it by re-syncing with `--extra memory` on 3.13: numpy 1.26.4 has no 3.13 wheel and
   builds from source, which fails. `uv sync --dev --frozen --python 3.13` then
   `uv pip install "numpy>=2.1"` restores a working env without touching `uv.lock`.
-- **The Pi is OFF and unreachable.** Last seen at `172.20.10.6` over the **iPhone hotspot** (the old
-  `192.168.10.172` / hostname `AVID` route is dead — that router still switches but has no
-  upstream). It is checked out at `a12903b` on branch `m10-fixed`, 114 tests passing on-device.
-  **#340 is not deployed.** `robot.service` **inactive and disabled**; quiet window restored to
-  22:00→07:30; config backed up at `config.toml.bak-m10`.
-- **Trigger 1 is clean.** `enabled | ignore_streak 0 | cooldown_s 900`, next fire Mon 17 Aug 07:55 —
-  **which is now in the past**, so under #340 the next boot will skip it as `stale` and re-book.
-  That is correct behaviour, and it is also the first thing to look for as live proof the fix works.
+- **The Pi is ON, RUNNING and now `enabled`.** `alisleiman0@172.20.10.6` over the iPhone hotspot,
+  checked out at **`e53d8e8` on `main`**, `robot.service` **active and ENABLED** — changed this
+  session, deliberately, because AC-0 wants the stack unattended across a reboot. Clock is
+  **NTP-synchronised**; `/etc/robot/config.toml` gained `stale_grace_s = 600` (backup
+  `config.toml.bak-pre-339`). Adapters verified *as loaded*: `picamera2 / framebuffer / alsa /
+  silero / openai / sqlite`, `servo` still fake. AGC **off**, mic `10 [62%]`.
+- **Trigger 1 carries this session's staging.** `enabled | ignore_streak 1 | cooldown_s 1800`
+  (the doubling is AC-4's evidence, left in place deliberately), `last_fired_at` restored to the
+  real 09:12:44Z delivery rather than staging residue, `next_fire_at = 1786996800` = **23:00 EEST
+  tonight**. ⚠️ `ignore_streak_limit` is 3 — two more ignored mornings and the trigger **disables
+  itself**, so answer tomorrow's greeting rather than letting it lapse.
+- ⚠️ **The amp's `Master` is at 100%, not the 85% `PI_OPERATIONS.md` §5 documents**, on top of the
+  `+6 dB` softvol. Left as-is by the owner's decision for this session's runs, and the AC-1 utterance
+  *was* audible — but any level measurement taken now is uncalibrated against the recorded baseline.
 - **New runtime dependency:** `python-dateutil` (SDS §10.3 mandates it by name). `tzdata` joined the
   dev group — without it `zoneinfo` cannot resolve an IANA name on Windows, so the DST tests would
   pass in CI and fail on a dev box.
 
-## What just shipped (this session)
+## What just shipped (2026-08-17, afternoon)
+
+**The decision at the top of the last baton was taken: #340 and #341 both merged past `async-debug`,
+with the diagnosis stated.** Then the Pi ran, and four criteria came off #245's list.
+
+- **#340 is proven live.** First boot after the clock was corrected: `trigger 1 was booked for
+  1786942500, 14955s ago — skipping it rather than firing late (grace 600s)`, `proactive_log`
+  `suppressed / stale`, re-booked to the next occurrence, **no audio**. Under the old code that boot
+  would have announced coffee four hours late.
+- **AC-4 (ignore backoff) proven** — and unplanned: the AC-1 staging turn went deliberately
+  unanswered, so `ignore_streak` 0→1, `cooldown_s` 900→1800, `reaction='ignored'` written to
+  `proactive_log`. The arithmetic that was unit-tested in #241 now has a live witness.
+- **AC-3 proven through both doors**, and the two are *distinguishable in the log*: the HTTP run
+  carries an `avid.adapters.health: quiet requested over HTTP` line, the tool run carries none and
+  instead shows `quiet until … (600s requested)` on the turn's own `correlation_id`. The model
+  converted "ten minutes" to 600 s itself.
+- **#328 sharpened, not fixed** — a comment on the issue refutes its own proposed remedy with the
+  `test_memory.py:216` evidence. See the queue entry above.
+
+**Two proofs, unequal strength, recorded as such.** The HTTP quiet run had presence gained 30 s
+before the fire; the tool run had it 296 s before, against a 300 s window. Both passed rule 3, so
+`quiet_until` was the sole veto in each — but the tool run's 4-second margin is thin, and the log
+*cannot* show which rule vetoed when several apply (see the rule-ordering gotcha below). The HTTP
+proof is the one to lean on.
+
+### Earlier the same day (the previous session's work)
 
 **Three defects, every one found by the rig rather than by CI**, and none of which the suite could
-have caught as written. The first two merged; the third is #340.
+have caught as written.
 
 - **#337 — a trigger fired once per process.** `SchedulerLoop` consumes a heap entry when it fires
   it and nothing re-booked the next one. PMP's O3 wants 7/7 mornings; the ceiling was 1/7. Worse on
@@ -139,6 +185,49 @@ its callback `(trigger_id, fire_at)`. The M10 gate caught it: the fix was found 
 reasoning.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **The Pi has no RTC, so an offline boot comes up with a plausible, badly wrong clock — and
+  nothing says so.** Found this session powered on and reading **`00:38 UTC` when the real time was
+  `09:01`** — 8½ hours behind, resumed from `systemd-timesyncd`'s last saved stamp because the WiFi
+  had drifted onto a router with no upstream. `timedatectl` said `System clock synchronized: no`
+  while `NTP service: active`, which reads reassuring at a glance. **Every scheduler result is
+  worthless at an unknown clock**: at the wrong time the stale booking sat 4 hours in the *future*
+  and the boot would have proven nothing at all. Check `timedatectl | grep synchronized` **before**
+  any run whose evidence is a timestamp, and re-check after any network change.
+
+- ⚠️ **A suppression reason names the FIRST rule that vetoed, never the only one.** §10.4's six rules
+  are ordered and short-circuit, so `reason='quiet_hours'` is equally consistent with "quiet was the
+  only blocker" and with "quiet, presence, cooldown and budget would all have blocked it". A proof
+  that quiet works therefore has to **rule the others out by construction** — this session aged
+  `last_fired_at` past the cooldown and confirmed presence was gained inside `presence_window_s`
+  before trusting the row. **Before claiming a criterion, ask which other rules were live**; the log
+  will not tell you and it will not look wrong.
+
+- ⚠️ **`reason='quiet_hours'` covers two different branches and cannot distinguish them.**
+  `domain/behavior.py:257` checks the `set_quiet` override *first* and falls through to the static
+  window: `if ctx.quiet_until is not None and ctx.now < ctx.quiet_until: return True` then
+  `return within_quiet_window(...)`. Both log the same string. So a `set_quiet` test proves the
+  **override** branch and says nothing about the **static window** — #245's AC-2 and AC-3 are
+  genuinely different criteria that produce byte-identical audit rows. Grade them on separate runs.
+
+- ⚠️ **"Assert the absence of the illegal-transition warning" no longer works on any arc involving
+  vision.** `PresenceService._on_gained` calls `transition(VISION_PRESENCE_GAINED)` **unconditionally**
+  (`services/presence.py:285`), by design: #224 rejected both a `if state is SLEEPING` guard (a second
+  copy of the table) and six self-loop rows (each would publish a spurious `state.transitioned`).
+  Only `(SLEEPING, …) → IDLE` exists, so a person sitting down at an awake robot logs
+  `ignored illegal transition: no rule for VISION_PRESENCE_GAINED in state IDLE` at WARNING —
+  measured **once per boot, five times in one afternoon, deterministic**. The decision is sound and
+  the `test_m5_gate` absence-assertion is sound; they simply **conflict at this seam**. If you need
+  that assertion on a vision-involving arc, filter this specific message rather than weakening either.
+
+- ⚠️ **The LAN cable does carry traffic — `PI_OPERATIONS.md` §0 is out of date on this.** With WiFi
+  on a dead network, the Pi was still reachable from the laptop over the direct Ethernet link:
+  neither end gets DHCP, both fall back to link-local, and **mDNS resolves it** —
+  `ssh alisleiman0@avid.local` worked, resolving to an IPv6 link-local (`fe80::…%<ifIndex>`), with
+  `Get-NetNeighbor` confirming the Pi's `D8:3A:DD` MAC as `Reachable`. That is the out-of-band path
+  that makes it *safe* to reconfigure `wlan0` remotely. ⚠️ It is also **intermittent** — it dropped
+  after a few minutes and never returned — so treat it as a rescue channel, not a working link, and
+  do the WiFi fix at the console if it lapses.
 
 - ⚠️ **The state a fixture never enters is the state that breaks in production.** Every boot test in
   `tests/services/test_behavior.py` booked `_START + 60` — always in the *future* — so no test in the
