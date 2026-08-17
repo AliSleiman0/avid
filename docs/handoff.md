@@ -17,18 +17,42 @@ repo — zero open PRs. The next session's job is to *collect evidence*, not to 
 `git rev-parse --short origin/main` — three commands, and they are always right. See the
 BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
 
-### Collect these two first — they are time-boxed and cannot be re-run on demand
+### AC-1 is the only live criterion left, and the fixture blocks it
 
-Both are staged on trigger 1 and both are gone once the moment passes.
+**`next_fire_at` is `1787028900` = 07:55 EEST daily, re-booked automatically by #340 after every
+miss.** Nothing needs staging by hand. What it needs is a *person*:
 
-1. **Tonight 23:00 EEST (20:00Z) — AC-2 under the shipped config.** `next_fire_at` is booked for
-   `1786996800`, proven `inside_quiet=True` by `within_quiet_window` itself (not by arithmetic in a
-   session log). Expect `proactive_log` → `suppressed / quiet_hours`, no audio, then a re-arm to
-   the next RRULE occurrence.
-2. **Tomorrow 07:55 EEST (04:55Z) — AC-1, the real morning.** This is the one thing no staging can
-   fake: §10.8's criterion is whether the *morning* utterance sounds like a companion rather than a
-   calendar. ⚠️ It needs **the hotspot up all night** (no API, no utterance) and **a human at the
-   desk by ~07:50** — §10.4 rule 3 vetoes into an empty room, demonstrated live this session.
+⚠️ **Two conditions, both satisfied by the same act — be in the camera's view a few minutes before
+the fire and stay there.** The robot naps to SLEEPING after ten idle minutes and
+`PROACTIVE_STATES = {IDLE}` (rule 2), so presence must both *wake* it and satisfy rule 3's 300 s
+window. `domain/behavior.py:80`: *"proactivity does not wake a sleeping robot. It speaks to someone
+already there."* It also needs the hotspot up, or there is no API and no utterance.
+
+⚠️ **The blocker is the fixture, not the code.** The `routines` row says `local_time = '08:00'` and
+the owner is not at his desk at 08:00 — so the morning fire vetoes on `presence` every day and
+**AC-1 can never land while that mismatch stands**. 08:00 is the SDS's illustration of UC-03, not a
+requirement; AC-0 asks only for "a real `routines` row for a daily coffee reminder". **Repoint
+`routines.local_time` at a time the owner is actually there.** A routine he does not have is not
+one, and §10.8's criterion is about a companion noticing a real routine.
+
+✅ **Missing a morning is free** — verified in code, not assumed. `ignore_streak` is incremented only
+in `_resolve`, from a `_PendingDelivery` that only `_deliver` creates (`services/behavior.py:729`),
+and a suppressed proposal never reaches `_deliver`. Confirmed live: id=6 was a `presence`
+suppression and the streak stayed at 1. **The trigger will not disable itself by being slept
+through.** Only *delivered-then-unanswered* turns count, and the streak is at 1 of 3.
+
+### How AC-2 was closed, and the shape to copy for AC-1
+
+Row id=10 (2026-08-18 01:55:24 EEST) is `suppressed / quiet_hours` — and it is worth more than the
+four rows before it because **the other rules were established as passing by construction**, so
+quiet was the *sole* veto rather than merely the first one reported:
+state `IDLE`; presence gained 83 s earlier against a 300 s window; cooldown 13.7 h against 1800 s;
+0 of 5 delivered that day. Plus two negative controls: **no `set_quiet` call anywhere in the boot**
+(so this is the static window, not the override — a distinction the audit row cannot make), and
+**no playback / SPEAKING / THINKING** (so the silence was real, not a quiet delivery).
+
+**That is the standard to hold AC-1 to as well**: name every rule that was live, not just the one
+the log prints.
 
 Read both with `/tmp/m10_state.py` on the Pi (also in this session's scratchpad) — it prints the
 config *as loaded* alongside the rows, so a silent schema default cannot be mistaken for a setting.
@@ -39,7 +63,7 @@ config *as loaded* alongside the rows, so a silent schema default cannot be mist
 
 | AC | state | evidence |
 |---|---|---|
-| **AC-2** quiet hours | ✅ (re-proof pending tonight) | `proactive_log` id=1; tonight re-proves it under shipped config + NTP-synced clock |
+| **AC-2** quiet hours | ✅ **airtight, 2026-08-18 01:55 EEST** | `proactive_log` id=10, static branch, sole veto — see below |
 | **AC-3** HTTP door | ✅ | `health: quiet requested over HTTP` → `suppressed / quiet_hours`, cooldown ruled out |
 | **AC-3** tool door | ✅ | *"leave me alone for ten minutes"* → `quiet until … (600s requested)`, no `health` line |
 | **AC-4** ignore backoff | ✅ | streak 0→1, `cooldown_s` 900→1800, `reaction='ignored'` |
