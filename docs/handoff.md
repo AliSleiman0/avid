@@ -6,53 +6,60 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-16 · `main = 4ecef61` · **no tag** (M10 is unsealed) · gh `AliSleiman0`.
+**As of:** 2026-08-17 · `main = a12903b` · **no tag** (M10 is unsealed) · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**M10 is code-complete and unsealed.** Every no-hardware issue in the milestone has merged;
-**#245, the live multi-morning gate, is the only thing left** — and it is the one item nobody can do
-from a laptop. It needs the Pi running unattended across real mornings, and a human judging by ear
-whether the utterance sounds like a reminder app, which §10.8 says is the actual success criterion.
+**Start by deciding [#340](https://github.com/AliSleiman0/avid/pull/340).** It is open, complete and
+unmerged, and it is the only thing in flight. Everything else below assumes it lands.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
 `git rev-parse --short origin/main` — three commands, and they are always right. See the
 BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
 
-### What #245 needs, concretely
+### The decision waiting on you
 
-Everything mechanised is already proven by `tests/e2e/test_m10_gate.py` (#315), which is §14.5's
-`test_uc03_coffee` and runs in about a second with no hardware. **What the live run adds is only
-what a laptop cannot say:**
+#340 fixes **#339** and is green on `lint`, `test (3.11)`, `test (3.13)` and GitGuardian. It is red
+only on `async-debug`, which is **#328** — a gate defect, not a regression. Two runs of the same job
+on the same commit flagged **two different untouched tests** (`test_presence.py:229` at 0.083 s,
+`test_memory.py:216` at 0.074 s); both runs reported `1386 passed, 56 skipped`. Nothing failed. The
+gate alone reddened the job. Full evidence is on #328.
 
-1. **The utterance does not sound like a calendar notification.** §10.8: *"The gap between 'Good
-   morning! Coffee time is coming soon' and 'Reminder: coffee at 08:00' is the entire product."*
-   Judged by ear; there is no automatable proxy, and the nightly LLM-judge tier (§14.7) is
-   explicitly non-blocking, so it can inform this but never seal it.
-2. **Real wall clock across a real day boundary, with a reboot in between.** The `system.started`
-   heap rebuild is unit-proven and mechanised-proven; systemd restarting the unit at 03:00 is not.
-   ⚠️ `deploy/PI_OPERATIONS.md`'s standing rule bites here: `/etc/robot/config.toml` is a copy that
-   rots, and a missing `[behavior]` key falls back to a **schema default silently**. The run must
-   *read the config off the device and print it*, never restate it.
-3. **A human choosing not to answer.** #241's arithmetic is unit-tested; *"the robot noticed it was
-   being ignored and stopped"* is not a thing a `FakeClock` can witness.
-4. **`set_quiet` through both doors** — the tool (#243) and `POST /quiet` (#244) — each proven once,
-   live. They call one method on one port, so this confirms the wiring rather than the logic.
+Three ways forward, and they are not equivalent:
 
-⚠️ **Do not report a rate.** G3 asks for ≥1 useful proactive event/day and ≤1 annoying event/week.
-Three mornings cannot measure a weekly rate. State *n*, state the counts, and leave it there — this
-is the same discipline M5 learned when it printed a "P95" that was arithmetically the maximum over
-five samples. `proactive_log` plus §10.6's SQL is the instrument, and it wants ≥1 week before it
-says anything about R-08.
+1. **Merge #340 past the red gate**, fix #328 separately. *Recommended.* #339 is independently
+   verified, and #328 should not be decided under the pressure of an unrelated red PR.
+2. **Fix #328 properly** — make the heavy test bodies cooperate so the gate stays strict. Note the
+   two offenders have *different* causes: `test_memory.py:216` is the first test to touch the
+   embedder and pays the one-time ONNX model load; `test_presence.py:229` runs 18 000 synthesised
+   frames in one task step. One trick will not fix both.
+3. **Carve out test-body stalls** using the existing hardware `exempt` path in `tests/conftest.py`.
+   Cheapest, and the only option that **gives up real signal** — a service that blocks when awaited
+   straight from a test would stop failing the run. ⚠️ If taken, the exempted count must stay
+   printed, or the gate quietly becomes whatever was last achieved.
+
+### Then: #245, still the only thing between here and the seal
+
+**M10 remains code-complete and unsealed.** #245, the live multi-morning gate, is the one item
+nobody can do from a laptop: the Pi running unattended across real mornings, and a human judging by
+ear whether the utterance sounds like a reminder app, which §10.8 says is the actual criterion.
+
+Proven live so far: **AC-2** (suppression, audit row, silence, under shipped config), **AC-3's HTTP
+half**, and UC-02 end to end from a real voice. **AC-1 and AC-4 are still unproven** — the one live
+attempt fired and died before speaking, which is what #337/#338 fixed.
+
+⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
+than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
+That is the point of the fix, but it means **you can no longer wind the clock past a booking to
+trigger it** — stage forward, not backward. The M10 gate learned this the hard way: its quiet-hours
+arc fast-forwarded 14 hours past the morning booking and started reporting `stale`, correctly, and
+the *harness* was what needed fixing.
 
 ### The queue behind it
 
-1. **#328 — the P8 `async-debug` gate grades test bodies, not the robot's callbacks.** Filed during
-   this session because it started failing on *different untouched tests* on different runs
-   (0.059–0.060 s against a 50 ms threshold). The warning names the **test coroutine** as the
-   stalling callback, so the gate cannot tell a production stall from a test doing bulk work between
-   awaits. ⚠️ Do not raise the threshold. `tests/conftest.py` already draws exactly this distinction
-   once, for hardware fixture frames.
+1. **#328 — the P8 `async-debug` gate grades test bodies, not the robot's callbacks.** Now on the
+   critical path: load-dependent, lands on a random heavy test each run, and will redden PRs
+   indefinitely. ⚠️ Do not raise the threshold. See the three options above.
 2. **#310 — `set_affect` never fires.** M6's functional gap, parked deliberately when M10 was
    chosen. ⚠️ The diagnostic vehicle needs repair first: `tools/eval_extraction.py` still sends
    `OpenAI-Beta: realtime=v1` (the beta interface is **disabled server-side**, `adapters/realtime.py:661`)
@@ -72,57 +79,82 @@ says anything about R-08.
   comparable.
 - **`barge_in_margin_db = 3.0` is UNCALIBRATED**, marked as such in `config/pi.toml` and SDS §9.6.
   Re-derive it at the provisioned AGC setting before treating it as a measurement.
+- **The speaker is +6 dB louder and nobody has confirmed it is enough.** `/etc/asound.conf` gained
+  `max_dB 6.0` on the softvol and Master went to 100% (backup at `.bak-vol`); the MAX98357A has
+  fixed hardware gain, so this was the only lever. Headroom remains to +12 dB, past which speech
+  clips. ⚠️ Unverified by ear — ask before assuming the audibility complaint is closed.
 
 ## Current state
 
-- **M10 code-complete.** 19 PRs merged this session, #316 → #335. **1366 passed / 61 skipped** on
-  3.11 and 3.13; `ruff`, `ruff format --check`, `mypy --strict` and `lint-imports` (4 contracts)
-  clean. **CI on `main` is green on all four jobs**, `async-debug` included. Working tree clean,
-  zero open PRs.
+- **M10 code-complete, one PR in flight.** `main = a12903b`; **1381 passed / 61 skipped** locally on
+  3.13, **167 passed** on the touched suites under 3.11; `ruff`, `ruff format`, `lint-imports`
+  (4 contracts) clean. #340 is the only open PR; no other work in flight.
 - ⚠️ **M10 is code-complete but NOT sealed.** No `v0.M10.0` tag, no `docs/journal.md` entry, PMP
-  §5.2's confidence untouched, epic #230 and milestone still open — all of that is #245's to do,
-  and it is deliberate rather than forgotten. A milestone is "done done" only when its gate demo is
+  §5.2's confidence untouched, epic #230 and milestone still open — all of that is #245's to do, and
+  it is deliberate rather than forgotten. A milestone is "done done" only when its gate demo is
   recorded (PMP §5.1), and no demo can exist until the robot has run a morning.
-- ⚠️ **`async-debug` is intermittently red on pre-existing tests** — diagnosed and filed as #328,
-  and *not* a regression from this milestone's code. Every M10 PR that merged past it says so in
-  its body rather than quietly.
-- **The Pi has not been touched this session.** It is still ON, `robot.service` **inactive and
-  disabled**, checked out at the M6 seal (`86b5285`). Nothing in M10 has ever run on it — which is
-  exactly what #245 is for. ⚠️ Hostname `AVID` intermittently stops resolving; `192.168.10.172`
-  works, and the Pi **cannot `git fetch`** (see PI_OPERATIONS §0 — push to it over SSH).
+- ⚠️ **`mypy` cannot run locally right now.** `uv run mypy avid` dies in `numpy/__init__.pyi` with
+  *"Type statement is only supported in Python 3.12 and greater"* — the venv holds numpy 2.5.2
+  against a 3.11 target. **Pre-existing on clean `main`**, verified by stashing. CI is unaffected.
+  ⚠️ Do not "fix" it by re-syncing with `--extra memory` on 3.13: numpy 1.26.4 has no 3.13 wheel and
+  builds from source, which fails. `uv sync --dev --frozen --python 3.13` then
+  `uv pip install "numpy>=2.1"` restores a working env without touching `uv.lock`.
+- **The Pi is OFF and unreachable.** Last seen at `172.20.10.6` over the **iPhone hotspot** (the old
+  `192.168.10.172` / hostname `AVID` route is dead — that router still switches but has no
+  upstream). It is checked out at `a12903b` on branch `m10-fixed`, 114 tests passing on-device.
+  **#340 is not deployed.** `robot.service` **inactive and disabled**; quiet window restored to
+  22:00→07:30; config backed up at `config.toml.bak-m10`.
+- **Trigger 1 is clean.** `enabled | ignore_streak 0 | cooldown_s 900`, next fire Mon 17 Aug 07:55 —
+  **which is now in the past**, so under #340 the next boot will skip it as `stale` and re-book.
+  That is correct behaviour, and it is also the first thing to look for as live proof the fix works.
 - **New runtime dependency:** `python-dateutil` (SDS §10.3 mandates it by name). `tzdata` joined the
   dev group — without it `zoneinfo` cannot resolve an IANA name on Windows, so the DST tests would
   pass in CI and fail on a dev box.
 
 ## What just shipped (this session)
 
-**M10 in full, minus the live gate.**
+**Three defects, every one found by the rig rather than by CI**, and none of which the suite could
+have caught as written. The first two merged; the third is #340.
 
-- **#231** — the SDS caught up: §3.7.4 and §3.7.5 written, §10's stale TOC, `behavior.trigger_disabled`
-  missing from §3.5.3's taxonomy, a `(M6)` mislabel in §9.1.3, and three decisions recorded.
-- **#232 / #235 / #236 / #237** — the `[behavior]` config completed, the pure six-rule policy gate,
-  the RRULE resolver + scheduler loop, and `BehaviorService` itself.
-- **#314** — `remember_fact` carries the schedule. **This seam did not exist**: nothing in the repo
-  had ever written a `routines` row, so UC-02 produced a fact UC-03 could not schedule from.
-- **#313 / #239 / #240** — the `RealtimeClient` port method for a turn nobody asked for, the
-  proactive path in `ConversationService`, and §10.8's context block.
-- **#241 / #243 / #244 / #242** — ignore backoff, `set_quiet`, `POST /quiet`, and the structured tap.
-- **#315** — the mechanised UC-03 gate, which §14.5 says *is* the milestone's criterion and which no
-  filed issue had owned.
+- **#337 — a trigger fired once per process.** `SchedulerLoop` consumes a heap entry when it fires
+  it and nothing re-booked the next one. PMP's O3 wants 7/7 mornings; the ceiling was 1/7. Worse on
+  the suppressed path: one empty morning retired a reminder permanently. *Every M10 test asserted a
+  single fire — two consecutive occurrences is the smallest number that can tell the difference.*
+- **#338 — the proactive turn could not speak, and the audit said it had.** `AudioService` mints a
+  turn id only from its own VAD, so the first assistant chunk on a proactive turn asserted on `None`
+  and killed `ConversationService.pump`. The `proactive_coffee` fixture had **no audio chunk** — a
+  reasoned exclusion ("playback is M4's ground") that hid the crash exactly. The audit then recorded
+  `delivered / utterance NULL / ignored`: success reported for silence, and §10.5 would have
+  disabled the trigger after three mornings for being ignored by a robot that never spoke.
+- **#339 / #340 — a booking missed while the robot was off fires late on the next boot.** Found
+  because the Pi was powered down overnight: by morning the 07:55 booking was three hours old and
+  every layer waved it through. Booting would have announced coffee at **10:43**. Fixed by grading
+  the booking's *age* before the gate (new SDS §10.3.1), with `STALE` deliberately **outside**
+  `POLICY_RULES` — the six rules grade the room; this grades the booking.
 
-**Five things the epic had wrong**, each verified against the tree rather than inferred: the three
-tables already shipped in `0001_initial.sql` (#234 closed as obsolete); `[behavior]` already shipped
-in both TOMLs; §10.7 needed a **port change** (#239 said it did not); `StateManager` has **no**
-subscriptions (#238's AC-1 premise); and nothing created a `routines` row (#314, filed).
-
-**Three decisions taken, one of them reversed on evidence.** D1 — the model supplies the schedule on
-the `remember_fact` call. D2 — `dateutil` becomes a core dep in `core/schedule.py`, with `dateutil`
-added to import-linter's domain-purity list so it can never drift into `domain/`. D3 — originally
-"add a `(SLEEPING, BEHAVIOR_TRIGGER_FIRED)` row"; **reversed** once `state.py:107` was read: presence
-already wakes SLEEPING, and rule 3's 300 s window cannot overlap the ten minutes of absence that
-produce SLEEPING, so the row would have been unreachable. §10.4 rule 2 now reads `state is not IDLE`.
+**One error worth carrying**: #340's first implementation graded `triggers.next_fire_at`. The heap
+and that column are *permitted* to diverge — a re-arm after a delivery schedules without persisting
+— so a trigger staged into the heap for **now** looked fifteen hours old. `SchedulerLoop` now hands
+its callback `(trigger_id, fire_at)`. The M10 gate caught it: the fix was found by a test, not by
+reasoning.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **The state a fixture never enters is the state that breaks in production.** Every boot test in
+  `tests/services/test_behavior.py` booked `_START + 60` — always in the *future* — so no test in the
+  suite had ever asked what happens to a trigger whose moment passed while the robot was off. #339
+  was invisible until the rig spent a night unplugged. This is the third instance in two sessions:
+  a fixture with no audio chunk hid #338, and a single-fire assertion hid #337. **When writing a
+  fixture, ask what was left out and why; if the answer is "another milestone owns that", it is the
+  bug's hiding place.** The corollary for scheduled work: *one* occurrence proves a mechanism fires,
+  never that it fires *again* — and the interesting states are the ones reached by time passing
+  rather than by the test doing something.
+
+- ⚠️ **Powering the rig off is not a neutral act — it is an input.** Three of the last four defects
+  were only reachable through the boundary between the robot's clock and reality: a process restart
+  (#337), a crash mid-turn (#338), an overnight power-off (#339). None was reachable by a suite that
+  starts every scenario from a clean, running system. Treat *"what does this look like after a
+  reboot, a crash, and a night off"* as a first-class question for anything that persists state.
 
 - ⚠️ **A check that queries through the port can be structurally incapable of failing.** The M7
   gate's "no FTS5 entry outlives a deleted row" check first asked `FactRepository.keyword_search`,
