@@ -1,13 +1,29 @@
 name: CI
 
-# AVID-4: every DoD gate, machine-checked, on push to main and every PR. Runs on
-# Linux (the Pi target is Linux; ADR-008). The matrix exercises BOTH 3.11 (the Pi's
-# system Python) and 3.13 (dev) — bug #27 shipped because the 3.11 leg, though
-# documented, was never actually run.
+# AVID-4: every DoD gate, machine-checked. Runs on Linux (the Pi target is Linux;
+# ADR-008). The matrix exercises BOTH 3.11 (the Pi's system Python) and 3.13 (dev) —
+# bug #27 shipped because the 3.11 leg, though documented, was never actually run.
+#
+# ⚠️ PUSH-TO-MAIN ONLY, and this is a deliberate trade rather than an oversight. The
+# `pull_request` trigger was removed 2026-08-18 under a GitHub Actions billing ceiling:
+# PR events were 51% of August's runs on a private repo, where minutes are billed. The
+# cost is real and must not be forgotten — **a PR is no longer verified before it
+# merges**, so CONTRIBUTING's "CI green" is now checked *after* the fact, on main. Run
+# the gates locally before merging (`ruff`, `mypy`, `lint-imports`, `pytest` on both
+# interpreters), and if a run reddens main, fix forward immediately rather than letting
+# main sit broken. Restore `pull_request:` the moment the minutes allow.
+#
+# Docs-only changes are skipped: three consecutive Markdown-only PRs each burned the full
+# ~13-minute matrix in August. Nothing under paths-ignore can change a test outcome.
 on:
   push:
     branches: [main]
-  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+  workflow_dispatch: # so a branch can still be verified on demand before merging
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
