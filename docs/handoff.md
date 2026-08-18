@@ -99,13 +99,6 @@ trigger it** — stage forward, not backward. The M10 gate learned this the hard
 arc fast-forwarded 14 hours past the morning booking and started reporting `stale`, correctly, and
 the *harness* was what needed fixing.
 
-⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
-than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
-That is the point of the fix, but it means **you can no longer wind the clock past a booking to
-trigger it** — stage forward, not backward. The M10 gate learned this the hard way: its quiet-hours
-arc fast-forwarded 14 hours past the morning booking and started reporting `stale`, correctly, and
-the *harness* was what needed fixing.
-
 ### The queue behind it
 
 1. **#328 — the P8 `async-debug` gate mismeasures, and its own proposed fix would gut it.**
