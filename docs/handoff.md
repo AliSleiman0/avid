@@ -6,223 +6,161 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-17 · `main = e53d8e8` · **no tag** (M10 is unsealed) · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = <MAIN>` · **`v0.M10.0` tagged** · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
-**The Pi is running unattended with two staged observations pending.** Nothing is in flight in the
-repo — zero open PRs. The next session's job is to *collect evidence*, not to write code.
+**M10 is sealed. Nothing is in flight — zero open PRs — and the next decision is which milestone to
+start.** The repo is at a clean stopping point for the first time in a week.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
-`git rev-parse --short origin/main` — three commands, and they are always right. See the
-BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
+`git rev-parse --short origin/main` — three commands, always right. See the BATON-CAN-BE-WRONG entry
+below; it has cost a whole planning cycle once already.
 
-### AC-1 is the only live criterion left, and the fixture blocks it
+### Pick M9 or M11 — and they are not equivalent
 
-**`next_fire_at` is `1787028900` = 07:55 EEST daily, re-booked automatically by #340 after every
-miss.** Nothing needs staging by hand. What it needs is a *person*:
+- **M9 "It moves"** (epic #198, 10 open children, 5 IED). Motion: gesture vocabulary, `MotionService`,
+  `look_at`, the affect→gesture map. **Not on the critical path** (PMP §5.4 goes M6 → M10 → M11), so
+  it is the *optional* milestone. The hardware is already proven — two servos on a PCA9685, verified
+  on the rig — and #204/#203 collide with `services/tools.py` and `main.py`, the same files M10 just
+  finished editing.
+- **M11 "It's a product"** (#12, 1 open issue, 13 IED). **The critical path.** A 30-day unattended
+  soak, O5, the runbook, `v1.0.0`. ⚠️ It is also where **M10's unrun AC-0 comes due** — a 30-day soak
+  subsumes "does it fire on the second morning" and would surface the one property the seal skipped.
 
-⚠️ **Two conditions, both satisfied by the same act — be in the camera's view a few minutes before
-the fire and stay there.** The robot naps to SLEEPING after ten idle minutes and
-`PROACTIVE_STATES = {IDLE}` (rule 2), so presence must both *wake* it and satisfy rule 3's 300 s
-window. `domain/behavior.py:80`: *"proactivity does not wake a sleeping robot. It speaks to someone
-already there."* It also needs the hotspot up, or there is no API and no utterance.
+**Recommendation: M11.** It is the critical path, and it retires M10's only recorded gap as a side
+effect rather than as extra work. M9 is a genuine feature but it is a detour, and PMP §7.3 is explicit
+that proactivity "survives on the clock alone".
 
-✅ **The fixture has been repointed at the owner's real routine (2026-08-18).** It was
-`local_time = '08:00'`, and he is not at his desk at 08:00, so the morning vetoed on `presence`
-daily and AC-1 could never land. 08:00 was the SDS's illustration of UC-03, not a requirement —
-AC-0 asks only for "a real `routines` row for a daily coffee reminder". It is now **`00:00`,
-decaf**, firing at **23:55** on the 300 s lead. `next_fire_at = 1787086500` = **2026-08-18 23:55
-EEST**, computed by `core.schedule.next_occurrence` itself rather than by hand, with
-`dtstart_epoch` taken from `facts.created_at` as its docstring requires (an anchor that moves
-changes what the rule *means*).
+### What M10's seal deliberately did NOT prove
 
-⚠️ **That change forced a second one, and it is MACHINE-ONLY ON PURPOSE.** Midnight sits inside the
-shipped `22:00→07:30` quiet window, and rule 1 is evaluated first and overrides nothing — so the new
-routine would have been suppressed every night, swapping a permanent `presence` veto for a permanent
-`quiet_hours` one. `/etc/robot/config.toml` now runs **`02:00→09:00`** (backup
-`config.toml.bak-pre-quiet-shift`), which still covers the hours he is actually asleep. Verified via
-`within_quiet_window`: 23:55 and 00:00 are outside, 03:00 and 08:00 inside.
+**AC-0 — multiple unattended mornings — was not run.** An explicit owner decision on 2026-08-20 to
+seal and move on, taken with the risk stated. Two consequences to carry forward:
 
-🚫 **Do not "fix" the resulting drift in either direction**, and the machine's config now carries a
-comment saying so. Copying `config/pi.toml` over the machine restores a window that silently kills
-the routine. And changing `config/pi.toml` to match is worse: **`tests/core/test_config.py:504`
-loads that file and asserts the `22:00→07:30` window precisely because it CROSSES MIDNIGHT** — the
-case a naive implementation gets wrong. `02:00→09:00` does not wrap, so aligning the template would
-delete that coverage to suit one person's sleep schedule. This is what per-deployment config is for.
+- **AC-1 is staged, not spontaneous.** For id=15 the cooldown was cleared by hand and the booking
+  armed. It proves the mechanism end to end; it does not prove the robot doing this by itself.
+- **The second morning has never happened on the rig.** `0d3ba60` fixed *"a trigger fired once and
+  never again"* in this very codebase — that is the bug class AC-0 exists to catch, and it now rests
+  on `test_three_cycles_a_day_apart_cost_no_wall_clock_time` alone. **O3's 7/7 mornings is
+  unmeasured.**
 
-⚠️ **AC-2's proof (id=10) was taken under `22:00→07:30`.** The mechanism it establishes — rule 1 plus
-`within_quiet_window` — is value-independent, so it stands. But any seal evidence citing that row
-must state the window in force at the time, or the row becomes unreadable against a machine that now
-says something else.
+🎁 **The trigger is armed and running right now.** `next_fire_at` = 23:55 EEST daily, `ignore_streak`
+0, `enabled` 1, nothing staged. **Reading the log on any morning after tonight costs one command and
+retires most of AC-0's risk for free** — do that before M11's soak rather than instead of it:
 
-✅ **Missing a morning is free** — verified in code, not assumed. `ignore_streak` is incremented only
-in `_resolve`, from a `_PendingDelivery` that only `_deliver` creates (`services/behavior.py:729`),
-and a suppressed proposal never reaches `_deliver`. Confirmed live: id=6 was a `presence`
-suppression and the streak stayed at 1. **The trigger will not disable itself by being slept
-through.** Only *delivered-then-unanswered* turns count, and the streak is at 1 of 3.
+```sh
+ssh alisleiman0@<pi> 'sudo python3 -c "
+import sqlite3,datetime
+c=sqlite3.connect(\"/var/lib/robot/robot.db\")
+for r in c.execute(\"select id,considered_at,outcome,reason,utterance,user_reaction from proactive_log order by id desc limit 5\"): print(r)"'
+```
 
-### How AC-2 was closed, and the shape to copy for AC-1
-
-Row id=10 (2026-08-18 01:55:24 EEST) is `suppressed / quiet_hours` — and it is worth more than the
-four rows before it because **the other rules were established as passing by construction**, so
-quiet was the *sole* veto rather than merely the first one reported:
-state `IDLE`; presence gained 83 s earlier against a 300 s window; cooldown 13.7 h against 1800 s;
-0 of 5 delivered that day. Plus two negative controls: **no `set_quiet` call anywhere in the boot**
-(so this is the static window, not the override — a distinction the audit row cannot make), and
-**no playback / SPEAKING / THINKING** (so the silence was real, not a quiet delivery).
-
-**That is the standard to hold AC-1 to as well**: name every rule that was live, not just the one
-the log prints.
-
-Read both with `/tmp/m10_state.py` on the Pi (also in this session's scratchpad) — it prints the
-config *as loaded* alongside the rows, so a silent schema default cannot be mistaken for a setting.
-
-### Then: #245's remaining ACs
-
-**M10 remains code-complete and unsealed.** Proven live as of this session:
-
-| AC | state | evidence |
-|---|---|---|
-| **AC-2** quiet hours | ✅ **airtight, 2026-08-18 01:55 EEST** | `proactive_log` id=10, static branch, sole veto — see below |
-| **AC-3** HTTP door | ✅ | `health: quiet requested over HTTP` → `suppressed / quiet_hours`, cooldown ruled out |
-| **AC-3** tool door | ✅ | *"leave me alone for ten minutes"* → `quiet until … (600s requested)`, no `health` line |
-| **AC-4** ignore backoff | ✅ | streak 0→1, `cooldown_s` 900→1800, `reaction='ignored'` |
-| **AC-1** real morning | ⏳ | midday staging sounded natural but cannot substitute |
-| **AC-0** multi-morning | ⏳ | needs wall-clock days |
-| **AC-5 / AC-6** seal | ⏳ | journal, PMP §5.2, tag, close epic + 14 children |
-
-⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
-than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
-That is the point of the fix, but it means **you can no longer wind the clock past a booking to
-trigger it** — stage forward, not backward. The M10 gate learned this the hard way: its quiet-hours
-arc fast-forwarded 14 hours past the morning booking and started reporting `stale`, correctly, and
-the *harness* was what needed fixing.
+An id=16 that is `delivered` with a real utterance, on a night nobody touched the machine, is AC-0's
+first morning — and worth appending to `docs/journal.md` even after the tag.
 
 ### The queue behind it
 
-1. **#328 — the P8 `async-debug` gate mismeasures, and its own proposed fix would gut it.**
-   ⚠️ **Read the 2026-08-17 comment before implementing anything.** The issue proposes extending the
-   fixture-frame exemption to *test*-frame warnings. That is wrong: `Task.__repr__` names the task's
-   **outermost** coroutine, and this suite drives services by direct `await` from the test function,
-   so a genuinely blocking production callback is *always* reported as `coro=<test_… running at
-   tests/…>`. The run that reddened #340 blamed `test_memory.py:216` — which is
-   `await rig.memory.start()`, i.e. `MemoryService` loading the MiniLM ONNX model. **Production code.**
-   The frame carries no information about whose callback stalled; exempting test frames would silence
-   nearly every warning the gate can produce off hardware. Remaining options: a named, printed
-   allow-list; a separate threshold for known-heavy tests; or walking `cr_await` to the innermost
-   frame and gating on whether *that* is inside `avid/` (the only one that measures what P8 names).
-   ⚠️ Do not raise the threshold. Whatever is chosen, prove it bites: a deliberate `time.sleep(0.06)`
-   inside an `avid/` coroutine reached by inline `await` must still go red.
-2. **#310 — `set_affect` never fires.** M6's functional gap, parked deliberately when M10 was
-   chosen. ⚠️ The diagnostic vehicle needs repair first: `tools/eval_extraction.py` still sends
-   `OpenAI-Beta: realtime=v1` (the beta interface is **disabled server-side**, `adapters/realtime.py:661`)
-   and pins a model the robot no longer runs. Fix the harness, count `set_affect` against
-   `remember_fact` in one text session, and only then decide whether §6.8's local inference is
-   warranted at all.
-3. **#157** — session-open latency; only lever left is pooling, which reopens ADR-007.
-4. **Transcript ordering** in `docs/demos/conversation_pi.py` — order by `correlation_id`, not
-   arrival.
-5. **#289** — `Pca9685Servo`'s lazy-open race. Do it *before* M9, not during.
-6. **M7 follow-ups #264 / #265 / #267**, untouched.
-
-### Two open loops that are NOT tasks
-
-- **O1 regressed and that is expected**, not a defect: with AVID-194 the commit and `speech_ended`
-  now coincide, so O1 covers a round trip the server's own clock used to hide. Old figures are not
-  comparable.
-- **`barge_in_margin_db = 3.0` is UNCALIBRATED**, marked as such in `config/pi.toml` and SDS §9.6.
-  Re-derive it at the provisioned AGC setting before treating it as a measurement.
-- **The speaker is +6 dB louder and nobody has confirmed it is enough.** `/etc/asound.conf` gained
-  `max_dB 6.0` on the softvol and Master went to 100% (backup at `.bak-vol`); the MAX98357A has
-  fixed hardware gain, so this was the only lever. Headroom remains to +12 dB, past which speech
-  clips. ⚠️ Unverified by ear — ask before assuming the audibility complaint is closed.
+- **#328** — the P8 async-debug gate grades test bodies, not the robot's callbacks. Now **three
+  false positives on three unrelated PRs with three different untouched tests** (`test_presence.py:229`
+  0.083 s, `test_memory.py:216` 0.074 s, `test_memory.py:519` **0.052 s** — two milliseconds over).
+  Its signal-to-noise on P8 is 0:3, so a real slow callback would now be indistinguishable from noise.
+  Every red costs a merge-past-a-red-gate judgement call. **Fix it before it trains someone to ignore it.**
+- **#310** — `set_affect` never fires. `tools/eval_extraction.py` needs repair first (beta header +
+  stale model).
+- **#267 / #265 / #264** — memory-quality defects from M7's gate, all still open.
+- **#289** — `Pca9685Servo` shares the AVID-266 lazy-open shape; latent until M9 wires preemption.
 
 ## Current state
 
-- **M10 code-complete, nothing in flight.** `main = e53d8e8`; **zero open PRs**. #340 and #341 both
-  squash-merged this session; #339 auto-closed.
-- ⚠️ **M10 is code-complete but NOT sealed.** No `v0.M10.0` tag, no `docs/journal.md` entry, PMP
-  §5.2's confidence untouched, epic #230 and milestone still open — all of that is #245's to do, and
-  it is deliberate rather than forgotten. A milestone is "done done" only when its gate demo is
-  recorded (PMP §5.1), and no demo can exist until the robot has run a morning.
-- ⚠️ **`mypy` cannot run locally right now.** `uv run mypy avid` dies in `numpy/__init__.pyi` with
-  *"Type statement is only supported in Python 3.12 and greater"* — the venv holds numpy 2.5.2
-  against a 3.11 target. **Pre-existing on clean `main`**, verified by stashing. CI is unaffected.
-  ⚠️ Do not "fix" it by re-syncing with `--extra memory` on 3.13: numpy 1.26.4 has no 3.13 wheel and
-  builds from source, which fails. `uv sync --dev --frozen --python 3.13` then
+- **M10 sealed 2026-08-20 as `v0.M10.0`.** Epic #230, #245 and all 14 children closed; milestone
+  closed. `docs/journal.md` and PMP §5.2 both carry the seal, **including what it did not prove**.
+- **Zero open PRs.** `main = <MAIN>`.
+- **The Pi is ON, running `<MAIN>`, service active and enabled.** `alisleiman0@172.20.10.6` over the
+  iPhone hotspot (the address moves with the network). `/etc/robot/config.toml` gained
+  `capture_stall_s = 5.0` (backup `.bak-pre-347`). Clock NTP-synced.
+- ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.** Deliberate
+  and load-bearing: the routine is 00:00 decaf, which the shipped window would suppress every night.
+  **Do not reconcile in either direction** — `tests/core/test_config.py:504` asserts the repo's
+  window precisely *because* it crosses midnight, and `02:00→09:00` does not.
+- ⚠️ **`facts` id=19 still reads "8 in the morning" while `routines` says `00:00`.** #346's fix makes
+  the robot state the *schedule*, so the utterance is right either way — but the rows still disagree.
+  Correcting it is a **voice** job, not SQL: a raw `UPDATE facts SET text` leaves an embedding for the
+  old sentence and skews §7.7 retrieval silently.
+- ⚠️ **`mypy` cannot run locally.** `numpy/__init__.pyi` — *"Type statement is only supported in
+  Python 3.12 and greater"*. Pre-existing on clean `main`, verified by stashing; CI is unaffected. Do
+  **not** "fix" it by re-syncing with `--extra memory` on 3.13 (numpy 1.26.4 has no cp313 wheel and
+  builds from source, which fails). `uv sync --dev --frozen --python 3.13` then
   `uv pip install "numpy>=2.1"` restores a working env without touching `uv.lock`.
-- **The Pi is ON, RUNNING and now `enabled`.** `alisleiman0@172.20.10.6` over the iPhone hotspot,
-  checked out at **`e53d8e8` on `main`**, `robot.service` **active and ENABLED** — changed this
-  session, deliberately, because AC-0 wants the stack unattended across a reboot. Clock is
-  **NTP-synchronised**; `/etc/robot/config.toml` gained `stale_grace_s = 600` (backup
-  `config.toml.bak-pre-339`). Adapters verified *as loaded*: `picamera2 / framebuffer / alsa /
-  silero / openai / sqlite`, `servo` still fake. AGC **off**, mic `10 [62%]`.
-- **Trigger 1 carries this session's staging.** `enabled | ignore_streak 1 | cooldown_s 1800`
-  (the doubling is AC-4's evidence, left in place deliberately), `last_fired_at` restored to the
-  real 09:12:44Z delivery rather than staging residue, `next_fire_at = 1786996800` = **23:00 EEST
-  tonight**. ⚠️ `ignore_streak_limit` is 3 — two more ignored mornings and the trigger **disables
-  itself**, so answer tomorrow's greeting rather than letting it lapse.
-- ⚠️ **The amp's `Master` is at 100%, not the 85% `PI_OPERATIONS.md` §5 documents**, on top of the
-  `+6 dB` softvol. Left as-is by the owner's decision for this session's runs, and the AC-1 utterance
-  *was* audible — but any level measurement taken now is uncalibrated against the recorded baseline.
-- **New runtime dependency:** `python-dateutil` (SDS §10.3 mandates it by name). `tzdata` joined the
-  dev group — without it `zoneinfo` cannot resolve an IANA name on Windows, so the DST tests would
-  pass in CI and fail on a dev box.
 
-## What just shipped (2026-08-17, afternoon)
+## What just shipped (2026-08-19 → 20)
 
-**The decision at the top of the last baton was taken: #340 and #341 both merged past `async-debug`,
-with the diagnosis stated.** Then the Pi ran, and four criteria came off #245's list.
+Five PRs in one session, four of them fixes the rig found and CI could not:
 
-- **#340 is proven live.** First boot after the clock was corrected: `trigger 1 was booked for
-  1786942500, 14955s ago — skipping it rather than firing late (grace 600s)`, `proactive_log`
-  `suppressed / stale`, re-booked to the next occurrence, **no audio**. Under the old code that boot
-  would have announced coffee four hours late.
-- **AC-4 (ignore backoff) proven** — and unplanned: the AC-1 staging turn went deliberately
-  unanswered, so `ignore_streak` 0→1, `cooldown_s` 900→1800, `reaction='ignored'` written to
-  `proactive_log`. The arithmetic that was unit-tested in #241 now has a live witness.
-- **AC-3 proven through both doors**, and the two are *distinguishable in the log*: the HTTP run
-  carries an `avid.adapters.health: quiet requested over HTTP` line, the tool run carries none and
-  instead shows `quiet until … (600s requested)` on the turn's own `correlation_id`. The model
-  converted "ten minutes" to 600 s itself.
-- **#328 sharpened, not fixed** — a comment on the issue refutes its own proposed remedy with the
-  `test_memory.py:216` evidence. See the queue entry above.
-
-**Two proofs, unequal strength, recorded as such.** The HTTP quiet run had presence gained 30 s
-before the fire; the tool run had it 296 s before, against a 300 s window. Both passed rule 3, so
-`quiet_until` was the sole veto in each — but the tool run's 4-second margin is thin, and the log
-*cannot* show which rule vetoed when several apply (see the rule-ordering gotcha below). The HTTP
-proof is the one to lean on.
-
-### Earlier the same day (the previous session's work)
-
-**Three defects, every one found by the rig rather than by CI**, and none of which the suite could
-have caught as written.
-
-- **#337 — a trigger fired once per process.** `SchedulerLoop` consumes a heap entry when it fires
-  it and nothing re-booked the next one. PMP's O3 wants 7/7 mornings; the ceiling was 1/7. Worse on
-  the suppressed path: one empty morning retired a reminder permanently. *Every M10 test asserted a
-  single fire — two consecutive occurrences is the smallest number that can tell the difference.*
-- **#338 — the proactive turn could not speak, and the audit said it had.** `AudioService` mints a
-  turn id only from its own VAD, so the first assistant chunk on a proactive turn asserted on `None`
-  and killed `ConversationService.pump`. The `proactive_coffee` fixture had **no audio chunk** — a
-  reasoned exclusion ("playback is M4's ground") that hid the crash exactly. The audit then recorded
-  `delivered / utterance NULL / ignored`: success reported for silence, and §10.5 would have
-  disabled the trigger after three mornings for being ignored by a robot that never spoke.
-- **#339 / #340 — a booking missed while the robot was off fires late on the next boot.** Found
-  because the Pi was powered down overnight: by morning the 07:55 booking was three hours old and
-  every layer waved it through. Booting would have announced coffee at **10:43**. Fixed by grading
-  the booking's *age* before the gate (new SDS §10.3.1), with `STALE` deliberately **outside**
-  `POLICY_RULES` — the six rules grade the room; this grades the booking.
-
-**One error worth carrying**: #340's first implementation graded `triggers.next_fire_at`. The heap
-and that column are *permitted* to diverge — a re-arm after a delivery schedules without persisting
-— so a trigger staged into the heap for **now** looked fifteen hours old. `SchedulerLoop` now hands
-its callback `(trigger_id, fire_at)`. The M10 gate caught it: the fix was found by a test, not by
-reasoning.
+- **#344** — CI cost cut. The numpy cap is now marker-conditional; it had been leaking into the
+  `memory` extra, and 1.26.4 has no cp313 wheel, so `test (3.13)` and `async-debug` were **compiling
+  numpy from source on every run** — 5m02s each, ~10 of the 13 billable minutes. `pull_request` was
+  removed and then **restored at the owner's call**: the trigger was never where the minutes were.
+- **#345** — the scheduler slept through a booking when the clock stepped. Every sleep is now bounded
+  by `min(stale_grace_s, IDLE_SLEEP_S)`, and a step is logged. `FakeClock.step_wall_clock()` exists
+  because the fake could not previously *state* the defect.
+- **#346** — `behavior.trigger_fired` carries `occurrence_at`, so §10.8's block states the schedule
+  rather than re-reading the hour out of prose. Also closed two untested holes in
+  `memory.fact_superseded`: a soft-deleted fact orphaned its `routines` row, and a correction with no
+  `schedule` silently deleted a working trigger.
+- **#347** — `AudioService` gained a capture watchdog and two events; `BehaviorService` refuses to
+  score an unanswered turn as an ignore when the mic was not delivering. `user_reaction` stays NULL —
+  §8.3 already defines that as *"unknown yet"*, so no migration.
+- **#343** — AC-2's evidence and the fixture that was blocking AC-1.
 
 ## Standing gotchas (carry forward)
+
+### `uv sync` on the Pi is the same mistake as `uv run` — and it destroys the venv
+
+`PI_OPERATIONS.md` §2 says *"Never `uv run` on the Pi"*. **`uv sync` is that trap wearing a different
+name**, and it is worse: it decided the interpreter should be a downloaded CPython 3.13 instead of
+system 3.11, deleted `.venv/bin`, and only then failed on permissions. The service kept running on
+its already-loaded process, so **nothing looked broken until the next restart**.
+
+Rebuild it the documented way, and note the two things easy to get wrong:
+
+```sh
+sudo rm -rf /opt/avid/.venv
+sudo /usr/bin/python3 -m venv --system-site-packages /opt/avid/.venv   # 3.11, and system-site
+cd /opt/avid && ~/.local/bin/uv export --frozen \
+    --extra pi --extra memory --extra openai --no-hashes --no-emit-project -o /tmp/req.txt
+sudo ~/.local/bin/uv pip install --python /opt/avid/.venv/bin/python -r /tmp/req.txt
+sudo ~/.local/bin/uv pip install --python /opt/avid/.venv/bin/python -e . --no-deps
+sudo /opt/avid/.venv/bin/python -c "import picamera2, numpy, websockets, openai, avid; print('ok')"
+```
+
+⚠️ **`--extra openai` is not optional and is easy to forget.** Leaving it out produces a stack that
+boots, passes every health check, fires its trigger, transitions `IDLE → THINKING` — and then dies
+in the bus handler with `ModuleNotFoundError: No module named 'websockets'`. The robot goes through
+every motion of speaking and makes no sound. That happened during the M10 seal.
+
+⚠️ **`uv export --frozen` rather than a resolve.** It respects `uv.lock`, which is what keeps
+`numpy==1.26.4 ; python_full_version < '3.12'` — the cap `picamera2` needs — instead of letting a
+fresh resolution pick 2.x and break the camera for a reason that looks nothing like the cause.
+
+### `vision.presence_gained` fires on ARRIVAL only — sitting still ages out
+
+Rule 3 grades `presence_age_s` against a 300 s window, and the age is measured from the last
+`vision.presence_gained`. That event is **edge-triggered**: a person who sits down and stays put
+generates exactly one, and six minutes later the gate vetoes on `presence` while they are staring
+straight into the camera.
+
+Two ways to re-arm it before a staged fire, and the second is much more reliable:
+
+1. Step **out** of frame long enough for the filter to lose you (~75 s at the shipped hysteresis),
+   then walk back in. Fiddly to time against a fire you have already armed.
+2. **Restart the service.** `PresenceService` starts cold and re-acquires within a few seconds, which
+   stamps a fresh `presence_gained` with the person already sitting there. This is what finally landed
+   AC-1 after two near-misses of 25 and 386 seconds.
+
+⚠️ This is a *staging* aid, not a defect — for a real 07:55 morning the user is arriving anyway. But
+every hand-staged proactive test will trip over it, and the failure looks exactly like "the camera
+cannot see me".
+
 
 - ⚠️ **The Pi has no RTC, so an offline boot comes up with a plausible, badly wrong clock — and
   nothing says so.** Found this session powered on and reading **`00:38 UTC` when the real time was

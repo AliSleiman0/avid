@@ -242,7 +242,7 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M7** | **It remembers** | 7 | Full UC-02 + UC-05. Tell it 20 facts, restart the process, recall all 20. Semantic query returns the right fact. Contradictory fact supersedes correctly. "Forget that" deletes. | **13** | **L** | 68 |
 | **M8** ✅ | **It sees** | 8 | Presence detection with hysteresis, no flapping over a 1-hour desk recording. ≤1 core, ≤5 fps, thermals stable. The robot wakes from SLEEPING when someone sits down.[^m8-uc04] | **8** | M | 76 |
 | **M9** | **It moves** | 9 | Affect drives gesture. Nod, turn, idle micro-motion. No brown-out under stall. Servo relaxes when idle (no buzz). Gesture preemption works. | **5** | M | 81 |
-| **M10** | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
+| **M10** ✅ | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
 | **M11** | **It's a product** | 11 | 30-day unattended soak. O5 met. Runbook written. v1.0.0 tagged. | **13** | M | 107 |
 
 ✅ = sealed and tagged. **M8 sealed 2026-08-16 as `v0.M8.0`, measured with a person actually in
@@ -259,6 +259,40 @@ vision path**: #266 (framebuffer handle race), #283 (**50 Hz mains hum defeats t
 (Realtime `response.create` while a response is active). #283 degraded M8's AC-7 conversation with
 9 dropped turns; vision was measured innocent — 347 ms median first-token against M5's 328, with
 zero P8 slow-callback warnings.
+
+**M10 sealed 2026-08-20 as `v0.M10.0` with its headline criterion proven and its endurance criterion
+NOT run**, recorded here rather than rounded up. The robot speaks first: `proactive_log` id=15,
+2026-08-20 01:48:02 EEST, `delivered` / `engaged` — *"Hey Ali, just a heads-up, your coffee time's
+coming up in about 5 minutes — you ready for a late-night boost?"* — with all six §10.4 rules live
+and passing and a five-turn conversation after it. **AC-1 is staged, not spontaneous**: the cooldown
+was cleared by hand and the booking armed, so it proves the *mechanism* end to end and not the
+unattended product. **AC-0 (multiple unattended mornings) was not run at all** — an explicit owner
+decision to seal and move on, and the residual risk has a name: `0d3ba60` fixed *"a trigger fired
+once and never again"* in this very codebase, and the one property AC-0 uniquely tests is the second
+morning. It rests on `test_three_cycles_a_day_apart_cost_no_wall_clock_time` and on §10.3's mechanised
+gate, not on the rig. **O3's 7/7 mornings is therefore unmeasured**, and M11's 30-day soak is where it
+comes due. AC-2 (`quiet_hours`, id=10), AC-3 (both the tool and HTTP doors) and AC-4 (streak 0→1,
+cooldown 900→1800) were proven live on 2026-08-18.
+
+**Five defects, every one found by the rig and none by CI** — the milestone's dominant lesson.
+#337 (a delivered turn that never spoke was recorded as ignored), #339 (a booking missed while the
+robot was off fired hours late on boot), #345 (the scheduler slept through its own booking after the
+no-RTC clock was corrected forward — a *human restart* is the only reason AC-1 exists), #346 (the
+schedule and the fact's prose disagreed and the robot spoke the prose: *"your 8 AM coffee ritual"* at
+midnight), #347 (a robot that could not hear recorded it as the user ignoring it, and three of those
+disable the feature and blame the user). Three of the five were **proven live by accident during the
+seal itself** when a botched venv rebuild made the robot mute: #337 declined to count it, #346's fix
+is visible in id=15 saying *"in about 5 minutes"* where id=12 two hours earlier said *"8 AM"*, and
+#347's watchdog stayed silent on real hardware. **Sealed with #328 open and named** — the P8
+async-debug gate grades test bodies rather than the robot's callbacks and has now reddened three
+unrelated PRs with three different untouched tests, so its signal-to-noise on P8 is 0:3.
+
+⚠️ **The recurring shape, three milestones running: the case a fixture is built to exclude is the
+case that reaches production.** `FakeClock` derived both its readings from one counter *so they
+could not drift*, and drift was #345. `_seed_routine` seeded the bare word `'coffee'` with no hour
+in it, so nothing could notice a schedule disagreeing with prose (#346). `FakeMicrophone` could not
+stop yielding, so nothing could tell a deaf robot from a quiet room (#347). Each fix had to widen the
+fake before it could write the test.
 
 **M5 sealed 2026-08-01 as `v0.M5.0` with two gaps recorded rather than closed**, because a milestone marker that hides what it did not reach is worth nothing: **O1's P95 is not met** (P50 1530 ms passes the provisional ceiling, but 1 turn in 10 exceeds 2700 ms where a P95 allows 1 in 20 — cause is AVID-194, two VADs disagreeing about where an utterance ends, written up in `docs/enhancement-single-turn-authority.md`), and **AC-7's 60-second recorded demo was deferred**. AVID-188 and AVID-189 are also open from the same gate. The tail is the part a person notices, so AVID-194 opens M6's list.
 
