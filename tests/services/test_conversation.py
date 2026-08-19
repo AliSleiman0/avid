@@ -1966,3 +1966,61 @@ async def test_the_block_names_the_fact_that_prompted_the_turn() -> None:
         block = rig.client.injected[-1]
         assert 'You know: "The user drinks coffee every day at 08:00."' in block
         assert 'You know: "The user\'s dog is called Biscuit."' not in block
+
+
+# --- §10.8: the schedule is authoritative, the prose is not (#346) ---------------------------
+
+
+def test_the_block_carries_the_scheduled_hour_not_the_one_in_the_prose() -> None:
+    """⚠️ The rig said *"your 8 AM coffee ritual"* at midnight. This is the assertion that stops it.
+
+    A routine is two rows and nothing binds them: the user's sentence in ``facts.text`` and the
+    machine-readable time in ``routines.local_time``. On 2026-08-19 the schedule had been repointed
+    to 00:00 and the sentence still said "8 in the morning", so the model — handed the current
+    time and the prose, and nothing else — produced *"almost midnight now, your 8 AM coffee
+    ritual's not too far off"*. It was not hallucinating. It was told two things and only one of
+    them was true, and it had no way to tell which.
+
+    The block now states the scheduled hour as a fact of its own, so the authoritative time is on
+    the wire rather than inferred from a sentence that may have aged.
+    """
+    block = compose_proactive_block(
+        local_time="23:55",
+        weekday="Wednesday",
+        present=True,
+        spoken_today=False,
+        fact="Ali drinks coffee every day at 8 in the morning.",
+        routine_time="00:00",
+    )
+    assert "00:00" in block, "the schedule's own hour is missing from the block"
+    assert "scheduled for 00:00" in block, (
+        "the hour has to be labelled as the schedule's, or it is just a second number"
+    )
+    # The prose stays: it is the reason the turn is happening and §6.7 puts it on the wire anyway.
+    assert "Ali drinks coffee every day at 8 in the morning." in block
+
+
+def test_a_block_with_no_routine_time_is_unchanged() -> None:
+    """The presence-greeting path (§3.7.5) has no routine behind it and must not gain a clause.
+
+    Pinned rather than assumed: ``occurrence_at`` is ``None`` for a trigger with no fact, and a
+    block that grew a dangling "scheduled for None" would be a regression nothing else here
+    would catch.
+    """
+    without = compose_proactive_block(
+        local_time="07:55",
+        weekday="Tuesday",
+        present=True,
+        spoken_today=False,
+        fact="The user drinks coffee every day at 08:00.",
+    )
+    explicit_none = compose_proactive_block(
+        local_time="07:55",
+        weekday="Tuesday",
+        present=True,
+        spoken_today=False,
+        fact="The user drinks coffee every day at 08:00.",
+        routine_time=None,
+    )
+    assert without == explicit_none
+    assert "scheduled for" not in without

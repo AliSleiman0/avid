@@ -141,6 +141,10 @@ class BehaviorService:
         # Bookings skipped for being too old. Should be zero on a robot that stays powered; on one
         # that gets switched off it is the count of mornings nobody was home for (#339).
         self.stale_skips = 0
+        # Corrections that quietly un-scheduled a working routine (#346). Should be zero; anything
+        # else means the model is dropping `remember_fact`'s `schedule` on a rephrase, which turns
+        # a working reminder off without a single error anywhere.
+        self.schedules_lost_to_correction = 0
         self._ignore_streak_limit = ignore_streak_limit
         self._scheduler = SchedulerLoop(
             clock=clock,
@@ -440,9 +444,29 @@ class BehaviorService:
 
     async def _on_fact_superseded(self, event: MemoryFactSuperseded) -> None:
         """§7.8's correction: coffee at 08:00 becomes 08:30. The old fact's trigger goes and the
-        new fact's is registered — an *edit*, not a second reminder every morning."""
+        new fact's is registered — an *edit*, not a second reminder every morning.
+
+        ⚠️ **A correction that drops the schedule silently ends the routine**, and that is the one
+        case worth shouting about. `remember_fact`'s ``schedule`` is optional, so a model that
+        rephrases "coffee at eight" without re-supplying the RRULE produces a perfectly valid new
+        fact with no ``routines`` row — and this method dutifully deletes a working trigger and
+        registers nothing. The robot simply stops mentioning coffee, and nothing errors. That is
+        #310's shape, one layer down, so it is counted and logged at WARNING rather than left to
+        `_register`'s ordinary INFO for a first-time routine with no clock time. The two look
+        identical from inside `_register`; only here is the difference knowable.
+        """
+        had_schedule = await self._triggers.routine_for(event.old_id) is not None
         await self._unregister(event.old_id)
         await self._register(event.new_id, correlation_id=event.correlation_id)
+        if had_schedule and await self._triggers.routine_for(event.new_id) is None:
+            self.schedules_lost_to_correction += 1
+            _log.warning(
+                "fact %d superseded fact %d and dropped its schedule — the routine will no "
+                "longer fire; `remember_fact` was called without `schedule` [correlation_id=%s]",
+                event.new_id,
+                event.old_id,
+                event.correlation_id,
+            )
 
     async def _on_fact_deleted(self, event: MemoryFactDeleted) -> None:
         """UC-07's hard delete. A schedule the user withdrew consent for must not go off — a
@@ -555,6 +579,7 @@ class BehaviorService:
             record.id,
             fact_id=record.fact_id,
             at=now,
+            occurrence_at=await self._occurrence_for(record.fact_id, fire_at),
             record_ignore_streak=record.ignore_streak,
             record_cooldown_s=record.cooldown_s,
         )
@@ -618,6 +643,7 @@ class BehaviorService:
         *,
         fact_id: int | None,
         at: int,
+        occurrence_at: int | None,
         record_ignore_streak: int,
         record_cooldown_s: int,
     ) -> None:
@@ -650,6 +676,7 @@ class BehaviorService:
                 ),
                 trigger_id=trigger_id,
                 fact_id=fact_id,
+                occurrence_at=occurrence_at,
             )
         )
         await self._bus.publish(
@@ -774,6 +801,24 @@ class BehaviorService:
             trigger_id,
             ignore_streak,
         )
+
+    async def _occurrence_for(self, fact_id: int | None, fire_at: int) -> int | None:
+        """The moment the routine is *about*, given the moment it fired (#346).
+
+        ``lead_time_s`` is the whole distinction: the schedule names the event and the lead names
+        how far ahead the robot mentions it, so a 08:00 routine fires at 07:55 and this returns
+        08:00. §10.8's block needs the former — telling the model "it is 07:55" and leaving it to
+        infer the occasion's hour from the fact's prose is what produced a midnight reminder about
+        an 8 AM ritual on the rig.
+
+        Derived from the booking that actually came due rather than re-resolved from the rule, for
+        the same reason ``fire_at`` travels with the callback at all (#339): re-resolving would
+        answer a question about the *next* occurrence, not this one.
+        """
+        if fact_id is None:
+            return None
+        routine = await self._triggers.routine_for(fact_id)
+        return None if routine is None else fire_at + routine.lead_time_s
 
     async def _next_fire_for(self, fact_id: int | None) -> int | None:
         """The occurrence after this one, or ``None`` when the rule has run out.

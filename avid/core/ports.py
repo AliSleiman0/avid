@@ -691,9 +691,12 @@ class TriggerRepository(Protocol):
     async def remove_for_fact(self, fact_id: int) -> None:
         """Drop the trigger for ``fact_id`` — ``memory.fact_deleted``, and UC-07's hard delete.
 
+        Removes the ``routines`` row as well as the trigger, which is what "its schedule" means.
         Idempotent; a fact with no trigger is not an error. The ``ON DELETE CASCADE`` in §8.3
-        already removes the rows when the *fact* goes, so this exists for the case where the fact
-        survives and only its schedule should not."""
+        already removes both when the *fact* goes, so this exists for the case where the fact
+        survives and only its schedule should not — and **supersession is exactly that case**:
+        §7.8 marks the old fact rather than deleting it, so the cascade never fires and the
+        schedule would otherwise outlive the sentence it belongs to (#346)."""
         ...
 
     async def enabled_triggers(self) -> Sequence[TriggerRecord]:

@@ -132,6 +132,11 @@ class SqliteTriggerStore:
             conn = self._conn_sync()
             with conn:
                 conn.execute("DELETE FROM triggers WHERE fact_id = ?", (fact_id,))
+                # ...and the schedule itself. A superseded fact is *soft*-deleted, so the
+                # CASCADE never fires and its `routines` row outlives the trigger — an orphan
+                # holding a time nothing will ever act on, attached to a sentence no longer
+                # live (#346).
+                conn.execute("DELETE FROM routines WHERE fact_id = ?", (fact_id,))
 
         await self._run(_remove)
 

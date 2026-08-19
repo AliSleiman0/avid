@@ -280,12 +280,22 @@ class BehaviorTriggerFired(Event):
     has been sitting in a queue is one whose policy context has gone stale.
 
     ``fact_id`` is ``None`` for a trigger with no fact behind it (a presence greeting, §3.7.5).
+
+    ``occurrence_at`` is **the moment the routine is about**, not the moment this fired: the fire is
+    ``lead_time_s`` early by design, so a routine at 08:00 produces an event at 07:55 carrying
+    ``occurrence_at`` = 08:00. It travels here because it is the only authoritative statement of
+    that time anywhere on this seam. The alternative — letting §10.8's block re-read the hour out of
+    the fact's prose — is what put *"your 8 AM coffee ritual"* into a midnight reminder on the rig
+    (#346): `routines.local_time` had been repointed and `facts.text` still said the old hour, and
+    the composer had no way to know which to believe. ``None`` when no routine backs the trigger,
+    exactly as ``fact_id`` is.
     """
 
     name: ClassVar[str] = "behavior.trigger_fired"
 
     trigger_id: int
     fact_id: int | None = None
+    occurrence_at: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

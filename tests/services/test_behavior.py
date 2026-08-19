@@ -14,6 +14,7 @@ story in month three.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from avid.domain import (
     Event,
     MemoryFactDeleted,
     MemoryFactStored,
+    MemoryFactSuperseded,
     PolicyLimits,
     RobotState,
     SystemStarted,
@@ -169,11 +171,23 @@ def _env(rig: Rig) -> dict[str, object]:
     return envelope(clock=rig.clock, correlation_id=uuid4(), source="test")
 
 
-async def _seed_routine(rig: Rig, *, local_time: str = "08:00") -> int:
+async def _seed_routine(
+    rig: Rig,
+    *,
+    local_time: str = "08:00",
+    text: str = "Ali drinks coffee every day at 08:00.",
+    schedule: bool = True,
+) -> int:
     """Insert a routine fact + its routines row directly, and return the fact id.
 
     Writing facts is ``FactRepository``'s job, so the fixture reaches past the port for its
     precondition rather than pretending this service owns a write it does not.
+
+    ⚠️ ``text`` states a **time**, and that is deliberate (#346). It used to be the bare word
+    ``'coffee'``, which meant no test in this file could ever notice the prose and the schedule
+    disagreeing — the exact defect the rig found, hidden by a fixture that carried no hour to
+    disagree with. ``schedule=False`` seeds the other half of that story: a routine fact with no
+    ``routines`` row at all.
     """
 
     def _insert() -> int:
@@ -181,15 +195,16 @@ async def _seed_routine(rig: Rig, *, local_time: str = "08:00") -> int:
         with conn:
             cur = conn.execute(
                 "INSERT INTO facts (text, kind, importance, created_at, last_accessed_at) "
-                "VALUES ('coffee', 'routine', 6, ?, ?)",
-                (_START, _START),
+                "VALUES (?, 'routine', 6, ?, ?)",
+                (text, _START, _START),
             )
             fact_id = int(cur.lastrowid or 0)
-            conn.execute(
-                "INSERT INTO routines (fact_id, rrule, local_time, timezone) "
-                "VALUES (?, 'FREQ=DAILY', ?, ?)",
-                (fact_id, local_time, _ZONE),
-            )
+            if schedule:
+                conn.execute(
+                    "INSERT INTO routines (fact_id, rrule, local_time, timezone) "
+                    "VALUES (?, 'FREQ=DAILY', ?, ?)",
+                    (fact_id, local_time, _ZONE),
+                )
         return fact_id
 
     return await rig.store._run(_insert)  # noqa: SLF001 - as above
@@ -1032,4 +1047,164 @@ async def test_a_large_clock_correction_skips_and_rearms_promptly(rig: Rig) -> N
     assert triggers[0].next_fire_at > rig.clock.now(), (
         "the scheduler stayed wedged: the next occurrence was never booked, which is what "
         "actually cost the morning"
+    )
+
+
+# ── A routine is two rows, and only one of them is authoritative (#346) ────────────────────────
+
+
+async def test_the_fired_event_carries_the_moment_the_routine_is_about(
+    rig: Rig,
+) -> None:
+    """Not the moment it fired. The lead time is the whole distinction.
+
+    The schedule names the event and ``lead_time_s`` names how far ahead the robot mentions it, so
+    an 08:00 routine fires at 07:55. §10.8's block needs 08:00 — telling the model "it is 07:55"
+    and leaving it to recover the occasion's hour from the fact's prose is what produced a midnight
+    reminder about an 8 AM ritual on the rig.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+
+    booked = rig.clock.now() + 10
+    rig.behavior._scheduler.schedule(trigger_id, fire_at=booked)  # noqa: SLF001 - staging
+    await rig.clock.advance(10)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+        what="the trigger firing",
+    )
+
+    fired = next(e for e in rig.events if isinstance(e, BehaviorTriggerFired))
+    assert fired.occurrence_at == booked + 300, (
+        "the event must carry the occurrence (fire + lead_time_s), not the fire moment"
+    )
+
+
+async def test_a_trigger_with_no_routine_carries_no_occurrence(rig: Rig) -> None:
+    """A presence greeting (§3.7.5) has no schedule behind it, and must say so rather than invent
+    one. ``None`` is the honest answer and the composer renders nothing for it."""
+    trigger_id = await rig.store.upsert_routine_trigger(
+        None, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+
+    rig.behavior._scheduler.schedule(  # noqa: SLF001 - staging
+        trigger_id, fire_at=rig.clock.now() + 10
+    )
+    await rig.clock.advance(10)
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+        what="the factless trigger firing",
+    )
+
+    fired = next(e for e in rig.events if isinstance(e, BehaviorTriggerFired))
+    assert fired.occurrence_at is None
+
+
+# ── Correction (§7.8) — the path that had no test at all ──────────────────────────────────────
+
+
+async def test_a_correction_that_keeps_its_schedule_moves_the_trigger(rig: Rig) -> None:
+    """The ordinary case: "coffee at eight" becomes "coffee at nine". One routine, moved."""
+    old_id = await _seed_routine(rig)
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await rig.bus.publish(
+        MemoryFactStored(**_env(rig), fact_id=old_id, kind="routine", importance=6)  # type: ignore[arg-type]
+    )
+    await _settle(rig)
+
+    new_id = await _seed_routine(
+        rig, local_time="09:00", text="Ali drinks coffee every day at 09:00."
+    )
+    await rig.bus.publish(
+        MemoryFactSuperseded(**_env(rig), old_id=old_id, new_id=new_id)  # type: ignore[arg-type]
+    )
+    await _settle(rig)
+
+    triggers = await rig.store.enabled_triggers()
+    assert [t.fact_id for t in triggers] == [new_id], (
+        "a correction is an edit, not a second reminder every morning"
+    )
+    assert rig.behavior.schedules_lost_to_correction == 0
+
+
+async def test_a_correction_that_drops_the_schedule_is_loud(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ The silent way a working reminder switches itself off.
+
+    ``remember_fact``'s ``schedule`` is optional. A model that merely *rephrases* a routine —
+    without re-supplying the RRULE — produces a perfectly valid new fact with no ``routines`` row,
+    and this service then deletes a working trigger and registers nothing in its place. The robot
+    stops mentioning coffee. Nothing errors, nothing is logged above INFO, and the first anyone
+    knows is a morning that never came.
+
+    That is #310's shape one layer down, so it is counted and said out loud. Note what makes it
+    knowable *here* and nowhere else: from inside ``_register`` a fact with no schedule is
+    indistinguishable from a first-time routine that simply has no clock time. Only the
+    supersession knows the old one had one.
+    """
+    old_id = await _seed_routine(rig)
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await rig.bus.publish(
+        MemoryFactStored(**_env(rig), fact_id=old_id, kind="routine", importance=6)  # type: ignore[arg-type]
+    )
+    await _settle(rig)
+    assert len(await rig.store.enabled_triggers()) == 1
+
+    # The rephrase: same routine, no schedule.
+    new_id = await _seed_routine(
+        rig, text="Ali is a coffee drinker in the mornings.", schedule=False
+    )
+    with caplog.at_level(logging.WARNING, logger="avid.services.behavior"):
+        await rig.bus.publish(
+            MemoryFactSuperseded(**_env(rig), old_id=old_id, new_id=new_id)  # type: ignore[arg-type]
+        )
+        await _wait_until(
+            rig,
+            lambda: rig.behavior.schedules_lost_to_correction == 1,
+            what="the dropped schedule being noticed",
+        )
+
+    assert await rig.store.enabled_triggers() == []
+    warnings = [r for r in caplog.records if "dropped its schedule" in r.getMessage()]
+    assert warnings, "a routine switched itself off and said nothing above INFO"
+
+
+async def test_superseding_a_routine_removes_its_orphaned_schedule(rig: Rig) -> None:
+    """§7.8 is a *soft* delete, so the ``ON DELETE CASCADE`` never fires.
+
+    The old fact survives — deliberately, so "what did I *used* to drink?" still works — and its
+    ``routines`` row survived with it: a schedule attached to a sentence that is no longer live,
+    holding a time nothing will ever act on. Harmless until something reads it back and believes
+    it, which is precisely how the rig ended up with a schedule and a sentence disagreeing.
+    """
+    old_id = await _seed_routine(rig)
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await rig.bus.publish(
+        MemoryFactStored(**_env(rig), fact_id=old_id, kind="routine", importance=6)  # type: ignore[arg-type]
+    )
+    await _settle(rig)
+    assert await rig.store.routine_for(old_id) is not None
+
+    new_id = await _seed_routine(
+        rig, local_time="09:00", text="Ali drinks coffee every day at 09:00."
+    )
+    await rig.bus.publish(
+        MemoryFactSuperseded(**_env(rig), old_id=old_id, new_id=new_id)  # type: ignore[arg-type]
+    )
+    await _settle(rig)
+
+    assert await rig.store.routine_for(old_id) is None, (
+        "the superseded fact kept a schedule nothing will ever fire"
+    )
+    assert await rig.store.routine_for(new_id) is not None, (
+        "and the live one still has its own"
     )

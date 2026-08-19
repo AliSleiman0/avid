@@ -204,13 +204,26 @@ async def test_an_exhausted_rule_leaves_the_scheduler_alone(
     assert await store.get(trigger_id) is not None  # still there, just not due
 
 
-async def test_removing_a_fact_removes_its_trigger(store: SqliteTriggerStore) -> None:
+async def test_removing_a_fact_removes_its_trigger_and_its_schedule(
+    store: SqliteTriggerStore,
+) -> None:
+    """Both rows, and the second half is not academic (#346).
+
+    §7.8's supersession is a *soft* delete — the old fact survives so "what did I used to drink?"
+    still works — which means the `ON DELETE CASCADE` never fires. A `routines` row left behind
+    here therefore outlives the sentence it belongs to: a time nothing will ever act on, attached
+    to a fact no longer live, waiting for something to read it back and believe it.
+    """
     fact_id = await _fact(store)
+    await _routine(store, fact_id, local_time="08:00")
     await store.upsert_routine_trigger(
         fact_id, next_fire_at=1_800_000_000, cooldown_s=3600, at=_TOLD_US
     )
+    assert await store.routine_for(fact_id) is not None  # the precondition, stated
+
     await store.remove_for_fact(fact_id)
     assert await store.enabled_triggers() == []
+    assert await store.routine_for(fact_id) is None
     await store.remove_for_fact(
         fact_id
     )  # idempotent: a fact with no trigger is not an error

@@ -171,6 +171,7 @@ def compose_proactive_block(
     present: bool,
     spoken_today: bool,
     fact: str | None,
+    routine_time: str | None = None,
 ) -> str:
     """The §10.8 context block: what the robot knows, and how to say it (#240).
 
@@ -194,6 +195,17 @@ def compose_proactive_block(
     here is deliberate — it is the *reason this turn is happening*, and a model given ten facts and
     no indication which one prompted it will pick whichever is most interesting rather than the one
     that is due.
+
+    ⚠️ ``routine_time`` is the schedule's own hour, and it exists because ``fact`` cannot be trusted
+    to carry one (#346). A routine is two rows — the user's sentence in ``facts.text`` and the
+    machine-readable time in ``routines.local_time`` — and nothing binds them. On the rig the
+    schedule was repointed to midnight while the sentence still said "8 in the morning", so the
+    model, given only ``local_time`` ("now") and the prose, said *"almost midnight now — your 8 AM
+    coffee ritual's not too far off"*. It was not wrong; it was told two things and only one of
+    them was true. Passing the scheduled hour explicitly means the authoritative time is on the
+    wire as a fact rather than inferred from a sentence that may have aged. ``None`` leaves the
+    block byte-identical to before, which is what a presence greeting with no routine behind it
+    wants.
     """
     presence = "The user is present" if present else "You are not sure anyone is there"
     spoken = (
@@ -204,6 +216,8 @@ def compose_proactive_block(
     lines = [f"It is {local_time} on {weekday}. {presence} {spoken}."]
     if fact:
         lines.append(f'You know: "{fact}"')
+    if routine_time:
+        lines.append(f"The routine this is about is scheduled for {routine_time}.")
     lines.append("")
     lines.append(
         "Greet them briefly and mention this naturally, in one sentence. "
@@ -631,6 +645,7 @@ class ConversationService:
                 return
             self._turn_id = event.correlation_id
             self._proactive_fact_id = event.fact_id
+            self._proactive_occurrence_at = event.occurrence_at
             # Set BEFORE the open: the awaitable handed to open() composes the §10.8 block, and it
             # reads this latch to know it should. Setting it after (as the first draft did) opened
             # every proactive session with the memory block alone and no reason for the turn.
@@ -851,12 +866,24 @@ class ConversationService:
             (f.text for f in facts if f.id == self._proactive_fact_id),
             None,
         )
+        # The schedule's own hour, rendered in the same zone as everything else in the block. It
+        # comes off the event rather than out of `fact`, because the two are allowed to disagree
+        # and only one of them is authoritative (#346).
+        occurrence = self._proactive_occurrence_at
+        routine_time = (
+            None
+            if occurrence is None
+            else datetime.fromtimestamp(
+                occurrence, tz=ZoneInfo(self._default_timezone)
+            ).strftime("%H:%M")
+        )
         return compose_proactive_block(
             local_time=local.strftime("%H:%M"),
             weekday=local.strftime("%A"),
             present=True,  # rule 3 vetoed unless someone was seen in the last few minutes
             spoken_today=False,  # rule 5's cooldown means no turn has happened recently
             fact=fact,
+            routine_time=routine_time,
         )
 
     async def _top_facts(self) -> Sequence[Fact]:
@@ -1005,6 +1032,7 @@ class ConversationService:
         # an inherited latch would report an ordinary quiet session as an ignored reminder.
         self._proactive = False
         self._proactive_fact_id = None
+        self._proactive_occurrence_at = None
         # A fresh cold session must not inherit a stale barge-in mute (#104).
         self._muted_item = None
         self._cancel_task(self._idle_task)

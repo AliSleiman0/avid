@@ -172,6 +172,7 @@
 10.6 Log every decision
 10.7 Proactive turn initiation
 10.8 What it says
+10.8.1 The schedule is authoritative; the prose is not
 
 ## 11. Performance Engineering
 11.1 End-to-end latency budget
@@ -2617,6 +2618,54 @@ That is the entire authoring format. Everything that would go into a template �
 
 "Do not sound like an alarm or a reminder app" is doing more work than it looks. The failure mode for UC-03 isn't wrong timing; it's correct timing delivered like a calendar notification. The gap between *"Good morning! Coffee time is coming soon ☕"* and *"Reminder: coffee at 08:00"* is the entire product.
 
+### 10.8.1 The schedule is authoritative; the prose is not (as built, M10, #346)
+
+The example above pairs "07:55" with a fact saying "08:00", and reads as though the model can take
+the occasion's hour from the sentence. **It cannot**, and the block as first built gave it nothing
+else to take it from.
+
+A routine is two rows, and §8.3 says so on purpose: `facts.text` holds the user's own sentence, and
+`routines` holds the machine-readable time, existing *"ONLY because §10 needs a machine-readable time
+to schedule."* Nothing binds them. §8.2's claim that local time *"appears in exactly one place —
+`routines.local_time`"* is true of the schema and false of the system, because the hour is also sitting
+in the prose where nothing can validate it.
+
+Found on the rig, 2026-08-19. The schedule had been repointed to midnight; the sentence still said
+"8 in the morning". The robot said:
+
+> *"Hey Ali, almost midnight now — your 8 AM coffee ritual's not too far off!"*
+
+That is not a hallucination. It was handed the current time and a stale sentence, and no way to know
+which to believe.
+
+So `behavior.trigger_fired` carries **`occurrence_at`**, and the block states it:
+
+```
+It is 23:55 on Wednesday. The user is present and has not spoken to you yet
+today. You know: "Ali drinks coffee every day at 8 in the morning."
+The routine this is about is scheduled for 00:00.
+```
+
+The prose stays — it is the *reason the turn is happening*, and §6.7 puts it on the wire regardless.
+What changes is that the authoritative time is now a fact of its own rather than something to be
+recovered from a sentence that may have aged.
+
+⚠️ **This is mitigation, not a cure.** The two rows can still disagree, and no code can decide which
+is right — comparing free text to an RRULE is not a decidable problem. What §10.8's block can do is
+stop *silently preferring the wrong one*. Keeping them consistent is a write-path concern:
+
+- **Supersession is where they come apart.** §7.8 marks the old fact rather than deleting it, so the
+  `ON DELETE CASCADE` never fires and its `routines` row outlives it. `remove_for_fact` now drops
+  both.
+- **A correction that omits `schedule` silently ends the routine.** `remember_fact`'s `schedule` is
+  optional, so a model that merely rephrases "coffee at eight" produces a valid new fact with no
+  `routines` row — and the old trigger is deleted with nothing registered in its place. The robot
+  stops mentioning coffee and nothing errors, which is #310's shape one layer down. It is counted
+  (`schedules_lost_to_correction`) and logged at WARNING, and that distinction is only knowable at
+  the supersession: from inside registration, a fact with no schedule is indistinguishable from a
+  first-time routine that simply has no clock time.
+
+
 ---
 
 ---
@@ -2747,7 +2796,7 @@ Presence events are **hysteresis-filtered inside PresenceService**, not raw dete
 
 | Event | Payload | Published by | Subscribers | Queue |
 |---|---|---|---|---|
-| `behavior.trigger_fired` | `trigger_id: int`, `fact_id: int \| None` | BehaviorService | StateManager, ConversationService | DROP_NEWEST |
+| `behavior.trigger_fired` | `trigger_id: int`, `fact_id: int \| None`, `occurrence_at: int \| None` | BehaviorService | StateManager, ConversationService | DROP_NEWEST |
 | `behavior.proactive_delivered` | `trigger_id: int`, `utterance: str` | BehaviorService | Observability | DROP_NEWEST |
 | `behavior.proactive_suppressed` | `trigger_id: int`, `rule: str`, `would_have_said: str \| None` | BehaviorService | Observability | DROP_NEWEST |
 | **`behavior.trigger_disabled`** | `trigger_id: int`, `ignore_streak: int` | BehaviorService | Observability | DROP_NEWEST |
@@ -2755,6 +2804,8 @@ Presence events are **hysteresis-filtered inside PresenceService**, not raw dete
 > **Catalog drift, caught.** `behavior.trigger_disabled` was not in §3.5.3's taxonomy — it was invented in §10.5 when the ignore-backoff design needed it, and §10.5 says it must be "logged loudly, never silent." Writing this catalog is what surfaced the gap. **This is the process working**, and it's the argument for §9.1.5's CI check: four sections referenced this catalog before it existed, and exactly one event had already drifted.
 
 `behavior.trigger_fired` mints a `correlation_id` — the second and last turn origin.
+
+`occurrence_at` is **the moment the routine is about**, not the moment the event fired — the fire is `lead_time_s` early by design, so an 08:00 routine publishes at 07:55 carrying `occurrence_at` = 08:00. It rides the event because this seam is the only place that time is authoritatively known, and §10.8's block needs it (#346, see §10.8). `None` when no routine backs the trigger, as `fact_id` already is.
 
 #### `motion`
 
