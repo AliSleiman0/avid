@@ -36,28 +36,70 @@ because each one is a trap the milestone is otherwise prone to:
    observability. Nothing publishes "please nod": affect changes, `MotionService` subscribes, it
    moves. The tool path reaches it through a **port**, exactly as memory does.
 
-### Confirm the epic's five facts before planning — thirty minutes, and M10 proved why
+### #198's five facts were re-verified against the tree — all five hold
 
-#198 states five things "verified against code + SDS". They were spot-checked this session and the
-board-level ones hold. **They were not exhaustively re-read**, and M10's epic was wrong in five
-places — enough that its plan had to open with issue hygiene instead of code. So spend half an hour
-confirming these against the tree, and amend the issue rather than the memory of it:
+Unlike M10's epic, **#198 is accurate**. Confirmed 2026-08-20:
 
-| # | The epic claims | Confirm by |
-|---|---|---|
-| 1 | The three `motion.*` events are already normative in §9.1.3, and `motion` is in `EVENT_DOMAINS` | `grep -n motion avid/domain/events.py tests/domain/test_events.py`; check whether any `Event` **subclass** exists or only the names |
-| 2 | `gesture_preempted` covers both a newer gesture (`by="nod"`) and the §3.12.3 I²C-fault abort (`by=None`) | read §9.1.3's row |
-| 3 | Both servo adapters **and their contract suite** exist and need no change; `move_to` is already cancellable mid-sweep | `tests/contract/test_servo.py` — does it assert cancel mid-sweep, against **both** adapters? |
-| 4 | `ServoConfig` is singular; `MotionConfig.axes = ("pan",)` is a second copy of the rig inventory | `avid/core/config.py`, `config/pi.toml`, `_build_servo` in `main.py` |
-| 5 | The tool-call transport is already merged (#124/#125), so #204 is "a route and a port" | `avid/services/tools.py` — `TOOL_SCHEMAS` + dispatch; and the `MemoryTools`/`AffectTools`/`BehaviorTools` Protocol pattern in `ports.py` that `GestureTools` should copy |
+1. ✅ `"motion"` is in `EVENT_DOMAINS` (`domain/events.py:27`) and the three events are normative in
+   §9.1.3 (`SDS.md:2864-2872`). **No `Event` subclasses exist** — the only occurrences are three
+   strings in `tests/domain/test_events.py:52-54`'s `CATALOG`. #201 writes the classes.
+2. ✅ `gesture_preempted` covers both causes, stated at `SDS.md:2872`.
+3. ✅ Both adapters and the contract suite exist and need no change (`adapters/servo.py`,
+   `tests/contract/test_servo.py`), and `test_move_is_cancellable` already proves the mid-sweep
+   cancel preemption depends on.
+4. ✅ `ServoConfig` is singular (`config.py:143-166`, eight flat keys, **no validators**) and
+   `MotionConfig.axes = ("pan",)` (`config.py:706-709`) is a second copy of the inventory. **No
+   cross-validator ties them** — the reconciliation both docstrings promise does not exist yet.
+5. ✅ The tool transport is merged; `dispatch_tool_call` is a flat `if` chain over five constants.
 
-Two more worth checking that the epic does **not** claim, and that will bite:
+**So do not re-litigate the epic. Do read these three things it does not say.**
 
-- **Is `avid.services.motion` on `.importlinter`'s `service-independence` contract?** Every service
-  is, and CI fails on a missing one. M10 added `avid.services.behavior` there in its WP3.
-- **`tests/test_main.py` holds exact-set assertions** over the wired subscription graph and event
-  types. Adding `MotionService` **will** break them — by design, that is the drift check working.
-  M10 hit this twice; budget for it rather than being surprised.
+### ⚠️ Three findings the epic does not mention, and each one costs a day if found late
+
+**1. ADR-009 has no text to accept.** The §3.3 index says *"Full text in Appendix A"*, but §16
+Appendices exists only in the table of contents and the document ends *"Sections 4, 5, 11–13, 15, 16
+to follow."* **There is no ADR-009 body anywhere in the repo** (ADR-008 is in the same state). #199
+reads like a status flip; it is actually **writing the ADR**. Size it accordingly.
+
+**2. `motion.gesture_started`'s payload would break P1 as specified.** §9.1.3 gives it
+`axes: tuple[Axis, ...]` — and `Axis` is a **`core.hal`** type (`core/hal.py:145-159`). A
+`domain/motion.py` event carrying it is a `domain → core` import, which the dependency rule forbids
+and `import-linter` fails on. **ADR-013 already solved exactly this shape for `BBox`**: declare the
+type in `domain/vision.py` and re-export it from `core/hal` (`hal.py:18-24`). So #201 has a real
+decision to make — move `Axis` into the domain the way `BBox` went, or change the payload to
+`tuple[str, ...]` and amend §9.1.3. **Pick one deliberately; do not discover it from a red CI.**
+
+**3. `look_at` is not in the SDS at all.** §6.6's tool table (`SDS.md:1526-1532`) lists exactly five
+tools. Per CLAUDE.md an interface that reaches the model must be in the SDS **before** the code, so
+#204 needs a sixth row — and #199 is the natural place to add it, since that issue is already the
+"the SDS leads" one.
+
+### What will break, so budget for it rather than being surprised
+
+- **`.importlinter`** — `avid.services.motion` is **not** on `service-independence` (nine services
+  are). The comment block already anticipates it by name: *"Add one line per service as it arrives
+  (M4 audio, M6 behavior, M8 vision, **M9 motion**, memory)."* Alphabetically between `memory` and
+  `observability`.
+- **`tests/test_main.py:415`** — a **positional, exact** list of wired service types. Adding
+  `MotionService` breaks it by design.
+- **`tests/test_main.py:564`** — a positional tuple unpack of `_wire_services`'s return, asserted
+  positionally *because the tuple's shape is the contract `lifecycle.run` consumes*.
+- **`main.py:925`** — `_ = servo`, with a comment saying in as many words that *"moving it is
+  MotionService's job (M9)"*. That line is deleted and `servo` joins `_wire_services`' parameters.
+- **`dispatch_tool_call`'s signature** gains `gesture: GestureTools`, which changes its only caller
+  (`services/conversation.py:721`).
+
+### Templates worth copying rather than inventing
+
+- **`services/presence.py:316-334`** is the preemption shape: cancel-then-arm, with the cancel
+  **synchronous** so the caller cannot stall, and `spawn()`'s done-callback ignoring `CancelledError`
+  so a cancelled task is a clean teardown rather than a reported death. A gesture needs exactly this,
+  plus a `motion.gesture_preempted` publish on the cancel that the nap does not do.
+- **`services/expression.py:139-146`** for the `Subscription(...)` declaration form and its
+  `event.monotonic_ns` staleness guard — it is the other `affect.changed` subscriber.
+- **`ports.py:985-1020`** (`AffectTools`) is the `GestureTools` template, including the rationale
+  that the Protocol is *load-bearing rather than ceremonial* because import-linter fails CI if
+  `conversation` ever names a service directly.
 
 ### Order, and where it can go wrong
 
@@ -105,12 +147,22 @@ was mute; this is the motion version of it.
   and silent on `relax()`. Pulse params `min 500 µs / max 2500 µs / 50 Hz`.
 - ✅ **R-04's mitigation is already wired**: PCA9685 V+ from a **separate 5–6 V supply**, its ground
   tied to a Pi ground, Pi VCC feeding logic only. **Never the Pi 5 V pin.** #206 tests it under stall.
-- ⚠️ **`ch13` is NOT in `pi.toml`** — only `[servo] channel = 0` is defined. That is exactly what
-  #200 fixes, and it means *no run today drives the second axis*.
-- ⚠️ **The last M10 boot reported `servo` as FAKE.** Whether the servos are still physically attached
-  needs checking — the ILI9486 display panel **cannot be fitted alongside the amp + servo** (the
-  40-pin header is full), so the rig has been reconfigured between milestones before. **Check the
-  wiring before planning a hardware evening.**
+- ⚠️ **`ch13` is NOT in `pi.toml`** — `[servo]` is a flat, singular section with `channel = 0` and
+  no validators, and `[motion] axes = ["pan"]` is a *second* copy of the inventory that nothing
+  reconciles with it. That is exactly what #200 fixes, and it means *no run today drives the second
+  axis*.
+- **`docs/demos/hal_pi.py --device servo`** already sweeps ch0 0→90→0 and relaxes. It is the fastest
+  way to confirm the rig is alive before writing any M9 code — and it drives **only ch0**, so it
+  proves nothing about ch13.
+- ✅ **The last M10 boot reporting `servo` as FAKE is expected, not a wiring problem.**
+  `config/pi.toml:14` ships `servo = "fake"` and always has — the switch has never been flipped to
+  `"pca9685"` in the template. `deploy/README.md:241` documents flipping it in
+  `/etc/robot/config.toml`, so check the **machine's** copy rather than assuming hardware is
+  unplugged. (An earlier draft of this baton guessed at the wiring; it was wrong.)
+- ⚠️ **The ILI9486 display panel still cannot be fitted alongside the amp + servo** — the 40-pin
+  header is full (`deploy/PI_OPERATIONS.md:374-376`). For #207's gate that means **you likely cannot
+  watch the face and the motion at the same time**, which matters because the gate criterion is
+  "affect drives gesture". Plan how you will observe both, or accept reading one from the log.
 - ⚠️ **The Pi dropped off the hotspot at ~02:05 on 2026-08-20** and was not reachable at the end of
   the session. Address moves with the network; `172.20.10.6` was last known good.
 
