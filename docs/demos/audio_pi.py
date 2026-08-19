@@ -237,6 +237,7 @@ async def _run_loopback(
         highpass_hz=config.gate.highpass_hz,
         highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
+        capture_stall_s=config.gate.capture_stall_s,
         # The transport gate has no ConversationService to consume the TurnSink seam, so keep the
         # M4 echo: _end_speech loops the captured utterance straight back to the speaker (#103).
         loopback=True,

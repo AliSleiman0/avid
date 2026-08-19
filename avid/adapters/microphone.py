@@ -119,6 +119,8 @@ class FakeMicrophone:
         # Public, assertable: how many chunks were handed out, and whether the stream cleaned up.
         self.chunks_yielded = 0
         self.closed = False
+        # Whether the device has "gone quiet" — see `stall` (#347).
+        self._stalled = False
 
     @classmethod
     def from_wav(cls, path: str | Path, *, chunk_ms: int = 20) -> FakeMicrophone:
@@ -151,6 +153,8 @@ class FakeMicrophone:
         try:
             while True:
                 await asyncio.sleep(step_s)
+                if self._stalled:
+                    continue  # the device is open and producing nothing — see `stall`
                 chunk = self._buf[offset : offset + self._chunk_bytes]
                 offset = (offset + self._chunk_bytes) % len(self._buf)
                 self.chunks_yielded += 1
@@ -159,6 +163,26 @@ class FakeMicrophone:
                 )
         finally:
             self.closed = True
+
+    def stall(self) -> None:
+        """Stop yielding frames **without** closing the stream — a mic that has gone quiet (#347).
+
+        Modelled on what the real adapter actually does when a device misbehaves:
+        :meth:`AlsaMicrophone.stream` does ``if length <= 0 or not data: continue``, so a card that
+        returns short reads forever spins in a tight loop, yields nothing, logs nothing, and raises
+        nothing. The consumer's ``async for`` simply parks.
+
+        That silence used to be indistinguishable from an attentive, quiet room — which is how a
+        broken microphone could make §10.5 conclude the *user* was ignoring the robot and switch
+        proactivity off after three mornings. The fake could not state the failure, so nothing
+        tested the difference; this is the affordance that closes that, the same way
+        ``FakeClock.step_wall_clock`` closed #345's.
+        """
+        self._stalled = True
+
+    def resume(self) -> None:
+        """Start yielding again. Idempotent, and legal before :meth:`stall`."""
+        self._stalled = False
 
 
 class AlsaMicrophone:

@@ -114,6 +114,7 @@ session_idle_close_s = 30
 # the shipped value rather than guessed at: a guess would be indistinguishable from calibration.
 barge_in_margin_db   = 3.0
 echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
+capture_stall_s      = 5.0       # §10.5/#347 — mic silent this long = stalled, not ignored
 # §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
 # MUST be < session_idle_close_s, asserted in Config — the idle close cancels this timer and
 # drives no transition, so a longer value never fires and the robot wedges in THINKING.

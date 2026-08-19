@@ -169,6 +169,7 @@
 10.3.2 The clock that books is not the clock that waits
 10.4 The interruption policy
 10.5 Ignore backoff
+10.5.1 Silence has three causes, and only one is an ignore
 10.6 Log every decision
 10.7 Proactive turn initiation
 10.8 What it says
@@ -537,7 +538,7 @@ Naming: `<domain>.<past_tense_verb>`. Never `display.set_emotion` — that's a c
 | Domain | Events (v1) |
 |---|---|
 | `system` | `started`, `shutting_down`, `handler_failed`, `degraded_entered`, `degraded_exited` |
-| `audio` | `speech_started`, `speech_ended`, `playback_started`, `playback_finished` |
+| `audio` | `speech_started`, `speech_ended`, `playback_started`, `playback_finished`, `capture_stalled`, `capture_resumed` |
 | `conversation` | `turn_started`, `user_transcribed`, `assistant_responded`, `turn_ended`, `session_lost` |
 | `affect` | `changed` |
 | `state` | `transitioned` |
@@ -2563,6 +2564,57 @@ Without this, a badly-conceived trigger annoys forever at a fixed rate. With it,
 
 Disabling is logged loudly (`behavior.trigger_disabled`), never silent. A trigger that turned itself off is diagnostic information about the design, and if you don't surface it you'll never learn which of your ideas were bad.
 
+### 10.5.1 Silence has three causes, and only one is an ignore (as built, M10, #337/#347)
+
+The pseudocode above branches on **"silence?"** — an *observation* — and then writes `ignored`, an
+*interpretation*. Those are not the same claim, and the gap between them is where this section can
+libel the user.
+
+Three different things produce a quiet hold-open window:
+
+1. **The user heard it and chose not to answer.** The signal R-08 wants. `user_reaction='ignored'`,
+   streak advances.
+2. **The robot never spoke.** Found live: a turn recorded `delivered`, crashed on its first audio
+   chunk, and was then recorded `ignored` — and would have disabled the trigger within three
+   mornings for being ignored, having never once made a sound (#337).
+3. **The robot could not hear.** `AlsaMicrophone` keeps no counters and skips short reads in a
+   tight loop with no logging, so a device that goes away leaves the capture loop parked forever
+   and nothing anywhere notices. A deaf robot and an attentive, silent room produce byte-identical
+   traces (#347).
+
+Cases 2 and 3 are **faults, not verdicts**, and §10.5 must not act on either. The consequence of
+getting it wrong is specific and bad: three counted ignores set `enabled = 0` and publish
+`behavior.trigger_disabled`, so a broken microphone or a broken pump silently retires a working
+reminder — and the audit records the cause as *the user rejecting proactivity*, which is exactly the
+conclusion R-08 exists to measure. The instrument would lie about the one thing it exists to say.
+
+So both faults take the same shape:
+
+```
+no reply in the window
+  robot produced no utterance?      → NULL reaction, streak unchanged   (#337)
+  capture stalled during the window? → NULL reaction, streak unchanged   (#347)
+  otherwise                          → 'ignored', streak += 1, cooldown *= 2
+```
+
+**NULL rather than a third `user_reaction` value**, and that is a design choice rather than a
+shortcut around §8.3's `CHECK`. The column already defines NULL as *"unknown yet"*, and unknown is
+the honest answer: nobody knows whether the user would have replied. Inventing `'unheard'` would
+also require rewriting a table inside a checksummed, append-only migration to widen a constraint,
+in order to record less truth than the absent value already records. `REACTIONS` pins the two live
+values in `domain/behavior.py`, beside `SUPPRESSION_REASONS`, for the drift reason that set exists.
+
+Case 3 needs a fact the system did not previously produce, hence `audio.capture_stalled` /
+`audio.capture_resumed` (§9.1.3) — edge-triggered, published by `AudioService`'s watchdog on a
+**monotonic** gap, and latched by `BehaviorService`.
+
+⚠️ **Which way the errors lean is deliberate.** The bus is at-most-once, so either event can be
+dropped. Losing a *resume* leaves proactivity believing it is deaf, which under-counts ignores and
+keeps a trigger switched on. Losing a *stall* counts an ignore that should not have counted — which
+is precisely today's behaviour, so no regression. The likelier residual error is the harmless one,
+and that asymmetry is what makes an at-most-once event acceptable for this at all. It matches §10.1:
+a missed reminder is disappointing, an unplugged robot has a recall rate of zero.
+
 ## 10.6 Log every decision
 
 Per §8.3's `proactive_log`: **every considered proposal is logged, delivered or not**, with the vetoing rule and the utterance it *would* have made.
@@ -2731,6 +2783,8 @@ Queue policy per §3.5.5. `DROP_OLDEST` = latest wins, stale is worthless. `DROP
 | `audio.speech_ended` | `duration_ms: int` | AudioService | StateManager, BehaviorService | DROP_OLDEST |
 | `audio.playback_started` | `item_id: str` | AudioService | StateManager | DROP_OLDEST |
 | `audio.playback_finished` | `item_id: str`, `played_ms: int`, `truncated: bool` | AudioService | StateManager, ConversationService | DROP_OLDEST |
+| `audio.capture_stalled` | `silent_ms: int` | AudioService | BehaviorService | DROP_OLDEST |
+| `audio.capture_resumed` | `stalled_ms: int` | AudioService | BehaviorService | DROP_OLDEST |
 
 `audio.speech_started` mints the `correlation_id` for a user-initiated turn. It is one of exactly two turn origins; `behavior.trigger_fired` is the other.
 

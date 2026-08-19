@@ -29,6 +29,8 @@ CATALOG = [
     "audio.speech_ended",
     "audio.playback_started",
     "audio.playback_finished",
+    "audio.capture_stalled",
+    "audio.capture_resumed",
     "conversation.turn_started",
     "conversation.user_transcribed",
     "conversation.assistant_responded",

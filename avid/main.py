@@ -680,6 +680,7 @@ def _wire_services(
         highpass_hz=config.gate.highpass_hz,
         highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
+        capture_stall_s=config.gate.capture_stall_s,
         loopback=False,
     )
     # The memory service (#122): the sole writer/reader of persistent facts, reached by direct call, so

@@ -817,10 +817,20 @@ class ProactiveLog(Protocol):
         ...
 
     async def set_reaction(self, log_id: int, reaction: str) -> None:
-        """Record whether the user engaged after a delivery: ``"engaged"`` or ``"ignored"`` (§10.5).
+        """Record whether the user engaged after a delivery (§10.5).
 
-        Deferred rather than written with the row, because it is not known until the hold-open
-        window closes — which is the same signal §10.5's backoff turns on."""
+        ``reaction`` must be a member of :data:`~avid.domain.behavior.REACTIONS` — ``"engaged"`` or
+        ``"ignored"`` — which §8.3 also enforces with a ``CHECK``. Deferred rather than written
+        with the row, because it is not known until the hold-open window closes, which is the same
+        signal §10.5's backoff turns on.
+
+        ⚠️ **Not calling this at all is a third, meaningful outcome.** §8.3 defines a NULL
+        ``user_reaction`` as *"unknown yet"*, and two paths leave it that way on purpose: a turn
+        that produced no words (#337) and a turn nobody could have answered because capture had
+        stalled (#347). Neither is the user declining, and §10.5 must not count either — three
+        counted ignores disable the trigger and record it as the user rejecting proactivity, which
+        is the one conclusion R-08 exists to measure. A robot that was mute, or deaf, would
+        otherwise conclude it was unwanted."""
         ...
 
     async def delivered_since(self, *, since: int) -> int:
