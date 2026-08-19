@@ -925,3 +925,111 @@ async def test_a_booking_inside_the_grace_window_still_fires(rig: Rig) -> None:
     fired = [e for e in rig.events if isinstance(e, BehaviorTriggerFired)]
     assert [e.trigger_id for e in fired] == [trigger_id]
     assert rig.behavior.stale_skips == 0
+
+
+# ── The clock the booking was made on is not the clock that waits for it (#345) ────────────────
+
+
+async def test_a_small_clock_correction_still_delivers_rather_than_skipping(
+    rig: Rig,
+) -> None:
+    """A clock nudged forward inside the grace window must still deliver.
+
+    This is where #345 and #339 meet, and getting it wrong in either direction is easy. The Pi has
+    no RTC: it boots on a restored clock and NTP steps it forward once the network arrives. If the
+    step is small, the robot was awake and available at the real moment and merely believed it was
+    earlier — that is exactly the honest-restart case §10.3.1 chose a non-zero grace for.
+
+    ⚠️ This is the **pair** to the test below, not a proof of the cap — a short booking like this
+    one is reached whether the sleep is bounded or not, and it still passes with the cap removed.
+    What it pins is the *grading*: that a correction inside the grace window ends in a delivery
+    rather than a `stale` skip. The cap itself is proved in ``tests/services/test_scheduler.py``.
+    Together the two here pin both edges, and neither can pass by accident on an implementation
+    that always fires or always skips.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+
+    # Booked for what the slow clock believes is ~7 minutes away.
+    rig.behavior._scheduler.schedule(  # noqa: SLF001 - staging the booking, not the robot
+        trigger_id, fire_at=rig.clock.now() + 400
+    )
+    await _settle(rig)
+
+    # NTP arrives mid-sleep: the clock was 500s slow. The sleep is monotonic, so it does not
+    # shorten — the loop still owes its full 400s.
+    rig.clock.step_wall_clock(500)
+    await rig.clock.advance(300)
+    assert not [e for e in rig.events if isinstance(e, BehaviorTriggerFired)], (
+        "the step alone must not fire anything; the loop is still parked"
+    )
+
+    # The user sits down. Rule 3's window is 300s and this booking is about to come due, so
+    # presence has to be fresh *at the fire moment* — which is the same thing the rig asks of a
+    # person: be in front of the camera a few minutes before, not an hour before.
+    await rig.bus.publish(VisionPresenceGained(**_env(rig), confidence=0.9))  # type: ignore[arg-type]
+    await rig.clock.advance(
+        100
+    )  # the sleep's last 100s: 500s late in wall terms, grace is 600
+
+    await _wait_until(
+        rig,
+        lambda: any(isinstance(e, BehaviorTriggerFired) for e in rig.events),
+        what="a booking revealed by a small clock correction firing",
+    )
+    assert rig.behavior.stale_skips == 0, (
+        "a correction inside the grace window is a late booking, not a stale one"
+    )
+
+
+async def test_a_large_clock_correction_skips_and_rearms_promptly(rig: Rig) -> None:
+    """⚠️ The rig's actual failure, end to end — and the property that unblocks AC-0.
+
+    2026-08-19: the Pi booted believing it was the previous morning, computed a 9h38m sleep for a
+    booking 35 minutes away, and NTP then moved the wall clock 33 hours without moving the
+    monotonic sleep by a nanosecond. The booking passed unattended. The damage was not only
+    lateness — while parked, ``_rearm`` never runs either, so the *next* occurrence was never
+    booked and the scheduler sat wedged until a hand-run ``systemctl restart``.
+
+    So the assertion that matters is not merely "it skipped": it is that within **one bound** the
+    trigger is graded, recorded, and booked again without anyone touching the machine.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+
+    rig.behavior._scheduler.schedule(  # noqa: SLF001 - staging the booking, not the robot
+        trigger_id, fire_at=rig.clock.now() + 34_000
+    )
+    await _settle(rig)
+
+    rig.clock.step_wall_clock(33 * 3600)
+    await rig.clock.advance(600)
+
+    await _wait_until(
+        rig,
+        # ⚠️ Both halves, and the second is the point. `stale_skips` is incremented *before*
+        # `_suppress` and `_rearm` are awaited, so waiting on the counter alone returns while the
+        # re-arm is still in flight through the store's writer thread — and the assertion below
+        # would then read a NULL `next_fire_at` that is merely early, not wrong. The heap regaining
+        # its entry is the observable that actually means "re-armed".
+        lambda: rig.behavior.stale_skips == 1 and rig.behavior._scheduler.pending == 1,  # noqa: SLF001 - the re-arm, observed
+        what="the wedged booking being noticed and re-armed within one bound",
+    )
+    assert not [e for e in rig.events if isinstance(e, BehaviorTriggerFired)], (
+        "a booking 33 hours stale was delivered rather than skipped"
+    )
+
+    triggers = await rig.store.enabled_triggers()
+    assert triggers[0].next_fire_at is not None
+    assert triggers[0].next_fire_at > rig.clock.now(), (
+        "the scheduler stayed wedged: the next occurrence was never booked, which is what "
+        "actually cost the morning"
+    )

@@ -78,7 +78,7 @@ from avid.domain import (
     evaluate_policy,
     record_speech,
 )
-from avid.services.scheduler import SchedulerLoop
+from avid.services.scheduler import IDLE_SLEEP_S, SchedulerLoop
 
 _log = logging.getLogger("avid.services.behavior")
 
@@ -142,7 +142,18 @@ class BehaviorService:
         # that gets switched off it is the count of mornings nobody was home for (#339).
         self.stale_skips = 0
         self._ignore_streak_limit = ignore_streak_limit
-        self._scheduler = SchedulerLoop(clock=clock, on_due=self._on_due)
+        self._scheduler = SchedulerLoop(
+            clock=clock,
+            on_due=self._on_due,
+            # Never sleep past what #339 would forgive. A deadline is wall-clock and the sleep
+            # that waits for it is monotonic, so a clock correction — which the Pi performs on
+            # every offline boot, having no RTC — leaves an outstanding sleep pointing at the
+            # wrong moment. Re-deriving at least this often means a step can make a booking at
+            # most `stale_grace_s` late, which is exactly the lateness §10.3.1 already decided
+            # is worth delivering rather than skipping. Bounded by IDLE_SLEEP_S so a large
+            # configured grace cannot quietly re-open the unbounded sleep (#345).
+            max_sleep_s=min(float(stale_grace_s), IDLE_SLEEP_S),
+        )
 
         # --- the world, as the gate needs to see it ---------------------------------------
         # Every one of these mirrors a fact that arrived on the bus. None is read from anywhere

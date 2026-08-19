@@ -13,8 +13,13 @@ Two implementations of the :class:`~avid.core.ports.Clock` port:
 
 Both are constructed only by the composition root or a test fixture (P3). ``now()`` is
 epoch **seconds** and ``monotonic_ns()`` is a monotonic nanosecond counter; in
-``FakeClock`` a single advancing quantity drives both, so they can never drift — wall for
-humans, monotonic for arithmetic (SDS §9.1.1).
+``FakeClock`` a single advancing quantity drives both, so the *passage of time* can never
+drift them apart — wall for humans, monotonic for arithmetic (SDS §9.1.1).
+
+⚠️ A **wall-clock step** is the one thing that does separate them, and on the Pi it happens
+every offline boot: no RTC, so the system comes up on a restored clock and NTP corrects it
+later. :meth:`FakeClock.step_wall_clock` exists to state exactly that in a test, because
+until #345 the fake could not express the defect at all — see its docstring.
 """
 
 from __future__ import annotations
@@ -65,6 +70,9 @@ class FakeClock:
     crosses their deadline, at which point they wake in deadline order. ``now()`` and
     ``monotonic_ns()`` are both derived from one internal elapsed-nanosecond counter, so
     they advance together by construction.
+
+    :meth:`step_wall_clock` is the deliberate exception, and the only way to make the two
+    readings disagree.
     """
 
     def __init__(
@@ -145,6 +153,28 @@ class FakeClock:
         if target <= current:
             target += timedelta(days=1)
         await self.advance(target.timestamp() - self.now())
+
+    def step_wall_clock(self, seconds: float) -> None:
+        """Move the **wall** clock without moving the monotonic one — an NTP step (#345).
+
+        Deliberately not :meth:`advance`. ``_elapsed_ns`` does not move, so
+        :meth:`monotonic_ns` is unchanged and **no parked sleeper wakes**: a coroutine that
+        asked for 9 hours still has 9 hours of monotonic time to wait, no matter what the
+        wall clock now says. That is precisely what the real system does, and precisely
+        what this class otherwise makes impossible to state — ``now()`` and
+        ``monotonic_ns()`` share one counter so that the passage of time cannot drift them
+        apart, which also meant the *only* way they drift in production had no expression
+        in the fake. #345 shipped because of that gap.
+
+        On the Pi it is not an exotic case. There is no RTC, so an offline boot restores a
+        stale clock and NTP steps it forward once the network arrives — on 2026-08-19 by
+        33 hours, while the scheduler slept through the booking that step revealed.
+
+        Negative is legal and is **not** the mistake :meth:`advance` guards against: wall
+        clocks genuinely do step backward (an NTP correction the other way), and it is only
+        *monotonic* time that may never retreat.
+        """
+        self._epoch0 += round(seconds)
 
     def _wake_through(self, target_ns: int) -> None:
         """Resolve, in deadline order, every sleeper due at or before ``target_ns``.

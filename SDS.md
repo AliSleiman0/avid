@@ -166,6 +166,7 @@
 10.2 The central separation
 10.3 Scheduler
 10.3.1 A booking is a claim about a moment
+10.3.2 The clock that books is not the clock that waits
 10.4 The interruption policy
 10.5 Ignore backoff
 10.6 Log every decision
@@ -2403,6 +2404,52 @@ database; Windows does not, and without the wheel `zoneinfo.ZoneInfo("America/Ne
 the worst possible way for a test to behave.
 
 The clock is injected (`Clock` port). M10's gate criterion — *"the coffee scenario, end to end, unprompted"* — is testable in 40 ms with a `FakeClock`, and separately once for real. Waiting until 07:55 to test the 07:55 code path is not a testing strategy.
+
+### 10.3.2 The clock that books is not the clock that waits (as built, M10, #345)
+
+A deadline is a **wall-clock** instant; the sleep that waits for it is **monotonic**. Converting one
+to the other is a single subtraction, and it is only valid while the wall clock stays put.
+
+Found on the rig, and it is not an exotic case — it is what the Pi does on every offline boot. There
+is no RTC, so the machine comes up on a restored clock and NTP steps it forward once the network
+arrives. On 2026-08-19 the robot booted believing it was the previous morning, computed a **9h38m**
+delay for a booking that was really 35 minutes away, and parked. The correction moved the wall clock
+33 hours and moved the outstanding sleep by nothing at all. The booking passed unattended.
+
+The damage is worse than lateness. While the loop is parked on a deadline that no longer exists,
+`_rearm` never runs either, so the *next* occurrence is never booked: the scheduler is **wedged**,
+not behind. Only a restart recovered it, which is precisely what §5.2's *unattended* gate criterion
+forbids.
+
+So every sleep is bounded, not just the idle one:
+
+```
+delay = min(max(0, deadline - now()), max_sleep_s)
+```
+
+Three notes.
+
+**The bound is injected, not chosen here.** `SchedulerLoop` has no opinion about tolerable lateness;
+it receives a number. `BehaviorService` passes `min(stale_grace_s, IDLE_SLEEP_S)`, which is the one
+relationship that makes the two fixes agree: a step can then leave a booking at most
+`stale_grace_s` late, and §10.3.1 has already decided that much lateness is worth delivering rather
+than skipping. Floored by `IDLE_SLEEP_S` so that a generously-configured grace cannot quietly
+re-open the unbounded sleep.
+
+**The idle branch keeps `IDLE_SLEEP_S`.** With nothing booked there is no deadline for a step to
+invalidate, and `schedule()`'s wake event covers the moment that stops being true.
+
+**A step is logged.** The cap makes the loop correct; the log makes the event diagnosable. §10.6's
+argument applied to the scheduler itself — from a silent journal, a robot that slept through a
+morning and a scheduler that died are the same picture, and the nine-hour nap left no trace
+whatsoever.
+
+⚠️ **The fake could not state this defect, which is why it shipped.** `FakeClock` derives `now()`
+and `monotonic_ns()` from one counter *specifically so they cannot drift* — a good property that
+also meant the only drift production actually produces had no expression in any test.
+`FakeClock.step_wall_clock()` is that expression: it moves `_epoch0` alone, wakes no sleeper, and
+allows a negative delta because wall clocks genuinely do step backward. The lesson generalises past
+this bug: **the case a fixture is built to exclude is the case that reaches production.**
 
 ## 10.4 The interruption policy
 

@@ -48,6 +48,18 @@ _log = logging.getLogger("avid.services.scheduler")
 #: most an hour of proactivity instead of all of it.
 IDLE_SLEEP_S = 3600.0
 
+#: Nanoseconds per second — for comparing a monotonic span against a wall-clock one.
+_NS_PER_S = 1_000_000_000
+
+#: How far wall time and monotonic time may disagree across one sleep before we call it a
+#: step rather than rounding (#345).
+#:
+#: Both readings are taken a few statements apart around an ``await``, so a second of slop
+#: is ordinary. An NTP correction on a Pi with no RTC is measured in *hours*, so this
+#: threshold does not need to be tight to separate the two — only loud enough to be
+#: believed when it fires.
+CLOCK_STEP_TOLERANCE_S = 2.0
+
 
 class SchedulerLoop:
     """A min-heap of ``(fire_at, trigger_id)`` and one task that sleeps until the earliest.
@@ -57,13 +69,28 @@ class SchedulerLoop:
     discarded when it surfaces — because a cancelled trigger is rare and a linear scan of the heap
     on every ``memory.fact_deleted`` is not. :attr:`_scheduled` is the authority on what is really
     due; the heap is only an ordering hint.
+
+    ``max_sleep_s`` bounds **every** sleep, not just the idle one (#345). A deadline is a
+    *wall-clock* instant and the sleep that waits for it is *monotonic*, so a wall-clock step
+    invalidates an outstanding sleep without shortening it: on the rig the Pi booted with a
+    33-hour-stale clock, computed a 9h38m delay for a booking that was really 35 minutes away,
+    and slept straight through it. Worse than late — while parked, the trigger is never re-armed
+    either, so the loop is *wedged* rather than merely behind. Re-deriving the delay at most every
+    ``max_sleep_s`` puts a ceiling on both. The caller chooses the ceiling; this class has no
+    opinion about what a tolerable lateness is (see ``BehaviorService``, which pins it to #339's
+    grace window).
     """
 
     def __init__(
-        self, *, clock: Clock, on_due: Callable[[int, int], Awaitable[None]]
+        self,
+        *,
+        clock: Clock,
+        on_due: Callable[[int, int], Awaitable[None]],
+        max_sleep_s: float = IDLE_SLEEP_S,
     ) -> None:
         self._clock = clock
         self._on_due = on_due
+        self._max_sleep_s = max_sleep_s
         self._heap: list[tuple[int, int]] = []  # (fire_at, trigger_id)
         self._scheduled: dict[int, int] = {}  # trigger_id -> its current fire_at
         self._wake = asyncio.Event()
@@ -125,16 +152,51 @@ class SchedulerLoop:
     async def _run(self) -> None:
         while not self._stopped:
             delay = self._delay_until_next()
+            wall_before = self._clock.now()
+            mono_before = self._clock.monotonic_ns()
             await self._sleep_or_wake(delay)
+            self._report_clock_step(wall_before, mono_before)
             self._wake.clear()
             await self._fire_due()
 
     def _delay_until_next(self) -> float:
-        """Seconds until the earliest live deadline, floored at zero, or :data:`IDLE_SLEEP_S`."""
+        """Seconds until the earliest live deadline, floored at zero and capped at the bound.
+
+        The cap is the whole of #345's fix. Without it a deadline far in the future becomes one
+        very long monotonic sleep, and a wall-clock correction during that sleep cannot shorten
+        it — the loop wakes on the schedule the *wrong* clock dictated.
+
+        The idle branch keeps :data:`IDLE_SLEEP_S` deliberately rather than the (possibly much
+        smaller) cap: with nothing booked there is nothing a clock step could invalidate, and
+        :meth:`schedule` wakes the loop the instant that stops being true.
+        """
         deadline = self.next_deadline()
         if deadline is None:
             return IDLE_SLEEP_S
-        return max(0.0, float(deadline - self._clock.now()))
+        return min(max(0.0, float(deadline - self._clock.now())), self._max_sleep_s)
+
+    def _report_clock_step(self, wall_before: int, mono_before: int) -> None:
+        """Say so, loudly, when wall time moved further than monotonic time across a sleep.
+
+        Purely observational — the cap in :meth:`_delay_until_next` is what makes the loop
+        *correct*; this is what makes the event *diagnosable*. §10.6's argument applied to the
+        scheduler itself: from a silent log, a robot that slept through a morning and a scheduler
+        that stopped working are the same picture. Tonight's nine-hour nap left no trace at all.
+        """
+        wall_s = float(self._clock.now() - wall_before)
+        mono_s = (self._clock.monotonic_ns() - mono_before) / _NS_PER_S
+        step_s = wall_s - mono_s
+        if abs(step_s) <= CLOCK_STEP_TOLERANCE_S:
+            return
+        _log.warning(
+            "wall clock stepped %+.1fs during a %.1fs sleep (wall moved %.1fs, monotonic "
+            "%.1fs) — deadlines are re-derived from the corrected clock; a booking may now "
+            "be due, or no longer due",
+            step_s,
+            mono_s,
+            wall_s,
+            mono_s,
+        )
 
     async def _sleep_or_wake(self, delay: float) -> None:
         """Sleep ``delay`` on the injected clock, cut short by a registration.
@@ -189,4 +251,4 @@ class SchedulerLoop:
                 )
 
 
-__all__ = ["IDLE_SLEEP_S", "SchedulerLoop"]
+__all__ = ["CLOCK_STEP_TOLERANCE_S", "IDLE_SLEEP_S", "SchedulerLoop"]
