@@ -1,20 +1,24 @@
 name: CI
 
-# AVID-4: every DoD gate, machine-checked. Runs on Linux (the Pi target is Linux;
-# ADR-008). The matrix exercises BOTH 3.11 (the Pi's system Python) and 3.13 (dev) —
-# bug #27 shipped because the 3.11 leg, though documented, was never actually run.
+# AVID-4: every DoD gate, machine-checked, on push to main and every PR. Runs on
+# Linux (the Pi target is Linux; ADR-008). The matrix exercises BOTH 3.11 (the Pi's
+# system Python) and 3.13 (dev) — bug #27 shipped because the 3.11 leg, though
+# documented, was never actually run.
 #
-# ⚠️ PUSH-TO-MAIN ONLY, and this is a deliberate trade rather than an oversight. The
-# `pull_request` trigger was removed 2026-08-18 under a GitHub Actions billing ceiling:
-# PR events were 51% of August's runs on a private repo, where minutes are billed. The
-# cost is real and must not be forgotten — **a PR is no longer verified before it
-# merges**, so CONTRIBUTING's "CI green" is now checked *after* the fact, on main. Run
-# the gates locally before merging (`ruff`, `mypy`, `lint-imports`, `pytest` on both
-# interpreters), and if a run reddens main, fix forward immediately rather than letting
-# main sit broken. Restore `pull_request:` the moment the minutes allow.
+# This file was cut for cost on 2026-08-18 under a GitHub Actions billing ceiling, but
+# NOT by dropping `pull_request:` — a PR that merges unverified breaks CONTRIBUTING's
+# "CI green" clause, and #324 already paid for merging on an unproven branch. The
+# minutes come back from two places that cost no signal:
 #
-# Docs-only changes are skipped: three consecutive Markdown-only PRs each burned the full
-# ~13-minute matrix in August. Nothing under paths-ignore can change a test outcome.
+#   1. The numpy cap in `pyproject.toml` is now marker-conditional. It was leaking into
+#      the `memory` extra, and 1.26.4 has no cp313 wheel, so `test (3.13)` and
+#      `async-debug` each COMPILED NUMPY FROM SOURCE — 5m02s apiece, ~10 of the 13
+#      billable minutes per run. That is the bulk of the saving.
+#   2. Docs-only changes are skipped: three consecutive Markdown-only PRs each burned
+#      the full matrix in August. Nothing under `paths-ignore` can change a test outcome.
+#
+# ⚠️ `paths-ignore` means a docs-only PR shows NO checks rather than green ones. That is
+# a skip, not a pass — do not read an empty check list as verification.
 on:
   push:
     branches: [main]
@@ -23,7 +27,13 @@ on:
       - "docs/**"
       - "LICENSE"
       - ".gitignore"
-  workflow_dispatch: # so a branch can still be verified on demand before merging
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+  workflow_dispatch: # so a branch can still be verified on demand
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
