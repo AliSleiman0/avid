@@ -106,6 +106,29 @@ minutes, a conversation at **347 ms** median first-token against M5's 328 with *
 warnings, and a threshold that travels — 74.4% detected at night against 78.1% in the afternoon.
 Sealed with three defects open and named, none of them in the vision path.
 
+## 2026-08-20 — M10 It initiates (sealed, `v0.M10.0`)
+
+It speaks first. `proactive_log` id=15 at 01:48 — *"Hey Ali, just a heads-up, your coffee time's
+coming up in about 5 minutes"* — unprompted, answered, five turns of conversation after it, and all
+six §10.4 rules live and passing rather than merely un-consulted. But the criterion that would have
+made it a *product* rather than a mechanism, AC-0's multiple unattended mornings, **was not run**,
+and the honest reading is that this milestone is sealed one property short: `0d3ba60` fixed *"a
+trigger fired once and never again"* in this codebase, and the second morning is the one thing AC-0
+uniquely tests. The day's real lesson was elsewhere, though. **Five defects, every one found by the
+rig and none by CI**, and each hid behind a fixture that had been reasoned into excluding it:
+`FakeClock` derived wall and monotonic time from one counter *so they could not drift*, and the
+scheduler shipped a bug where a corrected clock left it asleep through its own booking for nine
+hours (#345); `_seed_routine` seeded the bare word `'coffee'` with no hour in it, so nothing could
+notice a schedule and a sentence disagreeing until the robot announced *"your 8 AM coffee ritual"* at
+midnight (#346); `FakeMicrophone` could not stop yielding, so nothing could tell a deaf robot from a
+quiet room — and three unanswered turns disable proactivity and record it as the *user* rejecting it
+(#347). Every fix had to widen the fake before it could write the test. The seal itself then proved
+three of them by accident: a botched venv rebuild left the robot mute, and #337 declined to count
+the silence against the user, #346's fix showed up as id=15 saying *"in about 5 minutes"* where id=12
+two hours earlier had said *"8 AM"* from the same fact row, and #347's watchdog stayed quiet on real
+hardware. **A robot that cannot hear, blaming the user for not answering, is the exact failure R-08
+exists to measure** — and the instrument would have said the user did it.
+
 ## M6 — It has a personality (`v0.M6.0`)
 
 The gate's headline criterion is a *difference*, and the honest way to grade a difference is to
