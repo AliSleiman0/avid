@@ -40,6 +40,8 @@ from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import AudioChunk, pcm_duration_ms
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    AudioCaptureResumed,
+    AudioCaptureStalled,
     AudioPlaybackFinished,
     AudioPlaybackStarted,
     AudioSpeechEnded,
@@ -155,6 +157,7 @@ async def _rig(
     highpass_order: int = 3,
     mic_pcm: bytes | None = None,
     echo_tail_ms: int = 150,
+    capture_stall_s: float = 5.0,
     loopback: bool = False,
     speaker_factory: Callable[[StateManager], FakeSpeaker] | None = None,
     extra_subs: tuple[_ExtraSub, ...] = (),
@@ -200,6 +203,7 @@ async def _rig(
         highpass_hz=highpass_hz,
         highpass_order=highpass_order,
         echo_tail_ms=echo_tail_ms,
+        capture_stall_s=capture_stall_s,
         loopback=loopback,
     )
     for cls in _COLLECTED:
@@ -1335,3 +1339,126 @@ async def test_adopting_the_turn_lets_a_proactive_reply_play() -> None:
         assert started[0].correlation_id == corr, (
             "and it must carry the id the trigger minted, or the turn splits in two (§9.1.1)"
         )
+
+
+# --- The capture watchdog (#347) -------------------------------------------------------------
+
+
+class _CaptureWatcher:
+    """Collects the two ``audio.capture_*`` facts. Registered through ``extra_subs`` because the
+    bus freezes its subscriber graph at ``start()`` (§3.5.2)."""
+
+    def __init__(self) -> None:
+        self.stalled: list[AudioCaptureStalled] = []
+        self.resumed: list[AudioCaptureResumed] = []
+
+    async def handle(self, event: Event) -> None:
+        if isinstance(event, AudioCaptureStalled):
+            self.stalled.append(event)
+        elif isinstance(event, AudioCaptureResumed):
+            self.resumed.append(event)
+
+
+def _watch(watcher: _CaptureWatcher) -> tuple[_ExtraSub, ...]:
+    return (
+        (AudioCaptureStalled, watcher.handle, "test.capture_stalled"),
+        (AudioCaptureResumed, watcher.handle, "test.capture_resumed"),
+    )
+
+
+async def _spin(real_s: float = 0.06) -> None:
+    """Let the loop drain, and let the fake mic actually produce a frame.
+
+    ⚠️ A real sleep, unusually for this suite, and the reason is a genuine mismatch:
+    ``FakeMicrophone.stream`` paces itself on ``asyncio.sleep`` (real time, like a sample clock)
+    while the watchdog sleeps on the injected ``FakeClock`` (virtual). So virtual time must be
+    advanced in steps small enough that the mic gets a real chance to stamp in between — which is
+    also why the recovery test below walks forward rather than jumping.
+    """
+    for _ in range(3):
+        await asyncio.sleep(0)
+    await asyncio.sleep(real_s)
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+async def test_a_microphone_that_stops_yielding_is_reported() -> None:
+    """⚠️ Before this, a mic that stopped delivering produced no observable at all.
+
+    ``AlsaMicrophone`` keeps no counters and skips short reads in a tight loop with no logging, so
+    a device that goes away leaves the ``async for`` in ``_run`` parked forever and **nothing in
+    the system notices**. A robot that has gone deaf is observationally identical to a room that
+    has gone quiet — and §10.5 reads that silence as the user ignoring a proactive turn, three of
+    which disable proactivity and blame the user for it.
+    """
+    watcher = _CaptureWatcher()
+    async with _rig(
+        vad_script=[False] * 400, capture_stall_s=1.0, extra_subs=_watch(watcher)
+    ) as rig:
+        await _spin()
+        assert rig.mic.chunks_yielded > 0, "precondition: the mic was delivering"
+
+        rig.mic.stall()
+        await _spin()
+        await rig.clock.advance(2.0)  # past capture_stall_s, twice over
+        await _spin()
+
+        assert len(watcher.stalled) == 1, "a mic that stopped delivering said nothing"
+        assert watcher.stalled[0].silent_ms >= 1000
+
+
+async def test_a_stall_is_reported_once_not_every_tick() -> None:
+    """Edge-triggered, not a heartbeat.
+
+    A pulse every poll would put steady traffic on a bus whose whole design is that quiet means
+    nothing happened, and would drown the one transition a subscriber cares about in repeats of
+    itself.
+    """
+    watcher = _CaptureWatcher()
+    async with _rig(
+        vad_script=[False] * 400, capture_stall_s=1.0, extra_subs=_watch(watcher)
+    ) as rig:
+        await _spin()
+        rig.mic.stall()
+        for _ in range(4):
+            await rig.clock.advance(2.0)
+            await _spin()
+
+        assert len(watcher.stalled) == 1
+
+
+async def test_a_recovered_microphone_says_so() -> None:
+    """The closing bracket. Without it a subscriber's latch would never clear, and a single
+    hiccup would excuse every unanswered reminder for the rest of the process's life."""
+    watcher = _CaptureWatcher()
+    async with _rig(
+        vad_script=[False] * 400, capture_stall_s=1.0, extra_subs=_watch(watcher)
+    ) as rig:
+        await _spin()
+        rig.mic.stall()
+        await rig.clock.advance(2.0)
+        await _spin()
+        assert len(watcher.stalled) == 1
+
+        # Walk forward in steps shorter than the stall window, so the mic can stamp between
+        # advances — see _spin.
+        rig.mic.resume()
+        for _ in range(6):
+            await rig.clock.advance(0.2)
+            await _spin()
+
+        assert len(watcher.resumed) == 1, "capture came back and nothing said so"
+
+
+async def test_a_healthy_microphone_is_never_reported_stalled() -> None:
+    """The negative control. A watchdog that fires on a working device is worse than none — it
+    would excuse every ignored reminder and switch §10.5's backoff off in practice."""
+    watcher = _CaptureWatcher()
+    async with _rig(
+        vad_script=[False] * 400, capture_stall_s=1.0, extra_subs=_watch(watcher)
+    ) as rig:
+        for _ in range(6):
+            await rig.clock.advance(0.4)
+            await _spin()
+
+        assert watcher.stalled == []

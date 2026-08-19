@@ -100,6 +100,8 @@ from avid.core.ports import (
 from avid.core.state_manager import StateManager
 from avid.core.tasks import spawn
 from avid.domain import (
+    AudioCaptureResumed,
+    AudioCaptureStalled,
     AudioPlaybackFinished,
     AudioPlaybackStarted,
     AudioPreRoll,
@@ -116,6 +118,9 @@ _log = logging.getLogger(__name__)
 
 # The component name stamped on the events this module publishes (SDS §9.1.3).
 _SOURCE = "AudioService"
+
+_NS_PER_S = 1_000_000_000
+_NS_PER_MS = 1_000_000
 
 # Depth of the mic-up queue, in frames (#153). Streaming per frame means the queue only stays
 # short while somebody drains it — and nobody does between sessions, or while the robot is
@@ -178,6 +183,10 @@ class AudioService:
         highpass_hz: float,
         highpass_order: int,
         echo_tail_ms: int,
+        # How long the mic may yield nothing before capture is declared stalled (#347). Required
+        # for the AVID-180 reason above: a defaulted watchdog is one a harness silently never
+        # passes, and this one decides whether an unanswered reminder counts against the user.
+        capture_stall_s: float,
         loopback: bool = False,
     ) -> None:
         self._bus = bus
@@ -198,6 +207,13 @@ class AudioService:
         # How long a run of silence must last before a turn is declared over — the
         # debounce that stops per-frame flapping (AC-2). Server-VAD's silence_duration_ms.
         self._silence_hold_ms = silence_hold_ms
+        # --- the capture watchdog (#347) ---------------------------------------------------
+        # ⚠️ Monotonic, never wall: an NTP step must not invent or erase a stall, which is the
+        # sibling of the defect #345 fixed one module over.
+        self._capture_stall_ns = int(capture_stall_s * _NS_PER_S)
+        self._last_chunk_ns = 0
+        self._capture_stalled = False
+        self._watchdog_task: asyncio.Task[None] | None = None
 
         # The echo gate (AVID-159, §6.2.4). ``_echo_floor`` tracks what the mic hears — ambience
         # normally, the robot's own voice while it speaks — so the margin is measured against the
@@ -261,9 +277,17 @@ class AudioService:
     # --- SDS §9.2 service shape ----------------------------------------------------------
 
     async def start(self) -> None:
-        """Launch the mic-consume loop as an owned task. Idempotent."""
+        """Launch the mic-consume loop and its watchdog as owned tasks. Idempotent."""
         if self._task is None:
+            # Seeded here rather than at construction: the gap that matters is "since we started
+            # listening", and a service built minutes before it starts would look stalled on its
+            # first tick.
+            self._last_chunk_ns = self._clock.monotonic_ns()
             self._task = spawn(self._run(), name="AudioService.mic_loop")
+        if self._watchdog_task is None:
+            self._watchdog_task = spawn(
+                self._watch_capture(), name="AudioService.capture_watchdog"
+            )
 
     async def stop(self) -> None:
         """Cancel the mic loop and await it, within the §9.2 5 s budget. Idempotent.
@@ -272,12 +296,67 @@ class AudioService:
         into the generator's ``await``, so its ``finally`` runs and the device is released
         (``FakeMicrophone.closed`` / the ALSA handle) before this returns.
         """
+        watchdog, self._watchdog_task = self._watchdog_task, None
+        if watchdog is not None:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
         task, self._task = self._task, None
         if task is None:
             return
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    async def _watch_capture(self) -> None:
+        """Say out loud when the microphone stops producing, and when it starts again (#347).
+
+        The gap this closes is total. ``AlsaMicrophone`` keeps no counters, and its ``stream()``
+        skips short reads in a tight loop with no logging; if the device goes away, the ``async
+        for`` in :meth:`_run` simply parks and **nothing in the system notices**. A robot that has
+        gone deaf is observationally identical to a room that has gone quiet.
+
+        That identity is expensive rather than merely untidy. §10.5 counts an unanswered proactive
+        turn as an *ignore*, and three ignores disable the trigger — so a deaf robot switches its
+        own proactivity off within three mornings and the audit records it as **the user rejecting
+        the feature**, which is the one conclusion R-08 exists to measure. ``BehaviorService``
+        subscribes to these two events for exactly that reason.
+
+        Edge-triggered on purpose: one event per transition, not a heartbeat. A periodic pulse
+        would put steady traffic on a bus whose whole design is that quiet means nothing happened,
+        and the subscriber only ever needs the edges.
+        """
+        poll_s = max(0.05, self._capture_stall_ns / _NS_PER_S / 2)
+        while True:
+            await self._clock.sleep(poll_s)
+            silent_ns = self._clock.monotonic_ns() - self._last_chunk_ns
+            if not self._capture_stalled and silent_ns > self._capture_stall_ns:
+                self._capture_stalled = True
+                _log.error(
+                    "capture has produced nothing for %d ms — the microphone is not delivering "
+                    "frames; anything the user says now is lost and silence must not be read as "
+                    "disinterest (§10.5)",
+                    silent_ns // _NS_PER_MS,
+                )
+                await self._bus.publish(
+                    AudioCaptureStalled(
+                        **envelope(
+                            clock=self._clock, correlation_id=uuid4(), source=_SOURCE
+                        ),
+                        silent_ms=silent_ns // _NS_PER_MS,
+                    )
+                )
+            elif self._capture_stalled and silent_ns <= self._capture_stall_ns:
+                self._capture_stalled = False
+                _log.info("capture recovered after %d ms", silent_ns // _NS_PER_MS)
+                await self._bus.publish(
+                    AudioCaptureResumed(
+                        **envelope(
+                            clock=self._clock, correlation_id=uuid4(), source=_SOURCE
+                        ),
+                        stalled_ms=silent_ns // _NS_PER_MS,
+                    )
+                )
 
     def subscriptions(self) -> Sequence[Subscription]:
         """Declare, do not register (SDS §9.2) — and there is nothing to declare, ever.
@@ -505,6 +584,10 @@ class AudioService:
         claps and doors), so the margin never has to; it only separates two genuine voices.
         """
         async for chunk in self._mic.stream():
+            # The watchdog's only input, and it is stamped before anything can reject the frame:
+            # a chunk that turns out to be our own echo still proves the microphone is alive
+            # (#347). Monotonic, so a clock correction cannot invent a stall.
+            self._last_chunk_ns = self._clock.monotonic_ns()
             speech = self._vad.is_speech(chunk)
             self._preroll.append(chunk.pcm)
             frame_ms = pcm_duration_ms(

@@ -29,6 +29,8 @@ from avid.core.event_bus import AsyncioEventBus
 from avid.core.state_manager import StateManager
 from avid.domain import (
     STALE,
+    AudioCaptureResumed,
+    AudioCaptureStalled,
     AudioSpeechEnded,
     AudioSpeechStarted,
     BehaviorProactiveDelivered,
@@ -567,10 +569,14 @@ async def test_the_budget_and_the_cooldown_survive_a_restart(rig: Rig) -> None:
 
 async def test_every_subscription_is_named_for_the_drift_check(rig: Rig) -> None:
     """``name`` is mandatory so §9.1.5's check can see the subscriber — an anonymous handler is
-    invisible to it. Thirteen: §9.1.3's twelve, plus ``conversation.assistant_responded`` since
-    #337, which is how the audit learns whether the robot actually said anything."""
+    invisible to it.
+
+    Fifteen: §9.1.3's twelve, plus ``conversation.assistant_responded`` since #337 — how the audit
+    learns whether the robot actually *said* anything — and the two ``audio.capture_*`` since #347,
+    which is how it learns whether the robot could *hear*. Both additions exist for one reason:
+    §10.5 turns silence into a verdict about the user, and silence has three causes."""
     names = {sub.name for sub in rig.behavior.subscriptions()}
-    assert len(names) == 13
+    assert len(names) == 15
     assert all(name.startswith("BehaviorService.") for name in names)
 
 
@@ -1207,4 +1213,163 @@ async def test_superseding_a_routine_removes_its_orphaned_schedule(rig: Rig) -> 
     )
     assert await rig.store.routine_for(new_id) is not None, (
         "and the live one still has its own"
+    )
+
+
+# ── "ignored" and "never heard" are not the same thing (#347) ─────────────────────────────────
+
+
+async def test_a_delivery_the_robot_could_not_hear_is_not_counted_as_ignored(
+    rig: Rig,
+) -> None:
+    """⚠️ The mirror of #337, on the input side — and the one that would blame the user.
+
+    §10.5 reads silence in the hold-open window as an ignore, and three ignores set ``enabled = 0``
+    and publish ``behavior.trigger_disabled``. But silence has three causes: the user chose not to
+    answer, the robot never spoke (#337), or **the robot could not hear**. Only the first is an
+    ignore, and until now the audit could not tell them apart — `AlsaMicrophone` keeps no counters,
+    so a mic that stops delivering looks exactly like an attentive, quiet room.
+
+    Left unchanged rather than given a third reaction value: §8.3 already defines NULL as *"unknown
+    yet"*, and unknown is the honest answer — nobody knows whether they would have replied. The
+    column's ``CHECK`` stays as shipped and no migration is needed.
+
+    What makes this worth a test rather than a comment: a deaf robot would otherwise disable its own
+    proactivity in three mornings and record it as **the user rejecting the feature**, which is
+    precisely the conclusion R-08 exists to measure. The instrument would have lied about the one
+    thing it exists to say.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    # The microphone goes away while the window is open.
+    await rig.bus.publish(AudioCaptureStalled(**_env(rig), silent_ms=5_000))  # type: ignore[arg-type]
+    await _settle(rig)
+
+    await rig.clock.advance(
+        30
+    )  # the hold-open window, unanswered — because it could not be heard
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply window closing",
+    )
+
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.ignore_streak == 0, "a robot that could not hear was not ignored"
+    assert record.cooldown_s == 900, "and must not be punished with a doubled cooldown"
+    assert rig.behavior.unheard_deliveries == 1, "the deafness must be counted"
+    assert await _reaction(rig) is None, (
+        "a NULL reaction is the honest record: nobody knows whether they would have replied"
+    )
+
+
+async def test_a_working_microphone_and_a_silent_user_is_still_an_ignore(
+    rig: Rig,
+) -> None:
+    """The negative control, and without it the test above is indistinguishable from switching
+    §10.5 off.
+
+    A fix that declines to count ignores is only correct if it still counts the real ones. This is
+    the same arc with capture alive, and it must reach the ordinary backoff: streak 1, cooldown
+    doubled, reaction ``ignored``.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    await rig.clock.advance(30)
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply window closing",
+    )
+
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.ignore_streak == 1
+    assert record.cooldown_s == 1800
+    assert rig.behavior.unheard_deliveries == 0
+    assert await _reaction(rig) == "ignored"
+
+
+async def test_capture_recovering_before_the_window_closes_still_counts_the_ignore(
+    rig: Rig,
+) -> None:
+    """The latch is a latch, not a life sentence.
+
+    A blip mid-window — the mic hiccups and recovers with twenty seconds still to run — leaves the
+    user perfectly able to answer. Treating that as "unheard" would hand a working trigger a free
+    pass every time capture stuttered, which is the over-correction that quietly turns §10.5 off.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    await rig.bus.publish(AudioCaptureStalled(**_env(rig), silent_ms=5_000))  # type: ignore[arg-type]
+    await _settle(rig)
+    await rig.bus.publish(AudioCaptureResumed(**_env(rig), stalled_ms=6_000))  # type: ignore[arg-type]
+    await _settle(rig)
+
+    await rig.clock.advance(30)
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply window closing",
+    )
+
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.ignore_streak == 1, "capture was back; the silence was the user's"
+    assert rig.behavior.unheard_deliveries == 0
+    assert await _reaction(rig) == "ignored"
+
+
+async def test_a_deaf_robot_does_not_disable_its_own_trigger(rig: Rig) -> None:
+    """The consequence, stated end to end — two strikes in and the mic dies.
+
+    ``ignore_streak_limit`` is 3. Seeded at 2, one more ignore switches proactivity off and
+    publishes ``behavior.trigger_disabled``. If a stalled capture counted, a broken microphone
+    would retire a working reminder on its third morning and the audit would say the user did it.
+    """
+    fact_id = await _seed_routine(rig)
+    trigger_id = await rig.store.upsert_routine_trigger(
+        fact_id, next_fire_at=None, cooldown_s=900, at=_START
+    )
+    await rig.store.set_backoff(trigger_id, ignore_streak=2, cooldown_s=3600)
+    await rig.bus.publish(SystemStarted(**_env(rig), adapters={}))  # type: ignore[arg-type]
+    await _make_deliverable(rig)
+    await _deliver_once(rig, trigger_id=trigger_id)
+
+    await rig.bus.publish(AudioCaptureStalled(**_env(rig), silent_ms=5_000))  # type: ignore[arg-type]
+    await _settle(rig)
+    await rig.clock.advance(30)
+    await _wait_until(
+        rig,
+        lambda: rig.behavior.resolved_deliveries == 1,
+        what="the reply window closing",
+    )
+
+    assert not [e for e in rig.events if isinstance(e, BehaviorTriggerDisabled)], (
+        "a broken microphone retired a working trigger and the log blamed the user"
+    )
+    record = await rig.store.get(trigger_id)
+    assert record is not None
+    assert record.enabled is True
+    assert record.ignore_streak == 2, (
+        "the streak must not advance on silence nobody could hear"
     )

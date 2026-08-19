@@ -377,6 +377,7 @@ async def _drive_session(
         highpass_hz=highpass_hz,
         highpass_order=highpass_order,
         echo_tail_ms=_ECHO_TAIL_MS,
+        capture_stall_s=5.0,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an M4 echo (#103).
         loopback=False,
     )

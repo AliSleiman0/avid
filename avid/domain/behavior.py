@@ -68,6 +68,26 @@ STALE = "stale"
 #: Every value the ``proactive_log.reason`` column may take: the six vetoes plus the one skip.
 SUPPRESSION_REASONS: frozenset[str] = POLICY_RULES | {STALE}
 
+#: The user answered inside the hold-open window (§10.5).
+ENGAGED = "engaged"
+#: The user heard it and did not answer — the signal R-08 is graded on.
+IGNORED = "ignored"
+
+#: Every value ``proactive_log.user_reaction`` may take, pinned for the same reason
+#: :data:`SUPPRESSION_REASONS` is (#347).
+#:
+#: ``reason`` has had a frozen vocabulary and a drift argument since M10 shipped; ``user_reaction``
+#: had two bare string literals at the single write site and a ``CHECK`` constraint in a migration
+#: that cannot be edited. One typo would have been an ``IntegrityError`` at 07:55 on the Pi, inside
+#: a bus handler, on the one write R-08's whole instrument depends on.
+#:
+#: ⚠️ **NULL is not in this set, and it is a real third state.** §8.3 defines it as *"unknown yet"*,
+#: and two paths now leave it that way deliberately: a turn that produced no words (#337) and a turn
+#: nobody could have answered because capture was stalled (#347). Neither is the user declining, and
+#: neither may be counted as one — which is why the honest answer is the absence of a value rather
+#: than a third one invented to look tidy.
+REACTIONS: frozenset[str] = frozenset({ENGAGED, IGNORED})
+
 #: The states a proactive turn may begin from (§10.4 rule 2, §3.10.3).
 #:
 #: **IDLE alone**, and the SDS says so since M10. The cell read ``∉ {IDLE, SLEEPING}`` until this
@@ -454,6 +474,9 @@ __all__ = [
     "COOLDOWN",
     "DAILY_BUDGET",
     "POLICY_RULES",
+    "ENGAGED",
+    "IGNORED",
+    "REACTIONS",
     "STALE",
     "SUPPRESSION_REASONS",
     "PRESENCE",

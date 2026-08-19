@@ -49,6 +49,8 @@ from avid.core.ports import AffectTools
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AffectChanged,
+    AudioCaptureResumed,
+    AudioCaptureStalled,
     AudioPlaybackFinished,
     AudioSpeechEnded,
     AudioSpeechStarted,
@@ -138,6 +140,11 @@ _EXPECTED_SUBSCRIPTIONS = {
     "BehaviorService.fact_stored",
     "BehaviorService.fact_superseded",
     "BehaviorService.fact_deleted",
+    # #347: whether the microphone is delivering at all. §10.5 turns silence into a verdict about
+    # the user, and silence has three causes — the user chose not to answer, the robot never spoke
+    # (#337), or the robot could not hear. Only the first is an ignore.
+    "BehaviorService.capture_stalled",
+    "BehaviorService.capture_resumed",
     # ObservabilityService (#242): the three §9.1.3 rows whose Observability subscriber existed in
     # the catalog and nowhere else — state.transitioned's is even tagged (M10). Note what is NOT
     # here: behavior.proactive_delivered/_suppressed, whose audit trail is the proactive_log table
@@ -483,6 +490,11 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         MemoryFactDeleted,
         BehaviorTriggerFired,
         BehaviorTriggerDisabled,
+        # ...and whether the robot can hear at all (#347). Without these, an unanswered proactive
+        # turn is recorded as the user ignoring it even when the microphone stopped delivering
+        # frames — and three of those disable proactivity and blame the user for it.
+        AudioCaptureStalled,
+        AudioCaptureResumed,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]

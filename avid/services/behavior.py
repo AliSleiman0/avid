@@ -49,8 +49,12 @@ from avid.core.schedule import InvalidRoutine, next_occurrence
 from avid.core.state_manager import StateManager
 from avid.core.tasks import spawn
 from avid.domain import (
+    ENGAGED,
+    IGNORED,
     STALE,
     AmbientWindow,
+    AudioCaptureResumed,
+    AudioCaptureStalled,
     AudioSpeechEnded,
     AudioSpeechStarted,
     BehaviorProactiveDelivered,
@@ -145,6 +149,16 @@ class BehaviorService:
         # else means the model is dropping `remember_fact`'s `schedule` on a rephrase, which turns
         # a working reminder off without a single error anywhere.
         self.schedules_lost_to_correction = 0
+        # Deliveries nobody could have answered, because the microphone was not delivering frames
+        # (#347). Counted beside `silent_deliveries` because they are the same defect seen from
+        # the two ends of the turn: one is the robot failing to speak, the other the robot failing
+        # to hear, and neither is the user declining.
+        self.unheard_deliveries = 0
+        # Whether capture is currently known to be down (audio.capture_stalled/_resumed). A latch
+        # rather than a timer: the events are edge-triggered, and if one is ever dropped the safe
+        # direction is to keep believing the robot is deaf — that under-counts ignores, which
+        # leaves a working trigger on, instead of disabling one that never had a chance.
+        self._capture_stalled = False
         self._ignore_streak_limit = ignore_streak_limit
         self._scheduler = SchedulerLoop(
             clock=clock,
@@ -279,6 +293,20 @@ class BehaviorService:
                 maxsize=DEFAULT_MAXSIZE,
             ),
             Subscription(
+                event_type=AudioCaptureStalled,
+                handler=cast(Handler, self._on_capture_stalled),
+                name="BehaviorService.capture_stalled",
+                policy=oldest,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=AudioCaptureResumed,
+                handler=cast(Handler, self._on_capture_resumed),
+                name="BehaviorService.capture_resumed",
+                policy=oldest,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
                 event_type=ConversationAssistantResponded,
                 handler=cast(Handler, self._on_assistant_responded),
                 name="BehaviorService.assistant_responded",
@@ -400,6 +428,24 @@ class BehaviorService:
         """
         if self._pending is not None:
             await self._resolve_pending(engaged=True)
+
+    async def _on_capture_stalled(self, event: AudioCaptureStalled) -> None:
+        """The microphone stopped delivering. Silence stops meaning anything about the user (#347).
+
+        A latch, not a timer. `AudioService` publishes on transitions only, so holding the state
+        here is what lets `_resolve_pending` ask one question at the moment it matters.
+        """
+        _log.warning(
+            "capture stalled after %d ms of silence — an unanswered proactive turn can no "
+            "longer be read as the user ignoring us (§10.5)",
+            event.silent_ms,
+        )
+        self._capture_stalled = True
+
+    async def _on_capture_resumed(self, event: AudioCaptureResumed) -> None:
+        """Frames again. Silence means something about the user once more."""
+        _log.info("capture resumed after %d ms", event.stalled_ms)
+        self._capture_stalled = False
 
     async def _on_speech_ended(self, event: AudioSpeechEnded) -> None:
         """Rule 4's raw feed: every utterance the VAD heard, counted until something retracts it."""
@@ -743,6 +789,25 @@ class BehaviorService:
             self.silent_deliveries += 1
             self.resolved_deliveries += 1
             return
+        if not engaged and self._capture_stalled:
+            # ⚠️ The mirror image of the branch above, on the input side (#347). The robot spoke;
+            # it simply could not hear. Silence from a microphone that is not delivering frames is
+            # not the user declining, and §10.5 must not act on it either — three of these disable
+            # the trigger and record it as the user rejecting proactivity, which is the exact
+            # conclusion R-08 exists to measure. A deaf robot would quietly conclude it was
+            # unwanted.
+            #
+            # NULL rather than a third reaction value: §8.3 already defines NULL as "unknown yet",
+            # and unknown is the honest answer — nobody knows whether they would have replied. The
+            # column's CHECK stays as shipped and no migration is needed.
+            _log.error(
+                "proactive turn %d went unanswered while capture was stalled — not counting it "
+                "as ignored; the robot could not have heard a reply (§10.5, §10.6)",
+                pending.trigger_id,
+            )
+            self.unheard_deliveries += 1
+            self.resolved_deliveries += 1
+            return
         task, self._reply_task = self._reply_task, None
         # Cancel the window only when something *else* closed it. On the ignored path this method
         # IS the timer, and a task cancelling itself here would swallow the very write it is here
@@ -750,9 +815,7 @@ class BehaviorService:
         if engaged and task is not None:
             task.cancel()
 
-        await self._log.set_reaction(
-            pending.log_id, "engaged" if engaged else "ignored"
-        )
+        await self._log.set_reaction(pending.log_id, ENGAGED if engaged else IGNORED)
         if engaged:
             # Reset, not decrement. One answered reminder means the trigger is wanted; making the
             # user earn back three days of goodwill would be a different, worse design.
@@ -797,9 +860,14 @@ class BehaviorService:
             )
         )
         _log.warning(
-            "trigger %d disabled itself after %d consecutive ignores (§10.5)",
+            "trigger %d disabled itself after %d consecutive ignores (§10.5); this session also "
+            "saw %d turn(s) that produced no words and %d that nobody could have heard — neither "
+            "counted toward the streak, but a nonzero count here means the robot was faulty in "
+            "the same period and the retirement deserves a second look",
             trigger_id,
             ignore_streak,
+            self.silent_deliveries,
+            self.unheard_deliveries,
         )
 
     async def _occurrence_for(self, fact_id: int | None, fire_at: int) -> int | None:

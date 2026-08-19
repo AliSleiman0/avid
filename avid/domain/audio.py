@@ -114,6 +114,52 @@ class AudioPlaybackFinished(Event):
     truncated: bool  # cut short by barge-in? always False at M4 (no truncation yet)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AudioCaptureStalled(Event):
+    """The microphone stopped yielding frames (SDS §9.1.3, #347).
+
+    A fact about the *instrument*, and the system had no way to state it before. ``AlsaMicrophone``
+    carries no counters, and if ``stream()`` simply stops producing — device unplugged, ALSA card
+    renumbered, a short-read loop that never recovers — the ``async for`` in ``AudioService`` parks
+    forever and **nothing anywhere notices**. A robot that has gone deaf looks exactly like a room
+    that has gone quiet.
+
+    That distinction is not cosmetic. §10.5 counts an unanswered proactive turn as an *ignore*, and
+    three ignores disable the trigger — so without this event a deaf robot silently switches its own
+    proactivity off and records it as the user rejecting the feature, which is the precise
+    conclusion R-08 exists to measure. ``BehaviorService`` subscribes for exactly that reason.
+
+    Edge-triggered: published once when capture goes quiet, not repeated while it stays quiet.
+    ``silent_ms`` is measured on the **monotonic** clock, like every other duration in this domain.
+    Queue policy DROP_OLDEST.
+    """
+
+    name: ClassVar[str] = "audio.capture_stalled"
+
+    silent_ms: int  # how long the mic had been silent when the watchdog gave up on it
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AudioCaptureResumed(Event):
+    """Frames are arriving again after an :class:`AudioCaptureStalled` (SDS §9.1.3, #347).
+
+    The closing bracket, and the reason a subscriber can hold a simple latch rather than a timer.
+
+    ⚠️ Note which way the failure leans if one of these two is ever dropped — the bus is
+    at-most-once (§3.5). Losing a *resume* leaves a listener believing capture is still down, which
+    under-counts ignores: proactivity stays on when it might have been switched off. Losing a
+    *stall* counts an ignore that should not have counted, which is exactly today's behaviour and so
+    no regression. Both errors are survivable and the more likely one is the harmless one; that is
+    the property that makes an at-most-once event acceptable here at all.
+
+    Queue policy DROP_OLDEST.
+    """
+
+    name: ClassVar[str] = "audio.capture_resumed"
+
+    stalled_ms: int  # how long the gap lasted, for the log that has to explain it
+
+
 class AudioPreRoll:
     """The 300 ms pre-roll ring buffer (SDS §6.3, SDS:1082): keep the last ~``capacity_ms``
     of captured PCM so a VAD-gated session can replay the phonemes it already missed.

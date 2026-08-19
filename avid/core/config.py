@@ -377,6 +377,15 @@ class GateConfig(_Section):
     # ``Speaker.stop`` closes the handle so ALSA drops the buffer outright, and the user is
     # mid-utterance, so re-opening the uplink late would clip the very words that interrupted.
     echo_tail_ms: int = Field(default=150, ge=0)
+    # How long the microphone may yield nothing before capture is declared stalled (#347).
+    #
+    # This is not a tuning knob for audio quality — it decides whether an unanswered proactive
+    # turn counts against the user. §10.5 reads silence as an ignore and three ignores disable the
+    # trigger, so a mic that has stopped delivering would switch proactivity off within three
+    # mornings and record it as the user rejecting the feature. Five seconds is far longer than
+    # any real gap between 20 ms frames and far shorter than one hold-open window, so a stall is
+    # always known before the window it would corrupt closes.
+    capture_stall_s: float = Field(default=5.0, gt=0)
     # The level-measurement high-pass (AVID-283). Applied to the audio `rms_dbfs` measures for
     # `EchoFloor` — NOT to the VAD's input, which keeps raw PCM.
     #

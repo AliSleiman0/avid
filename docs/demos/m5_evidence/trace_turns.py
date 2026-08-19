@@ -235,6 +235,7 @@ async def main() -> int:
         highpass_hz=config.gate.highpass_hz,
         highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
+        capture_stall_s=config.gate.capture_stall_s,
         loopback=False,
     )
     client = _CountingClient(_build_realtime(config, clock=clock))

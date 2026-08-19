@@ -815,6 +815,7 @@ async def _run_conversation(
         highpass_hz=config.gate.highpass_hz,
         highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
+        capture_stall_s=config.gate.capture_stall_s,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an echo (#103).
         loopback=False,
     )
