@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = <MAIN>` · **`v0.M10.0` tagged** · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = df4365d` · **`v0.M10.0` tagged** · gh `AliSleiman0`.
 
 ## ⭐ Next session
 
@@ -74,8 +74,8 @@ first morning — and worth appending to `docs/journal.md` even after the tag.
 
 - **M10 sealed 2026-08-20 as `v0.M10.0`.** Epic #230, #245 and all 14 children closed; milestone
   closed. `docs/journal.md` and PMP §5.2 both carry the seal, **including what it did not prove**.
-- **Zero open PRs.** `main = <MAIN>`.
-- **The Pi is ON, running `<MAIN>`, service active and enabled.** `alisleiman0@172.20.10.6` over the
+- **Zero open PRs.** `main = df4365d`.
+- **The Pi is ON, running `df4365d`, service active and enabled.** `alisleiman0@172.20.10.6` over the
   iPhone hotspot (the address moves with the network). `/etc/robot/config.toml` gained
   `capture_stall_s = 5.0` (backup `.bak-pre-347`). Clock NTP-synced.
 - ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.** Deliberate
