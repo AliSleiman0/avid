@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
@@ -354,3 +355,145 @@ async def test_the_callback_is_told_which_moment_came_due(
     assert recorder.due[0][1] != int(clock.now()), (
         "the callback was handed 'now', not the booking"
     )
+
+
+# ── The wall clock is not the sleep clock (#345) ──────────────────────────────────────────────
+
+
+async def test_a_scheduled_sleep_is_capped_at_the_bound() -> None:
+    """A far deadline must not become one very long sleep.
+
+    The idle branch was always bounded; the *scheduled* branch was not, and that is the whole
+    of the defect. A booking nine hours out asked for nine hours of monotonic sleep, during
+    which nothing — not a clock correction, not a re-arm — could reach the loop.
+    """
+    clock = FakeClock()
+    slept: list[float] = []
+    original = clock.sleep
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+        await original(seconds)
+
+    clock.sleep = _record  # type: ignore[method-assign]  # a probe on the fake, not the port
+    loop = SchedulerLoop(clock=clock, on_due=_Recorder(), max_sleep_s=600.0)
+    await loop.start()
+    try:
+        loop.schedule(7, fire_at=int(clock.now()) + 34_000)  # ~9.5 hours out
+        await _settle()
+        assert slept[-1] == 600.0, f"asked to sleep {slept[-1]}s, not the 600s bound"
+    finally:
+        with contextlib.suppress(Exception):
+            await loop.stop()
+
+
+async def test_a_forward_clock_step_does_not_sleep_through_a_booking() -> None:
+    """⚠️ The rig slept through its own booking, and this is the assertion that stops it.
+
+    The Pi has no RTC. An offline boot restores a stale clock, and NTP steps it forward once the
+    network arrives. On 2026-08-19 the robot came up believing it was the previous morning,
+    computed a 9h38m delay for a booking that was really 35 minutes away, and parked. The
+    correction moved the wall clock 33 hours; it did not move the **monotonic** sleep by one
+    nanosecond, because ``Clock.sleep`` is monotonic in both adapters. The booking came and went
+    with the loop asleep, and — worse than late — the trigger was never re-armed either, so the
+    scheduler was wedged rather than merely behind. A hand-run ``systemctl restart`` recovered it.
+
+    Note what makes this expressible at all: ``FakeClock`` derives ``now()`` and ``monotonic_ns()``
+    from one counter *so that they cannot drift*, which meant the only way they drift in production
+    had no expression in the fake. ``step_wall_clock`` is that expression.
+    """
+    clock = FakeClock()
+    recorder = _Recorder()
+    loop = SchedulerLoop(clock=clock, on_due=recorder, max_sleep_s=600.0)
+    await loop.start()
+    try:
+        booked = (
+            int(clock.now()) + 34_000
+        )  # what the WRONG clock thought was 9.5 hours away
+        loop.schedule(7, fire_at=booked)
+        await _settle()
+        assert recorder.fired == [], "nothing is due yet on the clock the loop believed"
+
+        # NTP arrives. Wall time jumps 33 hours; monotonic time does not move, and no parked
+        # sleeper wakes — exactly as on the Pi.
+        clock.step_wall_clock(33 * 3600)
+        assert recorder.fired == [], (
+            "the step alone must not fire anything; the loop is asleep"
+        )
+
+        # One bound's worth of real time passes. That is all it may take to notice.
+        await clock.advance(600)
+        await _settle()
+
+        assert recorder.fired == [7], (
+            "the booking was slept through: 33 hours of wall clock passed and the loop was "
+            "still waiting out a delay computed from the stale one"
+        )
+        assert recorder.due == [(7, booked)], (
+            "and the moment that came due is the one booked"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await loop.stop()
+
+
+async def test_a_backward_clock_step_does_not_fire_a_booking_early() -> None:
+    """The other direction, which is legal and must simply be uneventful.
+
+    NTP corrects backward too. The deadline then sits *further* away in wall terms, so the loop
+    must re-derive and keep waiting rather than treating its already-elapsed monotonic sleep as
+    proof the moment arrived.
+    """
+    clock = FakeClock()
+    recorder = _Recorder()
+    loop = SchedulerLoop(clock=clock, on_due=recorder, max_sleep_s=600.0)
+    await loop.start()
+    try:
+        loop.schedule(7, fire_at=int(clock.now()) + 300)
+        await _settle()
+        clock.step_wall_clock(-3600)  # the clock was an hour fast; NTP walks it back
+
+        await clock.advance(600)
+        await _settle()
+        assert recorder.fired == [], (
+            "an hour behind means the booking is an hour away, not due"
+        )
+
+        await clock.advance(3600)
+        await _settle()
+        assert recorder.fired == [7], (
+            "and it still fires once the corrected clock reaches it"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await loop.stop()
+
+
+async def test_a_clock_step_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """Loud, because the silent version of this cost a night.
+
+    The cap is what makes the loop correct; this line is what makes the event diagnosable. §10.6's
+    argument, applied to the scheduler itself: from a silent log, a robot that slept through a
+    morning and a scheduler that stopped working are the same picture — and the nine-hour nap on
+    the rig left no trace at all.
+    """
+    clock = FakeClock()
+    loop = SchedulerLoop(clock=clock, on_due=_Recorder(), max_sleep_s=600.0)
+    await loop.start()
+    try:
+        loop.schedule(7, fire_at=int(clock.now()) + 34_000)
+        await _settle()
+        with caplog.at_level(logging.WARNING, logger="avid.services.scheduler"):
+            clock.step_wall_clock(33 * 3600)
+            await clock.advance(600)
+            await _settle()
+
+        steps = [r for r in caplog.records if "stepped" in r.getMessage()]
+        assert steps, "a 33-hour wall-clock step passed unremarked"
+        assert "118800.0" in steps[0].getMessage(), (
+            "the line must carry the size of the step, or it cannot be acted on: "
+            f"{steps[0].getMessage()}"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await loop.stop()

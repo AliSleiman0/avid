@@ -156,3 +156,58 @@ async def test_fake_sleepers_wake_in_deadline_order() -> None:
     await clock.advance(10)  # crosses both deadlines in one advance
     assert order == ["short", "long"]
     await asyncio.gather(long_task, short_task)
+
+
+async def test_fake_step_wall_clock_moves_only_the_wall_reading() -> None:
+    """The one way the two readings are allowed to disagree — an NTP step (#345).
+
+    ``advance`` deliberately moves both together, so that the *passage of time* can never drift
+    them apart. That guarantee also meant the only drift the real system produces had no
+    expression here, and #345 shipped through the gap: the Pi has no RTC, boots on a restored
+    clock, and NTP corrects it hours later.
+    """
+    clock = FakeClock()
+    now0, mono0 = clock.now(), clock.monotonic_ns()
+
+    clock.step_wall_clock(33 * 3600)
+
+    assert clock.now() - now0 == 33 * 3600, "the wall clock must move"
+    assert clock.monotonic_ns() == mono0, "and monotonic time must not"
+
+
+async def test_fake_step_wall_clock_may_go_backward() -> None:
+    """Legal, and not the mistake ``advance`` rejects.
+
+    Wall clocks genuinely step backward — an NTP correction the other way. It is only *monotonic*
+    time that may never retreat, which is why the guard lives on ``advance`` and not here.
+    """
+    clock = FakeClock()
+    now0 = clock.now()
+    clock.step_wall_clock(-3600)
+    assert clock.now() - now0 == -3600
+
+
+async def test_fake_step_wall_clock_does_not_wake_a_sleeper() -> None:
+    """The property the defect turns on: a parked coroutine does not care what the wall says.
+
+    A sleeper asked for N seconds of *monotonic* time and still owes all of them, no matter how
+    far the wall clock has since jumped. Reproducing that faithfully is what makes the scheduler
+    test in ``tests/services/test_scheduler.py`` an honest reproduction rather than a mock-up.
+    """
+    clock = FakeClock()
+    woke: list[str] = []
+
+    async def sleeper() -> None:
+        await clock.sleep(600)
+        woke.append("up")
+
+    task = asyncio.create_task(sleeper())
+    await asyncio.sleep(0)  # let it register
+
+    clock.step_wall_clock(33 * 3600)
+    await asyncio.sleep(0)
+    assert woke == [], "a wall-clock step must not resolve a monotonic deadline"
+
+    await clock.advance(600)
+    assert woke == ["up"], "and the monotonic deadline still works normally afterwards"
+    await task
