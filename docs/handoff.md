@@ -17,18 +17,63 @@ repo — zero open PRs. The next session's job is to *collect evidence*, not to 
 `git rev-parse --short origin/main` — three commands, and they are always right. See the
 BATON-CAN-BE-WRONG entry below; it has already cost a whole planning cycle once.
 
-### Collect these two first — they are time-boxed and cannot be re-run on demand
+### AC-1 is the only live criterion left, and the fixture blocks it
 
-Both are staged on trigger 1 and both are gone once the moment passes.
+**`next_fire_at` is `1787028900` = 07:55 EEST daily, re-booked automatically by #340 after every
+miss.** Nothing needs staging by hand. What it needs is a *person*:
 
-1. **Tonight 23:00 EEST (20:00Z) — AC-2 under the shipped config.** `next_fire_at` is booked for
-   `1786996800`, proven `inside_quiet=True` by `within_quiet_window` itself (not by arithmetic in a
-   session log). Expect `proactive_log` → `suppressed / quiet_hours`, no audio, then a re-arm to
-   the next RRULE occurrence.
-2. **Tomorrow 07:55 EEST (04:55Z) — AC-1, the real morning.** This is the one thing no staging can
-   fake: §10.8's criterion is whether the *morning* utterance sounds like a companion rather than a
-   calendar. ⚠️ It needs **the hotspot up all night** (no API, no utterance) and **a human at the
-   desk by ~07:50** — §10.4 rule 3 vetoes into an empty room, demonstrated live this session.
+⚠️ **Two conditions, both satisfied by the same act — be in the camera's view a few minutes before
+the fire and stay there.** The robot naps to SLEEPING after ten idle minutes and
+`PROACTIVE_STATES = {IDLE}` (rule 2), so presence must both *wake* it and satisfy rule 3's 300 s
+window. `domain/behavior.py:80`: *"proactivity does not wake a sleeping robot. It speaks to someone
+already there."* It also needs the hotspot up, or there is no API and no utterance.
+
+✅ **The fixture has been repointed at the owner's real routine (2026-08-18).** It was
+`local_time = '08:00'`, and he is not at his desk at 08:00, so the morning vetoed on `presence`
+daily and AC-1 could never land. 08:00 was the SDS's illustration of UC-03, not a requirement —
+AC-0 asks only for "a real `routines` row for a daily coffee reminder". It is now **`00:00`,
+decaf**, firing at **23:55** on the 300 s lead. `next_fire_at = 1787086500` = **2026-08-18 23:55
+EEST**, computed by `core.schedule.next_occurrence` itself rather than by hand, with
+`dtstart_epoch` taken from `facts.created_at` as its docstring requires (an anchor that moves
+changes what the rule *means*).
+
+⚠️ **That change forced a second one, and it is MACHINE-ONLY ON PURPOSE.** Midnight sits inside the
+shipped `22:00→07:30` quiet window, and rule 1 is evaluated first and overrides nothing — so the new
+routine would have been suppressed every night, swapping a permanent `presence` veto for a permanent
+`quiet_hours` one. `/etc/robot/config.toml` now runs **`02:00→09:00`** (backup
+`config.toml.bak-pre-quiet-shift`), which still covers the hours he is actually asleep. Verified via
+`within_quiet_window`: 23:55 and 00:00 are outside, 03:00 and 08:00 inside.
+
+🚫 **Do not "fix" the resulting drift in either direction**, and the machine's config now carries a
+comment saying so. Copying `config/pi.toml` over the machine restores a window that silently kills
+the routine. And changing `config/pi.toml` to match is worse: **`tests/core/test_config.py:504`
+loads that file and asserts the `22:00→07:30` window precisely because it CROSSES MIDNIGHT** — the
+case a naive implementation gets wrong. `02:00→09:00` does not wrap, so aligning the template would
+delete that coverage to suit one person's sleep schedule. This is what per-deployment config is for.
+
+⚠️ **AC-2's proof (id=10) was taken under `22:00→07:30`.** The mechanism it establishes — rule 1 plus
+`within_quiet_window` — is value-independent, so it stands. But any seal evidence citing that row
+must state the window in force at the time, or the row becomes unreadable against a machine that now
+says something else.
+
+✅ **Missing a morning is free** — verified in code, not assumed. `ignore_streak` is incremented only
+in `_resolve`, from a `_PendingDelivery` that only `_deliver` creates (`services/behavior.py:729`),
+and a suppressed proposal never reaches `_deliver`. Confirmed live: id=6 was a `presence`
+suppression and the streak stayed at 1. **The trigger will not disable itself by being slept
+through.** Only *delivered-then-unanswered* turns count, and the streak is at 1 of 3.
+
+### How AC-2 was closed, and the shape to copy for AC-1
+
+Row id=10 (2026-08-18 01:55:24 EEST) is `suppressed / quiet_hours` — and it is worth more than the
+four rows before it because **the other rules were established as passing by construction**, so
+quiet was the *sole* veto rather than merely the first one reported:
+state `IDLE`; presence gained 83 s earlier against a 300 s window; cooldown 13.7 h against 1800 s;
+0 of 5 delivered that day. Plus two negative controls: **no `set_quiet` call anywhere in the boot**
+(so this is the static window, not the override — a distinction the audit row cannot make), and
+**no playback / SPEAKING / THINKING** (so the silence was real, not a quiet delivery).
+
+**That is the standard to hold AC-1 to as well**: name every rule that was live, not just the one
+the log prints.
 
 Read both with `/tmp/m10_state.py` on the Pi (also in this session's scratchpad) — it prints the
 config *as loaded* alongside the rows, so a silent schema default cannot be mistaken for a setting.
@@ -39,20 +84,13 @@ config *as loaded* alongside the rows, so a silent schema default cannot be mist
 
 | AC | state | evidence |
 |---|---|---|
-| **AC-2** quiet hours | ✅ (re-proof pending tonight) | `proactive_log` id=1; tonight re-proves it under shipped config + NTP-synced clock |
+| **AC-2** quiet hours | ✅ **airtight, 2026-08-18 01:55 EEST** | `proactive_log` id=10, static branch, sole veto — see below |
 | **AC-3** HTTP door | ✅ | `health: quiet requested over HTTP` → `suppressed / quiet_hours`, cooldown ruled out |
 | **AC-3** tool door | ✅ | *"leave me alone for ten minutes"* → `quiet until … (600s requested)`, no `health` line |
 | **AC-4** ignore backoff | ✅ | streak 0→1, `cooldown_s` 900→1800, `reaction='ignored'` |
 | **AC-1** real morning | ⏳ | midday staging sounded natural but cannot substitute |
 | **AC-0** multi-morning | ⏳ | needs wall-clock days |
 | **AC-5 / AC-6** seal | ⏳ | journal, PMP §5.2, tag, close epic + 14 children |
-
-⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
-than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
-That is the point of the fix, but it means **you can no longer wind the clock past a booking to
-trigger it** — stage forward, not backward. The M10 gate learned this the hard way: its quiet-hours
-arc fast-forwarded 14 hours past the morning booking and started reporting `stale`, correctly, and
-the *harness* was what needed fixing.
 
 ⚠️ **#339 changes how a test morning must be staged.** A booking whose moment has passed by more
 than `behavior.stale_grace_s` (600 s) is now *skipped and re-booked*, logged as `reason='stale'`.
