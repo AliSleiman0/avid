@@ -6,86 +6,162 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = df4365d` · **`v0.M10.0` tagged** · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = 1d64caa` · **`v0.M10.0` tagged** · gh `AliSleiman0`.
 
-## ⭐ Next session
+## ⭐ Next session — build M9 "It moves"
 
-**M10 is sealed. Nothing is in flight — zero open PRs — and the next decision is which milestone to
-start.** The repo is at a clean stopping point for the first time in a week.
+**M10 is sealed and nothing is in flight — zero open PRs.** The next milestone is **M9 (motion)**,
+chosen by the owner over M11. Epic **#198**, ten children **#199–#207**, ~7.5 IED labelled against
+PMP's 5.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
-`git rev-parse --short origin/main` — three commands, always right. See the BATON-CAN-BE-WRONG entry
-below; it has cost a whole planning cycle once already.
+`git rev-parse --short origin/main`. See BATON-CAN-BE-WRONG below.
 
-### Pick M9 or M11 — and they are not equivalent
+### Start by reading #198. It is unusually good, and it did the homework.
 
-- **M9 "It moves"** (epic #198, 10 open children, 5 IED). Motion: gesture vocabulary, `MotionService`,
-  `look_at`, the affect→gesture map. **Not on the critical path** (PMP §5.4 goes M6 → M10 → M11), so
-  it is the *optional* milestone. The hardware is already proven — two servos on a PCA9685, verified
-  on the rig — and #204/#203 collide with `services/tools.py` and `main.py`, the same files M10 just
-  finished editing.
-- **M11 "It's a product"** (#12, 1 open issue, 13 IED). **The critical path.** A 30-day unattended
-  soak, O5, the runbook, `v1.0.0`. ⚠️ It is also where **M10's unrun AC-0 comes due** — a 30-day soak
-  subsumes "does it fire on the second morning" and would surface the one property the seal skipped.
+M10's epic was wrong in five places and the plan had to open with issue hygiene. **#198 is not**:
+it states five facts "verified against code + SDS" and a scope boundary, and the ones re-checked
+this session hold up. Do not re-derive them — read the epic, then read #199 and #201, and start.
 
-**Recommendation: M11.** It is the critical path, and it retires M10's only recorded gap as a side
-effect rather than as extra work. M9 is a genuine feature but it is a detour, and PMP §7.3 is explicit
-that proactivity "survives on the clock alone".
+The three commitments it says are pre-decided are worth internalising before writing anything,
+because each one is a trap the milestone is otherwise prone to:
 
-### What M10's seal deliberately did NOT prove
+1. **The gesture is a domain intent; the realization is negotiated** (§3.9.3). `plan(gesture, axes)
+   -> tuple[Keyframe, ...]` is a **pure function in `domain/`**, and the rig's inventory comes from
+   `Servo.axes` — never from a config list that can drift from the wiring. Get this wrong and the
+   gesture engine is untestable without a Pi, which is the whole trap.
+2. **Clamping is the adapter's job and already works** (§3.9.1). `MotionService` owns *scheduling* —
+   one gesture at a time, preemption, relax. It does not re-clamp.
+3. **A moving servo is an effect, not an obligation.** The three `motion.*` events are
+   observability. Nothing publishes "please nod": affect changes, `MotionService` subscribes, it
+   moves. The tool path reaches it through a **port**, exactly as memory does.
 
-**AC-0 — multiple unattended mornings — was not run.** An explicit owner decision on 2026-08-20 to
-seal and move on, taken with the risk stated. Two consequences to carry forward:
+### Confirm the epic's five facts before planning — thirty minutes, and M10 proved why
 
-- **AC-1 is staged, not spontaneous.** For id=15 the cooldown was cleared by hand and the booking
-  armed. It proves the mechanism end to end; it does not prove the robot doing this by itself.
-- **The second morning has never happened on the rig.** `0d3ba60` fixed *"a trigger fired once and
-  never again"* in this very codebase — that is the bug class AC-0 exists to catch, and it now rests
-  on `test_three_cycles_a_day_apart_cost_no_wall_clock_time` alone. **O3's 7/7 mornings is
-  unmeasured.**
+#198 states five things "verified against code + SDS". They were spot-checked this session and the
+board-level ones hold. **They were not exhaustively re-read**, and M10's epic was wrong in five
+places — enough that its plan had to open with issue hygiene instead of code. So spend half an hour
+confirming these against the tree, and amend the issue rather than the memory of it:
 
-🎁 **The trigger is armed and running right now.** `next_fire_at` = 23:55 EEST daily, `ignore_streak`
-0, `enabled` 1, nothing staged. **Reading the log on any morning after tonight costs one command and
-retires most of AC-0's risk for free** — do that before M11's soak rather than instead of it:
+| # | The epic claims | Confirm by |
+|---|---|---|
+| 1 | The three `motion.*` events are already normative in §9.1.3, and `motion` is in `EVENT_DOMAINS` | `grep -n motion avid/domain/events.py tests/domain/test_events.py`; check whether any `Event` **subclass** exists or only the names |
+| 2 | `gesture_preempted` covers both a newer gesture (`by="nod"`) and the §3.12.3 I²C-fault abort (`by=None`) | read §9.1.3's row |
+| 3 | Both servo adapters **and their contract suite** exist and need no change; `move_to` is already cancellable mid-sweep | `tests/contract/test_servo.py` — does it assert cancel mid-sweep, against **both** adapters? |
+| 4 | `ServoConfig` is singular; `MotionConfig.axes = ("pan",)` is a second copy of the rig inventory | `avid/core/config.py`, `config/pi.toml`, `_build_servo` in `main.py` |
+| 5 | The tool-call transport is already merged (#124/#125), so #204 is "a route and a port" | `avid/services/tools.py` — `TOOL_SCHEMAS` + dispatch; and the `MemoryTools`/`AffectTools`/`BehaviorTools` Protocol pattern in `ports.py` that `GestureTools` should copy |
 
-```sh
-ssh alisleiman0@<pi> 'sudo python3 -c "
-import sqlite3,datetime
-c=sqlite3.connect(\"/var/lib/robot/robot.db\")
-for r in c.execute(\"select id,considered_at,outcome,reason,utterance,user_reaction from proactive_log order by id desc limit 5\"): print(r)"'
+Two more worth checking that the epic does **not** claim, and that will bite:
+
+- **Is `avid.services.motion` on `.importlinter`'s `service-independence` contract?** Every service
+  is, and CI fails on a missing one. M10 added `avid.services.behavior` there in its WP3.
+- **`tests/test_main.py` holds exact-set assertions** over the wired subscription graph and event
+  types. Adding `MotionService` **will** break them — by design, that is the drift check working.
+  M10 hit this twice; budget for it rather than being surprised.
+
+### Order, and where it can go wrong
+
+```
+#199 ADR-009 accepted + SDS reconciled   [S]  ← FIRST, docs only, the SDS leads
+#200 [servo] grows to N axes             [S]  ← #199
+#201 Gesture vocabulary + pure plan()    [M]  ← #199   ← the heart of the milestone
+#202 Affect → gesture map                [S]  ← #201
+#203 MotionService                       [L]  ← #200 #201 #202   ← split this, it will exceed 400 lines
+#204 look_at tool + GestureTools port    [M]  ← #203
+#205 Idle micro-motion                   [S]  ← #203
+#206 ⚙ SPK-4 brown-out spike             [S]  ← #200
+#207 ⚙ M9 gate + tag v0.M9.0             [M]  ← all
 ```
 
-An id=16 that is `delivered` with a real utterance, on a night nobody touched the machine, is AC-0's
-first morning — and worth appending to `docs/journal.md` even after the tag.
+**#199 first and alone.** Per CLAUDE.md an interface that reaches the model must be in the SDS
+*before* it is in the code, and ADR-009 is still `Proposed — needs your call`. Doing it first stops
+#200–#204 each re-litigating what the rig is.
 
-### The queue behind it
+**#201 is where the milestone is won or lost.** A pure planner with the axes passed in is what makes
+"nod is a real tilt on two servos and degrades to a pan wiggle on one" a table-driven unit test
+instead of an evening with a screwdriver.
 
-- **#328** — the P8 async-debug gate grades test bodies, not the robot's callbacks. Now **three
-  false positives on three unrelated PRs with three different untouched tests** (`test_presence.py:229`
-  0.083 s, `test_memory.py:216` 0.074 s, `test_memory.py:519` **0.052 s** — two milliseconds over).
-  Its signal-to-noise on P8 is 0:3, so a real slow callback would now be indistinguishable from noise.
-  Every red costs a merge-past-a-red-gate judgement call. **Fix it before it trains someone to ignore it.**
-- **#310** — `set_affect` never fires. `tools/eval_extraction.py` needs repair first (beta header +
-  stale model).
-- **#267 / #265 / #264** — memory-quality defects from M7's gate, all still open.
-- **#289** — `Pca9685Servo` shares the AVID-266 lazy-open shape; latent until M9 wires preemption.
+**#203 is labelled `[L]` and the ceiling is 400 changed lines per PR** — plan on two PRs
+(lifecycle + preemption, then fault-abort + relax), the way M10's `BehaviorService` was split.
+
+### The two that need hardware, and the rig is not currently ready
+
+**#206 (SPK-4) is a time-boxed 0.5 IED spike, not an investigation.** It guards **R-04**, whose
+failure mode is not "the robot glitches" but **SD-card corruption** — the Pi browning out mid-write.
+The register line was written for *one* servo; the rig has two, and worst case is both stalled at
+once. `ServoConfig`'s docstring carries the mitigation as an **assumption** the adapter cannot
+enforce. This is where it gets tested rather than restated. **Do it before #207**, and stop when the
+question is answered.
+
+⚠️ **`FakeServo` records a trace, and a trace is not a moved head.** #207 names the trap in advance:
+a wrong channel, a stale one-axis config, a horn slipping on its spline, an I²C address collision —
+every one produces a perfect trace and a motionless robot. The M4 gate printed PASS while the robot
+was mute; this is the motion version of it.
+
+### Rig state — verify before planning hardware work
+
+- **Servos verified 2026-07-21** through the real `Pca9685Servo` adapter: PCA9685 at **`0x40`**
+  (+`0x70` all-call), **ch0 = pan**, **ch13 = tilt/aux**. Both swept 0→90→0 smoothly and went limp
+  and silent on `relax()`. Pulse params `min 500 µs / max 2500 µs / 50 Hz`.
+- ✅ **R-04's mitigation is already wired**: PCA9685 V+ from a **separate 5–6 V supply**, its ground
+  tied to a Pi ground, Pi VCC feeding logic only. **Never the Pi 5 V pin.** #206 tests it under stall.
+- ⚠️ **`ch13` is NOT in `pi.toml`** — only `[servo] channel = 0` is defined. That is exactly what
+  #200 fixes, and it means *no run today drives the second axis*.
+- ⚠️ **The last M10 boot reported `servo` as FAKE.** Whether the servos are still physically attached
+  needs checking — the ILI9486 display panel **cannot be fitted alongside the amp + servo** (the
+  40-pin header is full), so the rig has been reconfigured between milestones before. **Check the
+  wiring before planning a hardware evening.**
+- ⚠️ **The Pi dropped off the hotspot at ~02:05 on 2026-08-20** and was not reachable at the end of
+  the session. Address moves with the network; `172.20.10.6` was last known good.
+
+### What M10 left behind
+
+- **AC-0 was never run** and M10 was sealed one criterion short, on the record (PMP §5.2,
+  `docs/journal.md`). 🎁 **The trigger is still armed** — 23:55 EEST daily, `ignore_streak 0`, nothing
+  staged. Reading `proactive_log` on any morning costs one command and is free evidence:
+
+  ```sh
+  ssh alisleiman0@<pi> 'sudo python3 -c "
+  import sqlite3
+  c=sqlite3.connect(\"/var/lib/robot/robot.db\")
+  for r in c.execute(\"select id,considered_at,outcome,reason,utterance,user_reaction from proactive_log order by id desc limit 5\"): print(r)"'
+  ```
+
+  An id≥16 `delivered` on an untouched night is AC-0's first real morning. **Append it to
+  `docs/journal.md` even though the tag has shipped.**
+- **#328** — the P8 async-debug gate now has **three false positives on three unrelated PRs** with
+  three different untouched tests (0.083 s, 0.074 s, **0.052 s** — two milliseconds over). Its
+  signal-to-noise on P8 is 0:3. Every red costs a merge-past-a-red-gate judgement call. M9 will hit
+  it too.
+- **#310** (`set_affect` never fires) matters more now than it did: **#202 maps affect → gesture**, so
+  a robot that cannot infer affect from what it just said will nod on the Tier-1 state baseline only.
+  Not a blocker — #198 says so explicitly — but it caps how alive M9 feels.
+- **#289** — `Pca9685Servo` shares the AVID-266 lazy-open shape. **Latent until #203 wires
+  preemption**, which is this milestone. Read it before writing the service.
+- ⚠️ **`facts` id=19 says "8 in the morning" while `routines` says `00:00`.** #346 makes the robot
+  state the schedule so the utterance is right, but the rows still disagree. Fix by **voice**, never
+  SQL — a raw `UPDATE` leaves an embedding for the old sentence and skews §7.7 retrieval silently.
 
 ## Current state
 
-- **M10 sealed 2026-08-20 as `v0.M10.0`.** Epic #230, #245 and all 14 children closed; milestone
-  closed. `docs/journal.md` and PMP §5.2 both carry the seal, **including what it did not prove**.
-- **Zero open PRs.** `main = df4365d`.
-- **The Pi is ON, running `df4365d`, service active and enabled.** `alisleiman0@172.20.10.6` over the
-  iPhone hotspot (the address moves with the network). `/etc/robot/config.toml` gained
-  `capture_stall_s = 5.0` (backup `.bak-pre-347`). Clock NTP-synced.
-- ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.** Deliberate
-  and load-bearing: the routine is 00:00 decaf, which the shipped window would suppress every night.
-  **Do not reconcile in either direction** — `tests/core/test_config.py:504` asserts the repo's
-  window precisely *because* it crosses midnight, and `02:00→09:00` does not.
-- ⚠️ **`facts` id=19 still reads "8 in the morning" while `routines` says `00:00`.** #346's fix makes
-  the robot state the *schedule*, so the utterance is right either way — but the rows still disagree.
-  Correcting it is a **voice** job, not SQL: a raw `UPDATE facts SET text` leaves an embedding for the
-  old sentence and skews §7.7 retrieval silently.
+- **M10 sealed 2026-08-20 as `v0.M10.0`** on `1d64caa`. Epic #230, #245 and all 14 children closed;
+  milestone closed. PMP §5.2 and `docs/journal.md` both carry the seal **including what it did not
+  prove** — AC-0 never run, AC-1 staged, O3 unmeasured.
+- **Nine of eleven milestones tagged.** Only **M9** (motion, chosen next) and **M11** (product /
+  30-day soak, the critical path) remain.
+- **Zero open PRs.** `main = 1d64caa`.
+- **29 open issues, only 11 in a milestone** — 10 of those are M9, 1 is M11. The rest are
+  unscheduled: M7 memory-quality defects (#264/#265/#267), feature ideas, infrastructure.
+- **M9 is fully unblocked.** Five of the six issues #198's sequencing note put ahead of it are
+  closed; only **#157** (Realtime session-open latency, an M5 defect) is open and it does not block
+  motion.
+- **The Pi** was last at `alisleiman0@172.20.10.6` running `main` with `robot.service` active and
+  enabled; `/etc/robot/config.toml` carries `capture_stall_s = 5.0` (backup `.bak-pre-347`).
+  ⚠️ **It dropped off the hotspot at ~02:05 and was unreachable at session end.**
+- ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.**
+  Deliberate: the routine is 00:00 decaf, which the shipped window would suppress every night. **Do
+  not reconcile in either direction** — `tests/core/test_config.py:504` asserts the repo's window
+  precisely *because* it crosses midnight, and `02:00→09:00` does not.
 - ⚠️ **`mypy` cannot run locally.** `numpy/__init__.pyi` — *"Type statement is only supported in
   Python 3.12 and greater"*. Pre-existing on clean `main`, verified by stashing; CI is unaffected. Do
   **not** "fix" it by re-syncing with `--extra memory` on 3.13 (numpy 1.26.4 has no cp313 wheel and
