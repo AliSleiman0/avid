@@ -107,8 +107,12 @@ jobs:
           path: .artifacts/frames/
           if-no-files-found: ignore
 
-  # P8: the suite under asyncio debug. tests/conftest.py arms on PYTHONASYNCIODEBUG
-  # and fails the run on any slow-callback warning > 50 ms (blocking I/O on the loop).
+  # P8: the suite under asyncio debug. tests/conftest.py arms on PYTHONASYNCIODEBUG,
+  # detects slow callbacks at a 50 ms bar, and fails the run on the ones that are gross
+  # (>= 100 ms, asyncio's own default) or corroborated (the same frame twice in a
+  # session). Grazes are printed above the verdict and do not fail (#328) -- so read the
+  # gate's own block, not the pass count: pytest reports every test as passed and it is
+  # the SESSION that fails.
   async-debug:
     runs-on: ubuntu-latest
     env:
@@ -121,5 +125,5 @@ jobs:
         # `--extra memory` (numpy): the retrieval suite must run here too, so the inline matmul
         # is proven to stay off the loop under the 50 ms slow-callback gate (#120, P8).
       - run: uv sync --dev --frozen --extra memory
-      - name: pytest under asyncio debug (slow-callback > 50 ms fails)
+      - name: pytest under asyncio debug (P8 gate; see tests/conftest.py for the rule)
         run: uv run pytest
