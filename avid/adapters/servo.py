@@ -33,6 +33,7 @@ root or a test fixture (P3); everything else depends on the port, not these clas
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 from avid.core.hal import Axis
@@ -127,6 +128,36 @@ class Pca9685Servo:
     ``to_thread`` cannot itself be interrupted). :meth:`position` reports the last *commanded*
     angle — a servo has no feedback — and :meth:`is_energised` tracks whether the last command
     left a pulse on the channel.
+
+    **Concurrency (#289, the AVID-266 shape).** Every hardware touch happens on a
+    ``to_thread`` worker, so this adapter owns its own serialisation — the caller cannot
+    provide it, and until M9 there was no caller that needed to. One
+    :class:`threading.Lock` guards two things that were both check-then-act:
+
+    * The **lazy ``ServoKit`` construction**. Two workers could each find ``self._kit is
+      None`` and each build one, which on a PCA9685 means two objects re-running
+      ``set_pulse_width_range`` and ``actuation_range`` against the same I2C address —
+      the servo equivalent of AVID-266's leaked framebuffer fds, and quiet in exactly
+      the same way, because the last one built works fine.
+    * The **write and the bookkeeping that records it**, held as one critical section
+      rather than a lock around each. Splitting them is what makes :meth:`position` lie:
+      worker A writes 50°, worker B writes 20°, then A records 50 — and the adapter now
+      reports an angle the horn is not at. Nothing reads it back to notice (a servo has
+      no feedback), so the disagreement survives until someone looks at the robot.
+
+    ⚠️ **What the lock does not buy, and the caller must still keep.** It makes each
+    operation atomic; it does not order them. A :meth:`relax` racing a live sweep can
+    still be followed by that sweep's next step re-energising the channel — the servo
+    ends up held, silently, which is precisely the buzz the M9 gate listens for. The
+    invariant is therefore **one operation per channel in flight at a time**, and
+    ``MotionService`` keeps it by *cancelling* the gesture before relaxing rather than
+    relaxing underneath it. Stated here because #203's preemption is the first code in
+    the project that can break it. (``AlsaSpeaker`` carries the same kind of paragraph
+    for the same kind of reason.)
+
+    Latent until M9 and filed rather than observed: through M2–M8 the only caller was the
+    bring-up demo, which awaited one move at a time. #203 wires preemption, which *is* a
+    second ``move_to`` arriving while the first is still on a worker thread.
     """
 
     def __init__(
@@ -149,6 +180,10 @@ class Pca9685Servo:
         self._kit: Any | None = None
         self._position: dict[int, float] = {axis.channel: axis.min_deg for axis in axes}
         self._energised: dict[int, bool] = {axis.channel: False for axis in axes}
+        # Guards the lazy kit build and every write-plus-bookkeeping pair (#289). A
+        # threading.Lock, not an asyncio one: it is only ever taken on the worker thread
+        # inside asyncio.to_thread, never on the event loop.
+        self._device_lock = threading.Lock()
 
     @property
     def axes(self) -> tuple[Axis, ...]:
@@ -164,6 +199,10 @@ class Pca9685Servo:
         write hops to a worker thread and the awaited sleep between steps is where a
         preempting gesture's cancel takes effect. The channel stays energised until
         :meth:`relax`.
+
+        ``start`` is read outside the lock on purpose: it is this sweep's origin, sampled
+        once, and a concurrent write moving it afterwards is the caller's ordering problem
+        (see the class docstring), not a torn read.
         """
         target = _clamp(angle_deg, self._by_channel[channel])
         start = self._position[channel]
@@ -173,17 +212,17 @@ class Pca9685Servo:
             await asyncio.sleep(step_dt)
             angle = start + (target - start) * i / n
             await asyncio.to_thread(self._write_blocking, channel, angle)
-            self._position[channel] = angle
-            self._energised[channel] = True
 
     async def relax(self, channel: int) -> None:
         """Cut the pulse on *channel* (``angle = None``) so the servo de-energizes (no buzz)."""
         await asyncio.to_thread(self._relax_blocking, channel)
-        self._energised[channel] = False
 
-    def _kit_blocking(self) -> Any:
-        # Lazy, Pi-only import — kept out of module scope so this file loads off-Pi
-        # (P5, ADR-008). The library has no stubs; mypy resolves it via override.
+    def _kit_locked(self) -> Any:
+        """Build the ``ServoKit`` on first use. Caller holds :attr:`_device_lock` (#289).
+
+        Lazy, Pi-only import — kept out of module scope so this file loads off-Pi
+        (P5, ADR-008). The library has no stubs; mypy resolves it via override.
+        """
         if self._kit is None:
             from adafruit_servokit import ServoKit
 
@@ -196,11 +235,23 @@ class Pca9685Servo:
         return self._kit
 
     def _write_blocking(self, channel: int, angle: float) -> None:
-        self._kit_blocking().servo[channel].angle = angle
+        """Write one angle and record it as one critical section (#289).
+
+        The record has to be inside the lock with the write it describes: two workers
+        writing 50° then 20° and recording in the other order leave :meth:`position`
+        reporting an angle the horn is not at, and nothing ever reads a servo back to
+        notice.
+        """
+        with self._device_lock:
+            self._kit_locked().servo[channel].angle = angle
+            self._position[channel] = angle
+            self._energised[channel] = True
 
     def _relax_blocking(self, channel: int) -> None:
         # ServoKit de-energizes a channel when its angle is set to None (no pulse).
-        self._kit_blocking().servo[channel].angle = None
+        with self._device_lock:
+            self._kit_locked().servo[channel].angle = None
+            self._energised[channel] = False
 
     def position(self, channel: int) -> float:
         """Last commanded angle for *channel* (a servo has no feedback; off the port)."""
