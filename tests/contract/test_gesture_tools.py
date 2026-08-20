@@ -214,21 +214,29 @@ async def test_a_declined_call_does_not_extend_its_own_cooldown() -> None:
 
     Otherwise a model retrying politely locks itself out for as long as it keeps asking — the
     rate limit becomes a trap that punishes exactly the behaviour it is trying to encourage.
-    Asserted by refusing a call, advancing past the window, and checking the *next* one is
-    accepted on time rather than pushed out by the refusal."""
+
+    ⚠️ **The clock has to move between the accept and the refusal, or this test cannot fail.**
+    An earlier version refused immediately after accepting, so the two calls shared a monotonic
+    instant and a service that *did* advance on refusal set the deadline to the same value —
+    invisible. Found by neutering the rule and watching this stay green. Half the window is
+    spent before the refusal, so a refusal that reset the timer would push the third call out
+    past its proper moment."""
     service, _servo, bus, clock = await _service(_PAN, _TILT)
+    half = _COOLDOWN_MS / 1000 / 2
     try:
-        await service.look_at(Direction.LEFT, correlation_id=uuid4())  # accepted
+        await service.look_at(Direction.LEFT, correlation_id=uuid4())  # accepted at t=0
+
+        await clock.advance(half)  # t = half: still inside the window
         assert (
             await service.look_at(Direction.RIGHT, correlation_id=uuid4())
             is LookAtResult.COOLING_DOWN
         )
 
-        await clock.advance(_COOLDOWN_MS / 1000)
+        await clock.advance(half)  # t = the full window from the ACCEPTED call
         assert (
             await service.look_at(Direction.RIGHT, correlation_id=uuid4())
             is LookAtResult.ACCEPTED
-        )
+        ), "the refused call extended its own cooldown"
     finally:
         await service.stop()
         await bus.stop()
