@@ -12,6 +12,7 @@ would pass the second and fail the first.
 from __future__ import annotations
 
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -766,3 +767,36 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
     finally:
         shutdown.set()
         await asyncio.wait_for(task, timeout=1.0)
+
+
+def test_main_logs_the_runtime_banner_before_it_does_anything(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#373 — the composition root records what it resolved, and does it FIRST.
+
+    The ordering is the point rather than a detail: this line explains the run, so it is only
+    useful if it appears before the thing it explains. Asserted by stubbing the run loop and
+    checking the banner is already in the log by the time the loop would have been entered.
+    """
+    seen: dict[str, Any] = {}
+
+    async def _stub_run(config: Any) -> int:
+        seen["logged_by_now"] = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("runtime ")
+        ]
+        return 0
+
+    monkeypatch.setattr("avid.main._run", _stub_run)
+    with caplog.at_level(logging.INFO, logger="avid.main"):
+        assert main(["--config", str(_SIM_TOML)]) == 0
+
+    assert len(seen["logged_by_now"]) == 1, "the banner must precede the run loop"
+    line = seen["logged_by_now"][0]
+    # Read from the loaded config, not restated: the sim profile's own values must be the ones
+    # reported, or the banner is describing a robot that is not running.
+    sim = load_config(_SIM_TOML)
+    assert f"realtime_model={sim.ai.model}" in line
+    assert "servo=fake" in line
+    assert "openai_key=" in line

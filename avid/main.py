@@ -57,6 +57,7 @@ from avid.adapters import (
     SystemdNotifier,
 )
 from avid.core import lifecycle
+from avid.core.banner import describe_runtime, format_banner
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
@@ -1015,6 +1016,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
+    # AVID-373. Logged HERE rather than inside ``_run`` so that ``--capture`` gets it too, and
+    # before either path does any work: the first thing in the journal should be what this process
+    # resolved. A run that cannot say what it was is not evidence (SDS §12.1, row F-9), and the
+    # value of this line is entirely in appearing *before* the thing it explains.
+    _log.info(
+        "runtime %s", format_banner(describe_runtime(config, config_path=args.config))
+    )
     if args.capture is not None:
         return asyncio.run(_capture(config, name=args.capture, seconds=args.seconds))
     return asyncio.run(_run(config))
