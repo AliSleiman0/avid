@@ -60,6 +60,8 @@ from avid.domain import (
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
+    RobotState,
+    StateTransitioned,
     plan,
 )
 
@@ -81,10 +83,13 @@ class MotionService:
 
     name = _SOURCE
 
-    def __init__(self, *, bus: EventBus, servo: Servo, clock: Clock) -> None:
+    def __init__(
+        self, *, bus: EventBus, servo: Servo, clock: Clock, idle_relax_ms: int
+    ) -> None:
         self._bus = bus
         self._servo = servo
         self._clock = clock
+        self._idle_relax_s = idle_relax_ms / 1000
 
         # Axis name -> channel, resolved once from the rig's own report. The domain addresses
         # an axis by name (a Keyframe says "tilt"); the port is keyed by channel. This dict is
@@ -97,6 +102,11 @@ class MotionService:
         self._task: asyncio.Task[None] | None = None
         self._current: Gesture | None = None
 
+        # The relax countdown. A separate task from the gesture because it outlives it: the
+        # timer starts when a gesture *ends* and its whole job is to still be there some
+        # seconds later, when nothing else is.
+        self._relax_task: asyncio.Task[None] | None = None
+
         # The monotonic stamp of the newest event acted on — the same staleness guard
         # ``ExpressionService`` carries, and for the same reason. This service reads two
         # queues and the bus guarantees FIFO *per subscriber*, not across them (SDS §3.5), so
@@ -108,6 +118,7 @@ class MotionService:
         # the "effect as fact" mistake ``ExpressionService``'s docstring rules out.
         self.gestures_performed = 0
         self.gestures_preempted = 0
+        self.gestures_aborted = 0
         self.stale_skipped = 0
 
     # --- SDS §9.2 service shape ----------------------------------------------------------
@@ -132,6 +143,7 @@ class MotionService:
         Completes well inside §9.2's 5 s budget: one cancel, one await of an already-cancelled
         task, and one ``relax`` per axis.
         """
+        self._cancel_relax_timer()
         task, self._task = self._task, None
         self._current = None
         if task is not None and not task.done():
@@ -144,12 +156,13 @@ class MotionService:
         """Declare, do not register (SDS §9.2).
 
         ``affect.changed`` is the gesture path — the §3.7.2 arrow this service exists to close.
-        It is the only subscription so far; ``state.transitioned`` joins it with the relax path
-        (#203's second half), read **independently** the way ``ExpressionService`` reads it for
-        the Tier-1 baseline, because a service that needs to know the robot fell asleep can read
-        the operational state for itself rather than being told.
 
-        DROP_OLDEST (SDS §9.1.3): a backlog of stale gestures is worse than no backlog,
+        ``state.transitioned`` is read **independently**, the way ``ExpressionService`` reads it
+        for the Tier-1 baseline: a service that needs to know the robot fell asleep can read the
+        operational state for itself rather than being told by another service. Neither knows
+        the other subscribes, which is P5 working as intended.
+
+        DROP_OLDEST on both (SDS §9.1.3): a backlog of stale gestures is worse than no backlog,
         because performing them in order means the robot is expressing something it stopped
         feeling several seconds ago. The newest intent is the only one worth performing.
         """
@@ -158,6 +171,13 @@ class MotionService:
                 event_type=AffectChanged,
                 handler=cast(Handler, self._on_affect_changed),
                 name="MotionService.affect_changed",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=StateTransitioned,
+                handler=cast(Handler, self._on_state_transitioned),
+                name="MotionService.state_transitioned",
                 policy=OverflowPolicy.DROP_OLDEST,
                 maxsize=DEFAULT_MAXSIZE,
             ),
@@ -173,6 +193,25 @@ class MotionService:
         if gesture is None:
             return
         await self.perform(gesture, correlation_id=event.correlation_id)
+
+    async def _on_state_transitioned(self, event: StateTransitioned) -> None:
+        """Sleep relaxes **immediately**; every other state is the timer's business.
+
+        ⚠️ Deliberately not routed through the idle timer. A robot that has just fallen asleep
+        is a robot nobody is looking at, and waiting out ``idle_relax_ms`` there means humming
+        into an empty room for the one interval where it is most obviously wrong. It also
+        cancels any gesture in flight first — a nod that finishes after the robot is asleep is a
+        contradiction someone will eventually watch happen.
+
+        No staleness guard here, and that is on purpose: relaxing is idempotent and harmless,
+        so a late ``SLEEPING`` costs nothing, while *skipping* one would leave the rig
+        energised for the whole nap.
+        """
+        if event.to is not RobotState.SLEEPING:
+            return
+        self._cancel_relax_timer()
+        await self._preempt(by=None, correlation_id=event.correlation_id)
+        await self._relax_all()
 
     def _is_stale(self, event: Event) -> bool:
         """Whether *event* has been overtaken by one this service already acted on.
@@ -219,6 +258,9 @@ class MotionService:
                 correlation_id,
             )
             return
+        # A gesture starting is the end of being idle. Cancel before arming anything else, so
+        # a timer that came due while this was being set up cannot relax underneath the sweep.
+        self._cancel_relax_timer()
         await self._preempt(by=gesture, correlation_id=correlation_id)
         self._current = gesture
         self._task = spawn(
@@ -274,15 +316,25 @@ class MotionService:
                 axes=moved,
             )
         )
-        for frame in keyframes:
-            await self._servo.move_to(
-                self._channels[frame.axis],
-                frame.angle_deg,
-                duration_ms=frame.duration_ms,
-            )
+        try:
+            for frame in keyframes:
+                await self._servo.move_to(
+                    self._channels[frame.axis],
+                    frame.angle_deg,
+                    duration_ms=frame.duration_ms,
+                )
+        except asyncio.CancelledError:
+            raise  # a preemption, already reported by the preempting caller
+        except Exception as exc:  # noqa: BLE001 — §3.12.3: abort, relax, publish, CONTINUE
+            await self._abort(gesture, exc, correlation_id=correlation_id)
+            return
         elapsed_ms = int((self._clock.monotonic_ns() - started_ns) / _NS_PER_MS)
         self.gestures_performed += 1
         self._forget_if_current()
+        # The rig is now holding whatever angle the gesture ended on. Arm the countdown that
+        # lets go of it — this is the *only* place a normal relax is scheduled from, so the
+        # timer can never be running while a gesture is.
+        self._arm_relax_timer(correlation_id=correlation_id)
         await self._bus.publish(
             MotionGestureCompleted(
                 **envelope(
@@ -292,6 +344,96 @@ class MotionService:
                 duration_ms=elapsed_ms,
             )
         )
+
+    async def _abort(
+        self, gesture: Gesture, exc: BaseException, *, correlation_id: UUID
+    ) -> None:
+        """§3.12.3's I²C-fault path, which the SDS states as a fact rather than a suggestion:
+        *"Abort gesture, relax servo, publish ``motion.gesture_preempted``, continue."*
+
+        The through-line of §3.12.3 is that **nothing except a bad API key at boot is allowed
+        to stop the robot**. A servo fault must not take down a conversation — so this reports,
+        tidies up, and leaves the service live for the next gesture. A test drives a fake that
+        raises mid-sweep and then asserts the *next* gesture still runs, because "it did not
+        crash" and "it still works" are different claims.
+
+        ⚠️ **Every channel is relaxed, not just the one that faulted, and the reason is worth
+        writing down** (the issue asks for the decision either way). Two arguments, both
+        pointing the same way: a half-completed gesture leaves the head at an arbitrary angle
+        rather than a resting one, and a rig that has just failed an I²C write is not a rig
+        anyone should trust to keep holding torque. The cost of being wrong in this direction
+        is a robot that goes limp; in the other, it is a stalled servo on a browning-out rail
+        (R-04), which is the failure this milestone has a whole spike for.
+
+        ``by=None`` is what distinguishes this from an ordinary preemption on the shared
+        catalog row (§9.1.3), and ``ObservabilityService`` logs it at WARNING for the same
+        reason.
+        """
+        self.gestures_aborted += 1
+        self._forget_if_current()
+        _log.error(
+            "gesture %s aborted by a device fault; relaxing every channel "
+            "[correlation_id=%s]",
+            gesture.name.lower(),
+            correlation_id,
+            exc_info=exc,
+        )
+        await self._relax_all()
+        await self._bus.publish(
+            MotionGesturePreempted(
+                **envelope(
+                    clock=self._clock, correlation_id=correlation_id, source=_SOURCE
+                ),
+                gesture=gesture.name.lower(),
+                by=None,
+            )
+        )
+
+    # --- relaxing when idle — the gate's "no buzz" clause ---------------------------------
+
+    def _arm_relax_timer(self, *, correlation_id: UUID) -> None:
+        """Start the countdown to a de-energised rig, replacing any pending one.
+
+        An SG90 holding position buzzes audibly and warms, and **an idle robot that hums is a
+        robot that gets unplugged** — which is the whole of the gate's fourth clause, graded by
+        ear in a quiet room rather than by any assertion here.
+
+        The timer sleeps on the injected ``Clock``, so a test drives it in microseconds rather
+        than waiting out ``idle_relax_ms``. That is the same reason ``Clock`` is a port at all
+        (SDS §9.3): the alternative is a suite nobody runs.
+        """
+        self._cancel_relax_timer()
+        self._relax_task = spawn(
+            self._relax_when_idle(correlation_id=correlation_id),
+            name="MotionService.relax_timer",
+        )
+
+    def _cancel_relax_timer(self) -> None:
+        """Drop a pending countdown. Synchronous — callers are handlers that must not stall.
+
+        ``spawn``'s done-callback ignores ``CancelledError``, so a cancelled timer is a clean
+        teardown rather than a reported death (``PresenceService._cancel_nap``, same shape).
+        """
+        task, self._relax_task = self._relax_task, None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _relax_when_idle(self, *, correlation_id: UUID) -> None:
+        """Wait out the idle window, then let go of every channel.
+
+        ⚠️ **Built so #205 configures it rather than fights it.** Idle micro-motion and
+        "relaxes when idle" are in direct tension — a servo that drifts every few seconds is
+        never idle long enough to relax. Keeping the countdown a plain re-armable task means
+        the drift path can simply *be* a gesture that re-arms it, instead of needing this
+        logic changed or bypassed.
+        """
+        await self._clock.sleep(self._idle_relax_s)
+        _log.debug(
+            "idle for %.1fs — relaxing [correlation_id=%s]",
+            self._idle_relax_s,
+            correlation_id,
+        )
+        await self._relax_all()
 
     # --- the rig -------------------------------------------------------------------------
 
