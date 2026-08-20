@@ -227,13 +227,25 @@ async def test_sqlite_repo_creates_a_missing_parent_directory(
         await repo.aclose()
 
 
+@pytest.mark.p8_load
 async def test_a_few_thousand_rows_stay_off_the_loop(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """AC-5, P8: a few-thousand-row store still touches SQLite only on the writer thread.
-    Under ``PYTHONASYNCIODEBUG=1`` (how CI runs the async-debug gate) any query that blocked
-    the loop >50 ms would fail the run; the bulk insert + the full-table scan below are the
-    load that would trip it if the offload regressed."""
+    Under ``PYTHONASYNCIODEBUG=1`` (how CI runs the async-debug gate) a query that blocked the
+    loop would fail the run; the bulk insert + the full-table scan below are the load that
+    would trip it if the offload regressed.
+
+    ⚠️ **Marked ``p8_load`` (#328): this coroutine's own frame is exempt, and nothing else is.**
+    The 3,000-await insert loop below *is* the stimulus — driving it costs the loop real time on
+    a contended runner, and grading the harness's own driving loop as a robot stall is what
+    #328's title names. That measurement said nothing about the repository either way.
+
+    What the exemption does **not** cover is everything the test actually proves. Every
+    coroutine underneath — ``SqliteFactRepo.add``, ``fetch_live``, the executor plumbing — keeps
+    its own frame and stays fully gated, so an offload regression that put SQLite back on the
+    loop still fails here exactly as before. The marker exempts the *stirring*, never the
+    *reading*."""
     db = tmp_path_factory.mktemp("load") / "robot.db"
     repo = SqliteFactRepo(db_path=db, clock=FakeClock())
     try:

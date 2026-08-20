@@ -126,6 +126,17 @@ _FALSEY = frozenset({"", "0", "false", "False"})
 # one-time device-init boundary from steady-state operation.
 _FIXTURE_FRAME_MARKER = "pytest_asyncio"
 
+# The names of tests marked ``@pytest.mark.p8_load``, filled at collection. A slow callback
+# attributed to one of *these coroutines' own frames* is the harness generating load, not the
+# robot stalling — "a stimulus the harness induces is not a measurement of the robot"
+# (CLAUDE.md §7.1). It is reported and not gated.
+#
+# ⚠️ Deliberately keyed on the marked test's own function name, so it exempts **only** that
+# coroutine. A helper it awaits, a service it drives, or a bus worker running underneath it all
+# keep their own frames and stay fully gated — which is what stops the marker from becoming a
+# blanket amnesty for everything a load test touches.
+_LOAD_COROUTINES: set[str] = set()
+
 
 def _on_real_hardware() -> bool:
     """Whether this run drives real device adapters — mirrors contract ``on_pi()``.
@@ -199,11 +210,30 @@ class _SlowCallbackCatcher(logging.Handler):
     branches are unit-testable.
     """
 
-    def __init__(self, *, on_hardware: bool = _ON_HARDWARE) -> None:
+    def __init__(
+        self,
+        *,
+        on_hardware: bool = _ON_HARDWARE,
+        load_coroutines: set[str] | None = None,
+    ) -> None:
         super().__init__(level=logging.WARNING)
         self._on_hardware = on_hardware
+        self._load_coroutines = (
+            _LOAD_COROUTINES if load_coroutines is None else load_coroutines
+        )
         self.seen: list[_SlowCallback] = []
         self.exempt: list[str] = []
+        self.harness: list[str] = []
+
+    def _is_harness_load(self, message: str) -> bool:
+        """Whether *message* names a ``p8_load`` test's own coroutine frame.
+
+        Matched on ``name()`` so it cannot collide with a same-named module or file, and
+        checked against the collected set rather than a hard-coded list — a test loses the
+        exemption the moment someone removes its marker, which is the property that keeps
+        this reviewable.
+        """
+        return any(f"{name}()" in message for name in self._load_coroutines)
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
@@ -213,6 +243,8 @@ class _SlowCallbackCatcher(logging.Handler):
             return
         if self._on_hardware and _FIXTURE_FRAME_MARKER in message:
             self.exempt.append(message)
+        elif self._is_harness_load(message):
+            self.harness.append(message)
         else:
             self.seen.append(_SlowCallback.parse(message))
 
@@ -263,8 +295,37 @@ def pytest_configure(config: pytest.Config) -> None:
         logging.getLogger("asyncio").addHandler(_catcher)
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Record which coroutines are declared load generators (``@pytest.mark.p8_load``).
+
+    Read at collection because the classifier needs it at *log-emit* time, and a warning
+    carries only a coroutine name — there is no route back to the pytest item from inside a
+    logging handler. Parametrised ids are stripped so ``test_x[fake]`` and ``test_x[real]``
+    both resolve to the coroutine asyncio will name.
+    """
+    for item in items:
+        if item.get_closest_marker("p8_load") is None:
+            continue
+        original = getattr(item, "originalname", None)
+        _LOAD_COROUTINES.add(original or item.name.split("[")[0])
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+
+    # The harness's own load, printed for the same reason the hardware carve-out is: an
+    # exemption nobody can see is indistinguishable from a gate that never fired.
+    if _catcher.harness and reporter is not None:
+        reporter.write_sep(
+            "=", "P8 async-debug gate — harness load (exempt)", yellow=True
+        )
+        reporter.write_line(
+            f"{len(_catcher.harness)} slow-callback warning(s) inside a @pytest.mark.p8_load "
+            "test's own coroutine — the stimulus, not the robot (#328). What each test then "
+            "asserts stays fully gated."
+        )
+        for hit in _catcher.harness:
+            reporter.write_line(f"  - {hit}")
 
     # Report the exempt device-init boundary loudly but without failing — a silent
     # carve-out is a debugging trap; a visible one is an audit trail (AVID-57).
