@@ -83,6 +83,11 @@ async def tools(request: pytest.FixtureRequest) -> AsyncIterator[GestureTools]:
         clock=clock,
         idle_relax_ms=3000,
         look_at_cooldown_ms=_COOLDOWN_MS,
+        # A drift band far longer than any test here, so idle motion cannot perturb a
+        # cooldown assertion — this suite is about the port, not about #205.
+        drift_interval_min_s=600.0,
+        drift_interval_max_s=1200.0,
+        drift_amplitude_frac=0.03,
     )
     await bus.start()
     try:
@@ -159,6 +164,11 @@ async def _service(
         clock=clock,
         idle_relax_ms=3000,
         look_at_cooldown_ms=_COOLDOWN_MS,
+        # A drift band far longer than any test here, so idle motion cannot perturb a
+        # cooldown assertion — this suite is about the port, not about #205.
+        drift_interval_min_s=600.0,
+        drift_interval_max_s=1200.0,
+        drift_amplitude_frac=0.03,
     )
     await bus.start()
     return service, servo, bus, clock

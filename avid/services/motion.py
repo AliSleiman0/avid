@@ -26,6 +26,18 @@ that is ``gesture_for`` (#202) — and it does not decide what a gesture *looks 
 rig, which is ``plan()`` (#201). What is left is scheduling, and scheduling is genuinely all
 that is left.
 
+**Idle micro-motion and "relaxes when idle" are in direct tension, and the resolution is
+option (b)** (#205 AC-2). A robot that holds perfectly still between utterances reads as
+switched off; a servo that drifts every few seconds is never idle long enough to relax. So
+**each drift re-energises, moves, and relaxes immediately after** — the channel carries a pulse
+for a few hundred milliseconds per drift rather than continuously, which satisfies both of the
+gate's clauses literally instead of weakening either. The alternatives were rejected for
+reasons worth keeping: bounding the drift to a window after activity (a) makes the robot go
+*more* still the longer nobody talks to it, which is backwards; suppressing drift once relaxed
+(c) collapses to no micro-motion at all within one idle window, which is the feature not
+existing. A test asserts the rig is de-energised for the **majority** of an idle window,
+because that is the actual claim.
+
 **Capability negotiation reads the adapter, never config** (§3.9.3). The axes come from
 ``Servo.axes``, so the planner is handed the rig that is actually attached rather than a list
 some file claims. ``[motion] axes`` used to be that list; #200 deleted it rather than
@@ -37,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 from collections.abc import Sequence
 from typing import cast
 from uuid import UUID
@@ -74,6 +87,11 @@ _SOURCE = "MotionService"
 
 _NS_PER_MS = 1_000_000
 
+# How long one idle drift takes. Slow enough to read as breathing rather than as a twitch, and
+# slow enough that the first drift after a `look_at` walks the head back toward centre instead
+# of snapping it.
+_DRIFT_MS = 700
+
 
 class MotionService:
     """Turns one affect into servo movement, safely (SDS §3.6.1).
@@ -94,12 +112,23 @@ class MotionService:
         clock: Clock,
         idle_relax_ms: int,
         look_at_cooldown_ms: int,
+        drift_interval_min_s: float,
+        drift_interval_max_s: float,
+        drift_amplitude_frac: float,
+        rng: random.Random | None = None,
     ) -> None:
         self._bus = bus
         self._servo = servo
         self._clock = clock
         self._idle_relax_s = idle_relax_ms / 1000
         self._look_at_cooldown_ns = look_at_cooldown_ms * _NS_PER_MS
+        self._drift_min_s = drift_interval_min_s
+        self._drift_max_s = drift_interval_max_s
+        self._drift_amplitude = drift_amplitude_frac
+        # Injectable only so a test can seed it. ``main`` passes nothing; the drift is meant to
+        # be unpredictable in the room and reproducible in the suite, which are not in tension
+        # as long as the seam is this narrow.
+        self._rng = rng if rng is not None else random.Random()
 
         # Axis name -> channel, resolved once from the rig's own report. The domain addresses
         # an axis by name (a Keyframe says "tilt"); the port is keyed by channel. This dict is
@@ -116,6 +145,12 @@ class MotionService:
         # timer starts when a gesture *ends* and its whole job is to still be there some
         # seconds later, when nothing else is.
         self._relax_task: asyncio.Task[None] | None = None
+
+        # The idle-drift scheduler (#205). Long-lived, unlike the drift movements it arms.
+        self._drift_task: asyncio.Task[None] | None = None
+        # Whether the robot is asleep. Micro-motion never runs then (AC-3) — a sleeping robot
+        # that twitches is a robot that did not go to sleep.
+        self._asleep = False
 
         # When the last look_at was ACCEPTED — the cooldown's origin. Only accepted calls move
         # it: a rejected one extending its own cooldown would lock a politely-retrying model out
@@ -139,12 +174,18 @@ class MotionService:
     # --- SDS §9.2 service shape ----------------------------------------------------------
 
     async def start(self) -> None:
-        """Nothing to launch — the gesture task is spawned on demand, not at boot.
+        """Launch the idle-drift scheduler. Idempotent.
 
-        Deliberately empty rather than absent. A robot that gestured on ``start()`` would move
-        before it had anything to express, and the first thing anyone should see a servo do is
-        nothing.
+        Gestures are still spawned on demand rather than here — a robot that *gestured* on
+        ``start()`` would be expressing something before it had anything to express, and the
+        first thing anyone should see a servo do is nothing. The drift loop is different: its
+        first move is a random interval away, so booting it here costs nothing and means an
+        unattended robot reads as alive without anyone having spoken to it.
         """
+        if self._drift_task is None:
+            self._drift_task = spawn(
+                self._micro_motion(), name="MotionService.micro_motion"
+            )
 
     async def stop(self) -> None:
         """Cancel any gesture in flight and leave every channel de-energised. Idempotent.
@@ -159,6 +200,11 @@ class MotionService:
         task, and one ``relax`` per axis.
         """
         self._cancel_relax_timer()
+        drift, self._drift_task = self._drift_task, None
+        if drift is not None and not drift.done():
+            drift.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drift
         task, self._task = self._task, None
         self._current = None
         if task is not None and not task.done():
@@ -222,7 +268,8 @@ class MotionService:
         so a late ``SLEEPING`` costs nothing, while *skipping* one would leave the rig
         energised for the whole nap.
         """
-        if event.to is not RobotState.SLEEPING:
+        self._asleep = event.to is RobotState.SLEEPING
+        if not self._asleep:
             return
         self._cancel_relax_timer()
         await self._preempt(by=None, correlation_id=event.correlation_id)
@@ -296,9 +343,15 @@ class MotionService:
         """
         task, self._task = self._task, None
         cancelled, self._current = self._current, None
-        if task is None or task.done() or cancelled is None:
+        if task is None or task.done():
             return
         task.cancel()
+        if cancelled is None:
+            # An idle drift, not a gesture (#205 AC-3). Cancelled just the same — there is only
+            # ever one thing moving the rig — but nothing is published: a drift is decoration,
+            # and reporting hundreds of them an hour would make motion.* useless for debugging
+            # the events that matter.
+            return
         self.gestures_preempted += 1
         await self._bus.publish(
             MotionGesturePreempted(
@@ -519,6 +572,95 @@ class MotionService:
             correlation_id,
         )
         await self._relax_all()
+
+    # --- idle micro-motion, and the relax tension it creates (#205) -----------------------
+    #
+    # A robot that holds perfectly still between utterances reads as *switched off*. Small
+    # occasional drift is most of the perceived difference between a prop and a companion, and
+    # it is cheap.
+    #
+    # ⚠️ **It fights the relax clause, and the resolution is deliberate.** The gate asks for
+    # "idle micro-motion" *and* "servo relaxes when idle (no buzz)", and a servo that drifts
+    # every few seconds is never idle long enough to relax — or worse, is re-energised by the
+    # drift and then hums continuously between drifts. #205 lists three ways out; this is (b),
+    # and it satisfies both clauses **literally** rather than by weakening either:
+    #
+    #     each drift re-energises, moves, and relaxes immediately after.
+    #
+    # So the channel carries a pulse for a few hundred milliseconds per drift instead of
+    # continuously, and the rig is de-energised for the overwhelming majority of any idle
+    # window — which a test asserts, because "the majority" is the actual claim and a vaguer
+    # one would be satisfied by a robot that hums half the time.
+    #
+    # (a) — drift for a bounded window then stop — was rejected because it makes the robot go
+    # *more* still the longer nobody talks to it, which is backwards. (c) — suppress drift once
+    # relaxed — collapses to "no micro-motion at all" within one idle window, which is the
+    # feature not existing.
+
+    async def _micro_motion(self) -> None:
+        """Drift at irregular intervals, forever, while the service is running.
+
+        **The interval is randomised and that is a design requirement, not a flourish** (AC-4).
+        A perfectly periodic twitch reads as a *mechanism*, which is worse than stillness: the
+        eye picks up the rhythm in seconds and the illusion inverts. Randomness lives here in
+        the service rather than in :func:`~avid.domain.motion.plan`, which must stay pure —
+        a random planner would make every gesture assertion in the suite a flake, and the
+        failures would look like hardware.
+        """
+        while True:
+            await self._clock.sleep(self._drift_interval_s())
+            if self._asleep or self._task is not None:
+                # Yields to everything: a real gesture in flight, or a sleeping robot. It does
+                # not queue behind them either — a drift deferred is a drift nobody wanted.
+                continue
+            self._drift()
+
+    def _drift_interval_s(self) -> float:
+        """A random wait inside the configured band."""
+        return self._rng.uniform(self._drift_min_s, self._drift_max_s)
+
+    def _drift(self) -> None:
+        """Arm one small movement, through the same slot a gesture uses.
+
+        Sharing the slot is what makes AC-3 true by construction rather than by a check: a real
+        gesture arriving mid-drift cancels it, exactly as it would cancel another gesture,
+        because there is only ever one thing moving the rig.
+
+        ⚠️ **It publishes nothing.** A drift is not a gesture, and filling the ``motion.*``
+        catalog with hundreds of them per hour would make those events useless for debugging the
+        ones that matter — which is what #207 reads them for. ``self._current`` stays ``None``,
+        which is precisely what tells :meth:`_preempt` there is no *gesture* to report.
+        """
+        self._task = spawn(self._drift_once(), name="MotionService.drift")
+
+    async def _drift_once(self) -> None:
+        """Move one axis slightly off centre, then let go of it immediately.
+
+        Amplitude is a fraction of the axis's **declared reach**, never absolute degrees (AC-1):
+        a few degrees on a wide pan and a few degrees on a narrow tilt are not the same gesture.
+        Keep it smaller than instinct suggests — micro-motion that is *noticeable* is a tic;
+        micro-motion that is only noticeable by its absence is the goal.
+
+        Relative to **centre** rather than to wherever the last gesture finished, which also
+        means an idle robot slowly settles back to its resting pose instead of sitting at
+        whatever angle a ``look_at`` left it. That is intended: it is the behaviour that makes
+        an unattended robot look composed rather than abandoned mid-thought.
+        """
+        axis = self._rng.choice(self._servo.axes)
+        offset = self._rng.uniform(-self._drift_amplitude, self._drift_amplitude)
+        angle = axis.centre_deg + offset * axis.half_span_deg
+        try:
+            await self._servo.move_to(axis.channel, angle, duration_ms=_DRIFT_MS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a drift is decoration; it must never be a fault
+            _log.warning("idle drift failed on %s", axis.name, exc_info=True)
+        finally:
+            # Immediately, and in a ``finally``: this is the half that keeps the "no buzz"
+            # clause true, so it has to survive the move failing as well as succeeding.
+            with contextlib.suppress(Exception):
+                await self._servo.relax(axis.channel)
+        self._forget_if_current()
 
     # --- the rig -------------------------------------------------------------------------
 

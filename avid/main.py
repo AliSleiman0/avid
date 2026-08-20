@@ -682,6 +682,9 @@ def _wire_services(
         clock=clock,
         idle_relax_ms=config.motion.idle_relax_ms,
         look_at_cooldown_ms=config.motion.look_at_cooldown_ms,
+        drift_interval_min_s=config.motion.micro_motion_interval_min_s,
+        drift_interval_max_s=config.motion.micro_motion_interval_max_s,
+        drift_amplitude_frac=config.motion.micro_motion_amplitude_frac,
     )
     audio = AudioService(
         bus=bus,
