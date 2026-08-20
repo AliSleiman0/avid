@@ -1,0 +1,60 @@
+# The M11 soak sampler (#383, SDS §12.6) — a SEPARATE unit from robot.service.
+#
+# Install to /etc/systemd/system/soak-sampler.service.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THIS IS ITS OWN PROCESS
+#
+# A sampler living inside the robot dies exactly when the robot dies — it goes
+# blind at the only moment that matters, and a soak reporting 100% uptime
+# because its observer died on day three is the single worst outcome available
+# to this milestone. So it watches from outside, over the loopback control API,
+# and writes to its OWN database (/var/lib/soak/samples.db, not robot.db) so a
+# robot whose storage is the problem still gets measured.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Pico soak sampler (M11 / O5)
+Documentation=https://github.com/AliSleiman0/avid
+# Wants, not Requires: if the robot is stopped the sampler must KEEP RUNNING and
+# keep recording that it is down. A dependency that stopped the observer with
+# its subject would erase precisely the data the soak exists to collect.
+Wants=robot.service
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=/opt/avid
+ExecStart=/opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
+    --mode sample \
+    --config /etc/robot/config.toml \
+    --samples /var/lib/soak/samples.db
+
+# The observer must outlive every failure it observes.
+Restart=always
+RestartSec=10
+SyslogIdentifier=soak-sampler
+
+# ⚠️ Deliberately NO WatchdogSec. This is an instrument, not the product: a
+# watchdog here would add a second thing that can kill a process during the
+# soak, and an instrument that kills itself is worse than one that misses a
+# sample. Restart=always is the whole supervision story.
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Its own state directory — /var/lib/soak, created and owned by systemd. The
+# robot's StateDirectory=robot is untouched, which is the separation the whole
+# design rests on.
+StateDirectory=soak
+# Read-only access to the robot's database for the grade pass. The sampler
+# itself never writes there.
+ReadOnlyPaths=/var/lib/robot
+
+[Install]
+WantedBy=multi-user.target
