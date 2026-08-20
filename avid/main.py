@@ -95,6 +95,7 @@ from avid.services import (
     EpisodeRecorder,
     ExpressionService,
     MemoryService,
+    MotionService,
     ObservabilityService,
     PresenceService,
 )
@@ -610,6 +611,7 @@ def _wire_services(
     clock: Clock,
     state: StateManager,
     display: Display,
+    servo: Servo,
     microphone: Microphone,
     speaker: Speaker,
     vad: VoiceActivityDetector,
@@ -671,6 +673,10 @@ def _wire_services(
     """
     affect = AffectService(bus=bus, clock=clock)
     expression = ExpressionService(bus=bus, display=display, clock=clock)
+    # The other arm of §3.7.2's fan-out, built beside its sibling on purpose: one publish, the
+    # face changes and the servo nods, and neither service knows the other exists (#203). The
+    # rig's inventory is the adapter's own `axes` report, never a config list (§3.9.3).
+    motion = MotionService(bus=bus, servo=servo, clock=clock)
     audio = AudioService(
         bus=bus,
         clock=clock,
@@ -807,6 +813,7 @@ def _wire_services(
     for service in (
         affect,
         expression,
+        motion,
         audio,
         conversation,
         cost_meter,
@@ -826,10 +833,14 @@ def _wire_services(
             )
     # The services that own tasks need lifecycle management: MemoryService's boot rebuild + store close,
     # AudioService's mic loop, ConversationService's per-session pump/mic/idle, EpisodeRecorder's prune
-    # loop + store close. Memory is started first so the index is ready before a session ever asks for
-    # top_facts. The reactive services (the two faces, the cost meter) own no task and are kept alive by
-    # their bound-method subscriptions above.
-    return (memory, audio, conversation, episode_recorder, presence, behavior)
+    # loop + store close, MotionService's in-flight gesture. Memory is started first so the index is
+    # ready before a session ever asks for top_facts. The reactive services (the face, the cost meter)
+    # own no task and are kept alive by their bound-method subscriptions above.
+    #
+    # MotionService is last because `lifecycle.run` stops in reverse order (§9.2): its stop() relaxes
+    # every channel, and a servo left energised is the one failure that outlives the process — so it
+    # should be the first thing unwound, not something waiting behind a database close.
+    return (memory, audio, conversation, episode_recorder, presence, behavior, motion)
 
 
 async def _run(config: Config) -> int:
@@ -896,6 +907,7 @@ async def _run(config: Config) -> int:
         clock=clock,
         state=state,
         display=display,
+        servo=servo,
         camera=camera,
         face_detector=face_detector,
         vision_pool=vision_pool,
@@ -923,12 +935,6 @@ async def _run(config: Config) -> int:
         port=config.api.port,
         behavior=next(s for s in services if isinstance(s, BehaviorService)),
     )
-    # ``servo`` is the last adapter still constructed only to realize the switch and appear in the
-    # health map — moving it is MotionService's job (M9). ``camera`` and ``face_detector`` left this
-    # list at #223: ``PresenceService`` drives them now, which is what the comment here used to
-    # promise. The store, embedder, retriever and text model are owned by ``MemoryService`` (#122);
-    # ``display`` (AVID-73) and ``microphone``/``speaker``/``vad`` (AVID-89) left earlier.
-    _ = servo
     return await lifecycle.run(
         bus=bus,
         clock=clock,

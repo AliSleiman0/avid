@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -288,17 +289,33 @@ def _run_gate(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
 def test_a_lone_graze_leaves_the_session_green_and_says_so(tmp_path: Path) -> None:
     """#328's whole point, end to end.
 
-    Seven CI reds looked exactly like this line: one callback, ~60 ms, a PR that touched
-    nothing asynchronous. The run must now pass — **and must still print the graze**, because
-    a green run with a graze in it is a different fact from a clean one, and that difference is
-    where a real regression would first show."""
+    Seven CI reds looked exactly like this line: one callback, a few milliseconds over the bar,
+    on a PR that touched nothing asynchronous. The run must now pass — **and must still print
+    the graze**, because a green run with a graze in it is a different fact from a clean one,
+    and that difference is where a real regression would first show.
+
+    ⚠️ **The expected verdict is derived from what the run actually measured, not from what the
+    sleep asked for.** That is not defensive padding: an earlier draft asserted a 60 ms sleep
+    would graze, which held in isolation and failed inside the full suite on 3.11, because a
+    loaded box inflated the same sleep past the gross bar. *"The rule was applied correctly to
+    the number that was observed"* is the claim this test can make; *"a sleep of N takes N"* is
+    the claim it cannot — and the gate itself now exists because that distinction was missed.
+    """
     result = _run_gate(
         tmp_path, "async def test_stalls_once() -> None:\n    time.sleep(0.06)\n"
     )
     output = result.stdout + result.stderr
-    assert result.returncode == 0, output
-    assert "grazes (reported, not gated)" in output
-    assert "P8 async-debug gate FAILED" not in output
+    measured = [float(value) for value in re.findall(r"took ([0-9.]+) seconds", output)]
+    assert measured, f"the synthetic stall produced no slow callback at all:\n{output}"
+    assert len(measured) == 1, f"expected one warning, got {measured}"
+
+    if measured[0] >= _GROSS:  # the box inflated it, and the gate must then convict
+        assert result.returncode != 0, output
+        assert "asyncio's own default bar" in output
+    else:
+        assert result.returncode == 0, output
+        assert "grazes (reported, not gated)" in output
+        assert "P8 async-debug gate FAILED" not in output
 
 
 def test_a_gross_stall_still_fails_the_session(tmp_path: Path) -> None:

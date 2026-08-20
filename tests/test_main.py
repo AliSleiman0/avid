@@ -44,7 +44,7 @@ from avid.adapters import (
 from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
-from avid.core.hal import DisplayFrame
+from avid.core.hal import Axis, DisplayFrame
 from avid.core.ports import AffectTools
 from avid.core.state_manager import StateManager
 from avid.domain import (
@@ -63,6 +63,9 @@ from avid.domain import (
     MemoryFactDeleted,
     MemoryFactStored,
     MemoryFactSuperseded,
+    MotionGestureCompleted,
+    MotionGesturePreempted,
+    MotionGestureStarted,
     StateTransitioned,
     SystemDegradedEntered,
     SystemDegradedExited,
@@ -98,6 +101,7 @@ from avid.services import (
     CueBank,
     EpisodeRecorder,
     MemoryService,
+    MotionService,
     PresenceService,
 )
 
@@ -152,7 +156,24 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ObservabilityService.state_transitioned",
     "ObservabilityService.trigger_fired",
     "ObservabilityService.trigger_disabled",
+    # MotionService (#203): the other arm of §3.7.2's fan-out, and the third subscriber of
+    # affect.changed after ExpressionService. Its catalog row already named it — "MotionService
+    # (M9)" — so this is that tag discharged, not a new edge.
+    "MotionService.affect_changed",
+    # And the three motion.* rows, whose only §9.1.3 subscriber is Observability. Without them
+    # the events publish into an empty room and #207's AC-3 — preemption confirmed "by log AND
+    # by eye" — has no log to read.
+    "ObservabilityService.gesture_started",
+    "ObservabilityService.gesture_completed",
+    "ObservabilityService.gesture_preempted",
 }
+
+# The 2 DoF rig both shipped profiles declare (#200) — built here rather than loaded so these
+# wiring tests do not silently start depending on a TOML they are not about.
+_AXES = (
+    Axis(name="pan", channel=0, min_deg=30.0, max_deg=150.0),
+    Axis(name="tilt", channel=13, min_deg=60.0, max_deg=120.0),
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SIM_TOML = _REPO_ROOT / "config" / "sim.toml"
@@ -454,6 +475,12 @@ def test_main_wires_and_delegates_to_lifecycle(
         EpisodeRecorder,
         PresenceService,
         BehaviorService,
+        # MotionService owns the in-flight gesture task, so it is returned like the rest —
+        # and it is LAST because lifecycle.run stops in reverse (§9.2). Its stop() relaxes
+        # every channel, and a servo left energised is the one failure that outlives the
+        # process, so it should be the first thing unwound rather than waiting behind a
+        # database close.
+        MotionService,
     ]
 
 
@@ -530,6 +557,12 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         # frames — and three of those disable proactivity and blame the user for it.
         AudioCaptureStalled,
         AudioCaptureResumed,
+        # The three motion.* rows (#203). New event TYPES here, unlike MotionService's own
+        # affect.changed subscription — which added a subscriber to a type that was already
+        # in this set, and so would have been invisible in this assertion.
+        MotionGestureStarted,
+        MotionGestureCompleted,
+        MotionGesturePreempted,
     }
 
     subs = [sub for subs in bus._subs.values() for sub in subs]
@@ -578,6 +611,7 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         display=FakeDisplay(
             out_dir=Path(config.display.frames_dir), resolution=(64, 48)
         ),
+        servo=FakeServo(axes=_AXES),
         microphone=FakeMicrophone(
             sample_rate=16000, channels=1, chunk_ms=20, pcm=b"\x00\x00"
         ),
@@ -596,13 +630,16 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
         config=config,
     )
-    memory, _audio, conversation, _episode, presence, _behavior = services
+    memory, _audio, conversation, _episode, presence, _behavior, motion = services
     assert isinstance(memory, MemoryService)
     assert isinstance(conversation, ConversationService)
     # PresenceService owns a loop, so it is returned for the lifecycle to start/stop — the
     # same reason AudioService is (#223, SDS §9.2). Asserted positionally here because the
     # tuple's shape is the contract lifecycle.run consumes.
     assert isinstance(presence, PresenceService)
+    # MotionService is returned for the same reason and asserted positionally for the same
+    # reason: the tuple's shape is the contract lifecycle.run consumes (#203).
+    assert isinstance(motion, MotionService)
     # the ConversationService names the port; the concrete injected is the wired MemoryService
     assert conversation._memory is memory
     # ...and the same for AffectTools (AVID-214). The wired AffectService is not in the returned
@@ -679,6 +716,7 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         clock=clock,
         state=state,
         display=display,
+        servo=FakeServo(axes=_AXES),
         microphone=FakeMicrophone(
             sample_rate=16000, channels=1, chunk_ms=20, pcm=b"\x00\x00"
         ),
