@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = ddd8e46` · `v0.M10.0` tagged · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = de8a7bb` · `v0.M10.0` tagged · gh `AliSleiman0`.
 
 ## ⭐ Next session — M9 is CODE-COMPLETE. What is left needs the Pi and a person.
 
@@ -81,6 +81,44 @@ while both were 180.
 AC-1 ("affect drives gesture") probably cannot be watched on the face and the head at once.
 **Decide which half is read from the log before starting**, not mid-run.
 
+### ⚠️ If the Pi is not reachable, do these instead — in this order
+
+The bench evening is the plan, but the Pi dropped off the hotspot at ~02:05 on 2026-08-20 and
+nothing has been run on it since. **None of the following needs the rig**, and the first is nearly
+free.
+
+**1. 🎁 Collect M10's AC-0 evidence. One command, and it costs nothing.** M10 was sealed **one
+criterion short, on the record**: AC-0 (the robot initiates on multiple unattended mornings) was
+never run. The trigger is *still armed* — 23:55 EEST daily, `ignore_streak 0`, nothing staged — so
+every morning the robot is powered produces evidence for free:
+
+```sh
+ssh alisleiman0@<pi> 'sudo python3 -c "
+import sqlite3
+c=sqlite3.connect(\"/var/lib/robot/robot.db\")
+for r in c.execute(\"select id,considered_at,outcome,reason,utterance,user_reaction from proactive_log order by id desc limit 5\"): print(r)"'
+```
+
+An **id ≥ 16** marked `delivered` on an untouched night is AC-0's first real morning. **Append it
+to `docs/journal.md` even though `v0.M10.0` has shipped** — a milestone sealed with a named gap is
+honest; leaving the gap unfilled once the evidence is lying there is not. (This requires only SSH,
+not the servo rig.)
+
+**2. #310 — `set_affect` is unreliable, and it now caps M9.** §6.8's own contingency is triggered.
+#202 maps affect → gesture, so a robot that cannot infer affect from what it just said will only
+ever nod on the Tier-1 state baseline. #198 says explicitly this does not block M9 — but it is the
+difference between the milestone *working* and the milestone *reading as alive*, and it is the
+highest-value non-hardware issue open.
+
+**3. M11 is the critical path and M9 is not.** PMP §5.4 runs M6 → M10 → M11; §7.3 names M9 as the
+first cut. M11's 30-day soak is also what would retire M10's unrun AC-0 as a side effect. If the
+rig stays out of reach for a while, **starting M11 is more defensible than waiting** — M9 stays
+code-complete and seals whenever the bench is free.
+
+⚠️ **Do not seal M9 from a laptop.** Every remaining AC is written to require the physical head to
+move, and `docs/demos/motion_pi.py` exits non-zero while any of them is unrecorded precisely so
+that a green run cannot be mistaken for a sealed milestone.
+
 ### What M9 changed that a later reader will trip over
 
 - **`Axis` moved into `domain/motion.py`** and is re-exported from `core/hal.py` — the ADR-013
@@ -97,7 +135,7 @@ AC-1 ("affect drives gesture") probably cannot be watched on the face and the he
 ## Current state
 
 - **M9 code-complete, not sealed.** Seven issues merged this session (#199–#205), plus #289, #356
-  and #328. Zero open PRs. `main = ddd8e46`.
+  and #328. Zero open PRs. `main = de8a7bb`.
 - **M10 sealed as `v0.M10.0`.** Nine of eleven milestones tagged; M9 and M11 remain.
 - **The suite is 1668 passed / 65 skipped**, on 3.11 and 3.13. `avid/domain/motion.py`,
   `avid/services/motion.py`, `avid/services/tools.py` and `avid/core/ports.py` are all at 100%.
@@ -110,6 +148,10 @@ AC-1 ("affect drives gesture") probably cannot be watched on the face and the he
   target. `uv run --frozen --exact mypy avid` reproduces CI exactly.
 - ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.**
   Deliberate. **Do not reconcile in either direction.**
+- ⚠️ **One process slip this session, owned rather than buried:** the previous handoff commit
+  (`de8a7bb`) was pushed **directly to `main`** instead of through a PR. The content was fine; the
+  ritual was not followed. Branch protection is off (it needs Pro), so nothing stopped it — which
+  is a reason for care rather than a licence. This edit went through a PR.
 
 ## What just shipped (2026-08-20, M9)
 
