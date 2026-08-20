@@ -29,6 +29,9 @@ from avid.core.event_bus import DEFAULT_MAXSIZE, Handler, OverflowPolicy, Subscr
 from avid.domain import (
     BehaviorTriggerDisabled,
     BehaviorTriggerFired,
+    MotionGestureCompleted,
+    MotionGesturePreempted,
+    MotionGestureStarted,
     StateTransitioned,
 )
 
@@ -49,6 +52,7 @@ class ObservabilityService:
         self.transitions = 0
         self.triggers_fired = 0
         self.triggers_disabled = 0
+        self.gestures = 0
 
     async def start(self) -> None:
         """Nothing to start. This service owns no task — it is purely reactive."""
@@ -90,6 +94,27 @@ class ObservabilityService:
                 policy=OverflowPolicy.DROP_OLDEST,
                 maxsize=DEFAULT_MAXSIZE,
             ),
+            Subscription(
+                event_type=MotionGestureStarted,
+                handler=cast(Handler, self._on_gesture_started),
+                name="ObservabilityService.gesture_started",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=MotionGestureCompleted,
+                handler=cast(Handler, self._on_gesture_completed),
+                name="ObservabilityService.gesture_completed",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=MotionGesturePreempted,
+                handler=cast(Handler, self._on_gesture_preempted),
+                name="ObservabilityService.gesture_preempted",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
         )
 
     async def _on_transition(self, event: StateTransitioned) -> None:
@@ -125,6 +150,49 @@ class ObservabilityService:
             level=logging.WARNING,
             trigger_id=event.trigger_id,
             ignore_streak=event.ignore_streak,
+        )
+
+    async def _on_gesture_started(self, event: MotionGestureStarted) -> None:
+        """§9.1.3 names Observability as the only subscriber of all three ``motion.*`` rows.
+
+        Without this the events would publish into an empty room — and #207's AC-3 grades
+        preemption *"by log **and** by eye"*, which needs a log to read. The axes are named
+        because they are the negotiated result: on a rig with no tilt a nod moves ``pan``, and
+        that one field is the difference between a real nod and the documented fallback.
+        """
+        self.gestures += 1
+        self._emit(
+            "motion.gesture_started",
+            event,
+            gesture=event.gesture,
+            axes=[axis.name for axis in event.axes],
+        )
+
+    async def _on_gesture_completed(self, event: MotionGestureCompleted) -> None:
+        self._emit(
+            "motion.gesture_completed",
+            event,
+            gesture=event.gesture,
+            duration_ms=event.duration_ms,
+        )
+
+    async def _on_gesture_preempted(self, event: MotionGesturePreempted) -> None:
+        """⚠️ ``by=None`` is §3.12.3's I²C-fault abort, not a missing field — so it is logged at
+        WARNING, while an ordinary interruption is INFO.
+
+        The two share a catalog row deliberately, and this is the seam where that decision has
+        to be unpicked: a newer gesture cutting an older one is the design working, and a rig
+        faulting mid-gesture is hardware trouble. A single level for both would bury the second
+        in a week of the first.
+        """
+        level = logging.INFO if event.by is not None else logging.WARNING
+        self._emit(
+            "motion.gesture_preempted",
+            event,
+            level=level,
+            gesture=event.gesture,
+            by=event.by,
+            cause="superseded" if event.by is not None else "fault_abort",
         )
 
     def _emit(

@@ -17,10 +17,14 @@ import pytest
 from avid.adapters.clock import FakeClock
 from avid.core.envelope import envelope
 from avid.domain import (
+    Axis,
     BehaviorProactiveDelivered,
     BehaviorProactiveSuppressed,
     BehaviorTriggerDisabled,
     BehaviorTriggerFired,
+    MotionGestureCompleted,
+    MotionGesturePreempted,
+    MotionGestureStarted,
     RobotState,
     StateTransitioned,
     Trigger,
@@ -47,14 +51,21 @@ def _lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
     ]
 
 
-async def test_it_subscribes_to_the_three_rows_that_had_no_consumer() -> None:
-    """§9.1.3 lists an ``Observability`` subscriber against these three and nothing had ever
-    registered one — ``state.transitioned``'s row is even tagged ``(M10)``."""
+async def test_it_subscribes_to_every_row_that_names_it_and_nothing_else() -> None:
+    """§9.1.3 lists an ``Observability`` subscriber against these six and nothing had ever
+    registered one — ``state.transitioned``'s row is even tagged ``(M10)``.
+
+    The three ``motion.*`` rows joined at #203, and they are the sharper case: Observability is
+    their **only** subscriber, so without this the events would publish into an empty room. #207's
+    AC-3 grades preemption *"by log **and** by eye"* — the log half is this line."""
     names = {sub.name for sub in ObservabilityService().subscriptions()}
     assert names == {
         "ObservabilityService.state_transitioned",
         "ObservabilityService.trigger_fired",
         "ObservabilityService.trigger_disabled",
+        "ObservabilityService.gesture_started",
+        "ObservabilityService.gesture_completed",
+        "ObservabilityService.gesture_preempted",
     }
 
 
@@ -162,3 +173,90 @@ async def test_it_owns_no_task_and_stops_idempotently() -> None:
     await service.stop()
     await service.stop()
     assert service.name == "ObservabilityService"
+
+
+# --- the motion.* rows (#203, SDS §9.1.3) ------------------------------------
+
+
+async def test_a_gesture_start_records_the_axes_it_actually_drove(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``axes`` is the **negotiated** result, not the rig's inventory (§3.9.3).
+
+    Which is what makes the line worth logging at all: on a rig with no tilt a nod moves
+    ``pan``, so this one field separates a real tilt nod from #201's documented fallback
+    without anyone re-deriving it from the plan. Reading it out of the log is how #207 tells
+    the two apart on a rig where the display cannot be attached at the same time as the servo.
+    """
+    clock = FakeClock()
+    service = ObservabilityService()
+    with caplog.at_level(logging.INFO, logger="avid.observability"):
+        await service._on_gesture_started(
+            MotionGestureStarted(
+                **_env(clock),
+                gesture="nod",
+                axes=(Axis(name="tilt", channel=13, min_deg=60.0, max_deg=120.0),),
+            )
+        )
+
+    (line,) = _lines(caplog)
+    assert line["event"] == "motion.gesture_started"
+    assert line["gesture"] == "nod"
+    assert line["axes"] == ["tilt"]
+    assert line["correlation_id"] == str(_CORR)
+    assert service.gestures == 1
+
+
+async def test_an_ordinary_preemption_is_info_and_a_fault_abort_is_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """⚠️ One catalog row, two facts — and this is the seam where that has to be unpicked.
+
+    §9.1.3 gives ``gesture_preempted`` two causes deliberately: ``by="shake"`` is a newer
+    gesture interrupting an older one, which is **the design working** and happens constantly.
+    ``by=None`` is §3.12.3's I²C-fault abort — the rig failed mid-gesture. A single level for
+    both would bury the second in a week of the first, which is the failure mode §10.5 already
+    names for ``trigger_disabled``: a fact about the *hardware* has to be visible to someone
+    reading a week of journal.
+
+    The ``cause`` field exists so a log processor can filter without knowing that ``None``
+    means anything special — ``by`` is the normative field, ``cause`` is what makes it legible.
+    """
+    clock = FakeClock()
+    service = ObservabilityService()
+    with caplog.at_level(logging.INFO, logger="avid.observability"):
+        await service._on_gesture_preempted(
+            MotionGesturePreempted(**_env(clock), gesture="nod", by="shake")
+        )
+        await service._on_gesture_preempted(
+            MotionGesturePreempted(**_env(clock), gesture="nod", by=None)
+        )
+
+    superseded, aborted = _lines(caplog)
+    assert (superseded["by"], superseded["cause"]) == ("shake", "superseded")
+    assert (aborted["by"], aborted["cause"]) == (None, "fault_abort")
+    levels = [
+        record.levelno
+        for record in caplog.records
+        if record.name == "avid.observability"
+    ]
+    assert levels == [logging.INFO, logging.WARNING]
+
+
+async def test_a_completed_gesture_records_its_measured_duration(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The figure #207 reads back against ``plan()``'s prediction.
+
+    A measured duration that drifts from the planned one is a loop under load — which is
+    exactly what AC-8 is looking for when it asks whether the servo path degrades the voice
+    path. Logging the number is what makes that question answerable after the fact."""
+    clock = FakeClock()
+    service = ObservabilityService()
+    with caplog.at_level(logging.INFO, logger="avid.observability"):
+        await service._on_gesture_completed(
+            MotionGestureCompleted(**_env(clock), gesture="nod", duration_ms=880)
+        )
+
+    (line,) = _lines(caplog)
+    assert (line["event"], line["duration_ms"]) == ("motion.gesture_completed", 880)

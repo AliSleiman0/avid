@@ -14,6 +14,7 @@ from avid.services.cue_bank import CUE_FILES, CueBank
 from avid.services.episode_recorder import EpisodeRecorder
 from avid.services.expression import ExpressionService
 from avid.services.memory import MemoryService
+from avid.services.motion import MotionService
 from avid.services.observability import ObservabilityService
 from avid.services.presence import PresenceService
 from avid.services.tools import CAPABILITY_INSTRUCTIONS, TOOL_SCHEMAS
@@ -42,6 +43,8 @@ __all__ = [
     "ExpressionService",
     # The sole writer/reader of persistent memory — §9.1.4 direct-call surface (#122)
     "MemoryService",
+    # The mover (#203) — the other arm of §3.7.2's fan-out from ExpressionService
+    "MotionService",
     "ObservabilityService",
     # The camera loop — the only clock-driven service; publishes vision.* decisions (#223)
     "PresenceService",
