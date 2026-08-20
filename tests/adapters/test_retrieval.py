@@ -360,19 +360,34 @@ async def test_retrieve_on_an_empty_index_returns_nothing_but_still_reports(
 class _CheapEmbedder:
     """A deterministic embedder with negligible per-call cost. AC-9 measures the *scan*, not the
     model, so the FakeEmbedder's per-token Gaussians (real, but heavy at thousands of facts) would
-    only load the test loop, not the retriever. A one-hot in a modest dimension is stable within a
-    run and gives distinct texts distinct vectors — all the scan test needs."""
+    only load the test loop, not the retriever.
+
+    ⚠️ **This used to be ``vector[hash(text) % dimensions] = 1.0`` and its docstring claimed to
+    give "distinct texts distinct vectors". Neither half held.** Python randomises string hashing
+    per process, so the mapping changed every run; and at 64 dimensions a handful of texts collide
+    by birthday anyway. A collision hands a *distractor* the query's exact vector — cosine 1.0 —
+    which is enough to outrank a genuine match. That is how `test_the_keyword_branch_can_change_a_result`
+    (#264) came to fail on **3 of 33 hash seeds**: green locally and on CI's 3.11 leg, red on 3.13,
+    for reasons that had nothing to do with the code under test.
+
+    Now each distinct text is assigned the **next free dimension** in first-seen order. Collision-
+    free by construction while distinct texts ≤ ``dimensions``, and identical on every run and
+    every interpreter. Beyond ``dimensions`` it wraps — the scale test feeds it 2,000 texts and
+    cares only that the scan is cheap, not that the vectors are unique.
+    """
 
     def __init__(self, *, dimensions: int = 64) -> None:
         self._dimensions = dimensions
+        self._slots: dict[str, int] = {}
 
     @property
     def dimensions(self) -> int:
         return self._dimensions
 
     async def embed(self, text: str) -> Sequence[float]:
+        slot = self._slots.setdefault(text, len(self._slots) % self._dimensions)
         vector = [0.0] * self._dimensions
-        vector[hash(text) % self._dimensions] = 1.0
+        vector[slot] = 1.0
         return vector
 
 
