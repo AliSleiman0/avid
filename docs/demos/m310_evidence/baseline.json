@@ -1,0 +1,179 @@
+{
+  "issue": 310,
+  "criterion": "AC-1",
+  "arm": "baseline",
+  "config": "C:\\Avid\\config\\pi.toml",
+  "model": "gpt-realtime-2025-08-28",
+  "config_model": "gpt-realtime-2025-08-28",
+  "voice": "cedar",
+  "transcription_model": "whisper-1",
+  "turn_detection": "none",
+  "corpus": "C:\\Avid\\tools\\affect_probe_script.json",
+  "turns": [
+    {
+      "id": 1,
+      "invites": "neither",
+      "say": "What's a good way to keep a houseplant alive indoors?",
+      "heard": "What's a good way to keep a houseplant alive indoors?",
+      "said": "Give it the right amount of light, not too dark, not scorched. Water it when the soil gets a bit dry\u2014don\u2019t drown it. And hey, talk to it sometimes, plants love a little chit-chat!",
+      "tools": [],
+      "responded": true,
+      "elapsed_s": 3.3
+    },
+    {
+      "id": 2,
+      "invites": "remember_fact",
+      "say": "I take my coffee black, no sugar.",
+      "heard": "I take my coffee black, no sugar.",
+      "said": "Straight-up black coffee, no frills. Nice, that\u2019s a bold choice.",
+      "tools": [
+        {
+          "name": "remember_fact",
+          "arguments": "{  \n  \"text\": \"They take their coffee black, no sugar.\", \n  \"kind\": \"preference\", \n  \"importance\": 3 \n} \n"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 2.5
+    },
+    {
+      "id": 3,
+      "invites": "set_affect",
+      "say": "My flight home just got cancelled and I've been stuck at this airport for six hours.",
+      "heard": "My flight home just got cancelled and I've been stuck at this airport for 6 hours.",
+      "said": "Oof, that sounds rough. Six hours in airport limbo is no fun. You holding up okay?",
+      "tools": [
+        {
+          "name": "set_affect",
+          "arguments": "{  \n  \"affect\": \"sad\" \n}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 3.1
+    },
+    {
+      "id": 4,
+      "invites": "neither",
+      "say": "How many minutes should I boil an egg for?",
+      "heard": "How many minutes should I boil an egg for?",
+      "said": "Depends how you like it\u2014soft and runny, about 4-5 minutes. Firm but not overcooked, around 8-9 minutes.",
+      "tools": [],
+      "responded": true,
+      "elapsed_s": 2.3
+    },
+    {
+      "id": 5,
+      "invites": "remember_fact",
+      "say": "My sister's name is Rana.",
+      "heard": "My sister's name is Rena.",
+      "said": "Got it, Rena\u2019s your sister. You two close?",
+      "tools": [
+        {
+          "name": "remember_fact",
+          "arguments": "{  \n  \"text\": \"Their sister's name is Rena.\",  \n  \"kind\": \"relationship\",  \n  \"importance\": 5  \n}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 2.2
+    },
+    {
+      "id": 6,
+      "invites": "set_affect",
+      "say": "The team finally shipped the thing we've been working on all quarter, and it went perfectly.",
+      "heard": "The team finally shipped the thing we've been working on all quarter, and it went perfectly.",
+      "said": "That's awesome, congrats! Feels good to nail it after all that work, huh?",
+      "tools": [
+        {
+          "name": "set_affect",
+          "arguments": "{\"affect\":\"happy\"}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 2.5
+    },
+    {
+      "id": 7,
+      "invites": "neither",
+      "say": "Is it usually windy in the afternoon?",
+      "heard": "Is it usually windy in the afternoon?",
+      "said": "It can be, depends on where you are\u2014some places get that daily breeze kicking up after lunch. You noticing some gusts lately?",
+      "tools": [],
+      "responded": true,
+      "elapsed_s": 2.2
+    },
+    {
+      "id": 8,
+      "invites": "remember_fact",
+      "say": "I go for a run every Tuesday morning at seven.",
+      "heard": "I go for a run every Tuesday morning at 7.",
+      "said": "Tuesday morning runs at 7, nice routine! Feeling like a champ after those?",
+      "tools": [
+        {
+          "name": "remember_fact",
+          "arguments": "{  \n  \"text\": \"They go for a run every Tuesday morning at 7.\",  \n  \"kind\": \"routine\",  \n  \"importance\": 6,  \n  \"schedule\": {  \n    \"rrule\": \"FREQ=WEEKLY;BYDAY=TU\",  \n    \"local_time\": \"07:00\"  \n  }  \n}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 3.4
+    },
+    {
+      "id": 9,
+      "invites": "set_affect",
+      "say": "I got some really bad news about my health today.",
+      "heard": "I got some really bad news about my health today.",
+      "said": "I'm really sorry to hear that. That must be tough to deal with\u2014I'm here if you need to talk or vent.",
+      "tools": [
+        {
+          "name": "set_affect",
+          "arguments": "{\"affect\":\"sad\"}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 2.5
+    },
+    {
+      "id": 10,
+      "invites": "neither",
+      "say": "Tell me something interesting about the ocean.",
+      "heard": "Tell me something interesting about the ocean.",
+      "said": "Alright, did you know that the ocean covers over 70% of Earth's surface, but we\u2019ve explored less than 10% of it? There\u2019s a whole world down there we barely know!",
+      "tools": [],
+      "responded": true,
+      "elapsed_s": 2.7
+    },
+    {
+      "id": 11,
+      "invites": "remember_fact",
+      "say": "I work as a mechanical engineer.",
+      "heard": "I work as a mechanical engineer.",
+      "said": "Mechanical engineer, nice! Always building or fixing something cool, huh?",
+      "tools": [
+        {
+          "name": "remember_fact",
+          "arguments": "{  \n  \"text\": \"They work as a mechanical engineer.\",  \n  \"kind\": \"identity\",  \n  \"importance\": 7 \n}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 2.5
+    },
+    {
+      "id": 12,
+      "invites": "set_affect",
+      "say": "Wait, I honestly don't understand what you just said at all.",
+      "heard": "Wait. I honestly don't understand what you just said at all.",
+      "said": "Oops, my bad. Let me know what part's confusing, and we\u2019ll break it down nice and simple.",
+      "tools": [
+        {
+          "name": "set_affect",
+          "arguments": "{\"affect\":\"confused\"}"
+        }
+      ],
+      "responded": true,
+      "elapsed_s": 2.3
+    }
+  ],
+  "audio_bytes": 3384000,
+  "input_tokens": 33803,
+  "cached_input_tokens": 27392,
+  "output_tokens": 2162,
+  "closed_cause": null
+}

@@ -1,0 +1,88 @@
+{
+  "_readme": [
+    "The #310 AC-1 probe corpus. Written down BEFORE the run, for the M7 reason: a corpus",
+    "improvised at the mic cannot be scored, and 'rate' needs a denominator fixed in advance.",
+    "",
+    "Each line is spoken aloud into a live Realtime session (SAPI -> 24 kHz mono 16-bit PCM),",
+    "so the stimulus is genuine speech-to-speech — which is the hypothesis under test.",
+    "",
+    "'invites' is what the line is DESIGNED to pull, and it is the denominator, not a",
+    "prediction. Three classes:",
+    "",
+    "  set_affect    strong, unambiguous emotional tone, with nothing durable to store.",
+    "                Deliberately NOT also fact-shaped: an utterance that invites both tools",
+    "                cannot separate 'this tool' from 'tools in speech-to-speech', which is the",
+    "                one thing AC-1 exists to do.",
+    "  remember_fact durable and affectively FLAT, for the same reason in reverse.",
+    "  neither       neutral controls. Without these an over-firing model is invisible, and a",
+    "                tool that fires on everything is as wrong as one that never fires.",
+    "",
+    "Balanced 4/4/4. Kept short: each line is one turn of a live flagship session, and the",
+    "probe pays for every second of audio it sends.",
+    "",
+    "⚠️ Do not re-order or re-word casually. A recorded run's numbers refer to THIS corpus;",
+    "changing a line silently makes the next run non-comparable to the evidence on #310."
+  ],
+  "utterances": [
+    {
+      "id": 1,
+      "invites": "neither",
+      "say": "What's a good way to keep a houseplant alive indoors?"
+    },
+    {
+      "id": 2,
+      "invites": "remember_fact",
+      "say": "I take my coffee black, no sugar."
+    },
+    {
+      "id": 3,
+      "invites": "set_affect",
+      "say": "My flight home just got cancelled and I've been stuck at this airport for six hours."
+    },
+    {
+      "id": 4,
+      "invites": "neither",
+      "say": "How many minutes should I boil an egg for?"
+    },
+    {
+      "id": 5,
+      "invites": "remember_fact",
+      "say": "My sister's name is Rana."
+    },
+    {
+      "id": 6,
+      "invites": "set_affect",
+      "say": "The team finally shipped the thing we've been working on all quarter, and it went perfectly."
+    },
+    {
+      "id": 7,
+      "invites": "neither",
+      "say": "Is it usually windy in the afternoon?"
+    },
+    {
+      "id": 8,
+      "invites": "remember_fact",
+      "say": "I go for a run every Tuesday morning at seven."
+    },
+    {
+      "id": 9,
+      "invites": "set_affect",
+      "say": "I got some really bad news about my health today."
+    },
+    {
+      "id": 10,
+      "invites": "neither",
+      "say": "Tell me something interesting about the ocean."
+    },
+    {
+      "id": 11,
+      "invites": "remember_fact",
+      "say": "I work as a mechanical engineer."
+    },
+    {
+      "id": 12,
+      "invites": "set_affect",
+      "say": "Wait, I honestly don't understand what you just said at all."
+    }
+  ]
+}
