@@ -33,7 +33,7 @@ the point. "I followed the principle" is not a claim you get to make — CI chec
 | **P5** | **No module reaches through another.** `ai` may not import `motion`. Cross-module effect happens via the bus. | Per-module `import-linter` contract. |
 | **P6** | **Every port has a fake.** A port without a working simulator adapter is an incomplete port. | Contract-test suite runs against every adapter, real and fake. |
 | **P7** | **Configuration is injected, never read.** No module calls `os.environ` or reads a file. It receives a typed config object. | CI grep for `os.environ`/`os.getenv` outside `core/config.py`. |
-| **P8** | **Blocking I/O never touches the event loop.** | `PYTHONASYNCIODEBUG=1` in CI; slow-callback warning **> 50 ms** fails the run. |
+| **P8** | **Blocking I/O never touches the event loop.** | `PYTHONASYNCIODEBUG=1` in CI at a **50 ms** bar; a slow callback fails the run when it is **gross** (≥ 100 ms) or **recurs** on the same frame (#328). |
 
 If you find yourself fighting one of these, you have put logic in the wrong
 layer. Move the logic, don't weaken the rule.
@@ -182,8 +182,11 @@ class Event:
 
 - **ADR-002:** single OS process, asyncio-based; **threads only for blocking
   device I/O**.
-- **P8:** no blocking I/O on the loop; CI runs `PYTHONASYNCIODEBUG=1` and fails on
-  slow-callback warnings > 50 ms.
+- **P8:** no blocking I/O on the loop; CI runs `PYTHONASYNCIODEBUG=1` at a **50 ms**
+  slow-callback bar. The bar *detects*; a warning *convicts* when it is **gross** (≥ 100 ms,
+  asyncio's own default) or **corroborated** (the same frame grazes twice in a session).
+  Anything else is printed as a graze and does not fail — blocking I/O recurs, runner jitter
+  does not pick the same victim twice (#328, SDS §14.9).
 - **ADR-008:** `pyproject.toml` declares `requires-python = ">=3.11"` — **not**
   `>=3.13`. Dev is 3.13; the Pi runs system Python 3.11 (so `picamera2`/
   `libcamera` import). **No 3.12+ syntax ships.** CI runs the suite on **3.11 and
