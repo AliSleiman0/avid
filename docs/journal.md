@@ -129,6 +129,52 @@ two hours earlier had said *"8 AM"* from the same fact row, and #347's watchdog 
 hardware. **A robot that cannot hear, blaming the user for not answering, is the exact failure R-08
 exists to measure** — and the instrument would have said the user did it.
 
+## 2026-08-20 — M9 It moves (built)
+
+The head moves because the robot feels something, and the whole chain is a table-driven unit test:
+`plan(gesture, axes)` is pure, the rig's inventory comes from `Servo.axes`, and *"a nod is a real
+tilt on two servos and degrades to a pan wiggle on one"* is eleven lines of parametrize rather than
+an evening with a screwdriver. That was #198's central bet and it paid — seven issues in one
+session, none of which needed the Pi. **But the milestone is code-complete, not sealed, and the two
+that remain are the two that would tell us whether any of it is true.** `FakeServo` records a
+movement trace, and a trace is not a moved head.
+
+**The recurring defect this milestone was the test that passes on silence, and it appeared three
+times in one session.** An empty-plan assertion made *before* the task it was testing had run.
+A drift-failure test that was green because the drift never fired — `spawn` returns before the
+coroutine starts, and `FakeClock` wakes only the sleepers an advance *crosses*, so two documented
+traps compounded into a criterion that had never once executed. And a cooldown test that could not
+fail, because both calls landed on the same monotonic instant and a service that *did* reset the
+deadline set it to the value it already had. **All three were found by neutering the guard and
+watching the test stay green**, which is the only method that finds this class at all — coverage
+caught the second one only after the neuter pointed at the branch.
+
+Two defects were found by looking sideways rather than by a failing test. `Pca9685Servo` calibrated
+its degree→pulse mapping from `axis.max_deg` — the *linkage's* safe reach — when `actuation_range`
+is the *servo's* electrical span. Accidentally correct for four milestones because both were 180,
+and **armed by this milestone's own narrowed reaches**: `position()`, the contract suite and
+`FakeServo` would all have kept agreeing, and the only instrument that disagrees is the horn. And
+writing §3.9.1's `GestureTools` paragraph surfaced that `AffectTools` and `BehaviorTools` had
+**never been documented in the SDS at all** — two ports shipped a milestone each and nobody
+noticed, because the section that should have named them was only ever read for the one port it
+did name.
+
+**The P8 gate ate a chunk of the day and had to be rebuilt.** It failed nine CI runs across three
+of this milestone's PRs — six different untouched tests, 0.052–0.083 s against a 50 ms bar, one of
+them a pure-domain PR that adds no async code at all. A gate whose reds are usually wrong is a gate
+people learn to rerun without reading, which is worse than not having one. The bar did not move:
+50 ms still *detects*, and a warning now *convicts* only when it is gross (≥100 ms — asyncio's own
+default) or corroborated (the same frame twice). Within the hour the new rule convicted a test
+whose own body is a three-thousand-await insert loop — correctly, and the fix was to name that what
+it is. The cost is written into the conftest, the SDS and CLAUDE.md rather than left implicit: a
+genuine one-off 50–100 ms stall now passes.
+
+The judgement call worth recording is `CONFUSED`. #202's AC proposed a head tilt as *"the obvious
+one"* that *"reads correctly on a 2 DoF rig"* — and it does not, because the quizzical head tilt
+everyone pictures is a **roll**, and this robot is pan and tilt. It ships as `LOOK_UP`, named as
+the closest honest reading on the axes that exist rather than as a substitute for the gesture that
+does not. Three ACs were renegotiated this way, each on its own issue, before the code was written.
+
 ## M6 — It has a personality (`v0.M6.0`)
 
 The gate's headline criterion is a *difference*, and the honest way to grade a difference is to
