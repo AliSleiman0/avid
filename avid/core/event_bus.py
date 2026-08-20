@@ -342,6 +342,40 @@ class AsyncioEventBus:
             )
         )
 
+    def queue_stats(self) -> dict[str, dict[str, int]]:
+        """Per-subscriber inbox depth, capacity and drop count (#380, SDS §3.12.2).
+
+        The public read over what :class:`_Runner` already tracks. Exposed because **overflow is
+        the failure a soak exists to surface**: §3.5's rule is that silent drops are a debugging
+        catastrophe and loud drops are a tuning signal, and until now the "loud" half was one log
+        line per drop — visible while someone was watching, invisible over thirty days.
+
+        ``depth`` is a live reading and will usually be 0; the number that matters afterwards is
+        ``dropped``, which is monotonic for the process's life. Keyed by subscriber ``name``,
+        which :meth:`subscribe` makes mandatory precisely so every subscriber is nameable here.
+
+        Cheap and synchronous — ``qsize()`` is an attribute read — so it is safe to call inline
+        from the metrics snapshot while the robot is mid-turn (P8).
+
+        ⚠️ Built from the **declaration graph**, not from the runners, so a bus that has not
+        started yet reports its subscribers with zero depth rather than reporting nothing. The
+        difference matters for the same reason ``MetricsRegistry`` separates absent from zero: an
+        empty mapping would read as "this robot has no subscribers", which is a very different
+        claim from "the workers are not up yet" and is the more alarming of the two to read at
+        thirty days.
+        """
+        runners = {r.subscription.name: r for r in self._runners}
+        stats: dict[str, dict[str, int]] = {}
+        for subscriptions in self._subs.values():
+            for subscription in subscriptions:
+                runner = runners.get(subscription.name)
+                stats[subscription.name] = {
+                    "depth": runner.queue.qsize() if runner is not None else 0,
+                    "maxsize": subscription.maxsize,
+                    "dropped": runner.overflow_count if runner is not None else 0,
+                }
+        return stats
+
     async def stop(self) -> None:
         """Cancel every worker and await it. Idempotent."""
         if not self._started or self._stopped:

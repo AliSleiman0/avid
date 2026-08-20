@@ -28,7 +28,7 @@ import json
 import logging
 from uuid import uuid4
 
-from avid.core.ports import BehaviorTools
+from avid.core.ports import BehaviorTools, MetricsSource
 
 _log = logging.getLogger("avid.adapters.health")
 
@@ -95,7 +95,12 @@ class HealthServer:
     """
 
     def __init__(
-        self, *, bind: str, port: int, behavior: BehaviorTools | None = None
+        self,
+        *,
+        bind: str,
+        port: int,
+        behavior: BehaviorTools | None = None,
+        metrics: MetricsSource | None = None,
     ) -> None:
         if bind not in _LOOPBACK:
             raise ValueError(
@@ -109,6 +114,11 @@ class HealthServer:
         # against (#243). Optional so the M0 health-only wiring still constructs; a `None`
         # here answers 503 rather than pretending the route worked.
         self._behavior = behavior
+        # §9.5's GET /metrics (#380), behind a Protocol like `behavior` above. Optional for the
+        # same reason: the M0 health-only wiring still constructs, and a `None` answers 503 rather
+        # than pretending an unwired registry is an empty one — which would be this endpoint's own
+        # "absent is not zero" rule, broken at the door.
+        self._metrics = metrics
         self._server: asyncio.Server | None = None
 
     @property
@@ -173,11 +183,34 @@ class HealthServer:
         """
         if path == "/health":
             return _OK if method == "GET" else _METHOD_NOT_ALLOWED
+        if path == "/metrics":
+            if method != "GET":
+                return _METHOD_NOT_ALLOWED
+            return self._metrics_response()
         if path == "/quiet":
             if method != "POST":
                 return _METHOD_NOT_ALLOWED
             return await self._quiet(reader, length)
         return _NOT_FOUND
+
+    def _metrics_response(self) -> bytes:
+        """``GET /metrics`` — §3.12.2's registry as JSON (#380).
+
+        Synchronous: every provider is a cheap in-memory read, so there is nothing to await and
+        adding an ``await`` would only invite someone to put a query behind one (P8).
+
+        Never raises. ``MetricsRegistry.snapshot`` already catches a failing provider and names it
+        in ``absent``; this catches serialisation as well, because a metrics endpoint that took the
+        robot down would be a reliability defect living inside a reliability feature (§3.12.3).
+        """
+        if self._metrics is None:
+            return _response("503 Service Unavailable", b"no metrics source")
+        try:
+            body = json.dumps(self._metrics.snapshot()).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            _log.warning("metrics snapshot could not be serialised: %s", exc)
+            return _response("500 Internal Server Error", b"metrics unavailable")
+        return _response("200 OK", body, content_type="application/json")
 
     async def _quiet(self, reader: asyncio.StreamReader, length: int | None) -> bytes:
         """``POST /quiet {"duration_s": N}`` — §9.5's row, §10.4's manual override.
