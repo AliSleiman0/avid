@@ -54,6 +54,16 @@ sudo cp /opt/avid/deploy/robot.service /etc/systemd/system/robot.service
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/robot.service   # must be clean
 
+# 5b. Journald: keep the logs off the robot's storage (SDS §3.12.2, AVID-381).
+#     A drop-in, so the distro's journald.conf stays untouched.
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo install -m 644 -o root -g root     /opt/avid/deploy/journald-avid.conf /etc/systemd/journald.conf.d/avid.conf
+sudo systemctl restart systemd-journald
+# ⚠️ VERIFY WHAT THE MACHINE HAS, not that a file was copied — copies rot, which is the
+# whole thesis of PI_OPERATIONS.md. These two read the RUNNING configuration:
+systemd-analyze cat-config systemd/journald.conf | grep -E 'Storage|RuntimeMaxUse'
+journalctl --disk-usage      # expect "archived and active journals take up ... in RAM"
+
 # 6. Start it, supervised, and enable on boot
 sudo systemctl enable --now robot
 systemctl status robot                       # expect: active (running)
