@@ -122,6 +122,11 @@ i2c_address  = 0x40             # PCA9685 default; only the pca9685 adapter uses
 min_pulse_us = 500              # SG90/MG90S pulse range (§4.7)
 max_pulse_us = 2500
 freq_hz      = 50
+# ⚠️ The SG90/MG90S's own sweep across that pulse range — the SERVO's electrical span,
+# NOT the linkage's safe reach above. It calibrates degree→pulse, so a value taken from
+# max_deg makes every commanded angle wrong the moment a reach is narrowed — silently,
+# because the fake ignores pulse widths and keeps reporting a perfect trace (#356).
+actuation_deg = 180.0           # SG90/MG90S, §4.7
 
 [microphone]                    # audio capture params for the microphone adapter (AVID-53)
 device      = "default"         # ALSA device — only the alsa adapter uses it (the fake synthesizes)

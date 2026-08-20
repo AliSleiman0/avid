@@ -223,6 +223,7 @@ def _build_servo(config: Config) -> Servo:
                 min_pulse_us=config.servo.min_pulse_us,
                 max_pulse_us=config.servo.max_pulse_us,
                 freq_hz=config.servo.freq_hz,
+                actuation_deg=config.servo.actuation_deg,
             )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
