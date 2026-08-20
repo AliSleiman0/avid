@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = 242f884` · `v0.M10.0` tagged · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = 2777b1a` + this commit · `v0.M10.0` tagged · gh `AliSleiman0`.
 
 ## ⭐ Next session — M9 is CODE-COMPLETE. What is left needs the Pi and a person.
 
@@ -14,11 +14,28 @@
 #205 are done, plus #289 and a new #356. What remains is **#206** (the SPK-4 brown-out spike) and
 **#207** (the live gate), and neither can be advanced from a laptop.
 
-**Since that was written, one laptop session happened** (the Pi never came back): **#310 AC-1 is
-answered and merged** (#370, `242f884`). The short version is that `set_affect` works fine and the
-issue's premise does not reproduce off the rig — which turns a prompt problem into a *deployment*
-question. It is folded into the fallback list below, and it added a new **item 0** that outranks
-everything else the moment the Pi answers.
+**Since that was written, one long laptop session happened** (the Pi never came back). Five PRs
+merged — #370, #371, #372, #374, #375. In order of what a reader needs:
+
+1. **#310 AC-1 answered** (#370). `set_affect` works fine off the rig and the issue's premise does
+   not reproduce — which turns a prompt problem into a **deployment** question. This is what added
+   **item 0** below, and item 0 outranks everything else the moment the Pi answers.
+2. **#373 filed — nothing records which model/adapters a run used.** No startup banner exists
+   anywhere; `config.ai.model` is read into the adapter and the cost meter and logged in neither.
+   ⚠️ And `AiConfig.model`'s schema default is the **mini**, so a deployed
+   `/etc/robot/config.toml` missing its `[ai] model` key silently runs a different model than
+   `pi.toml` pins. That single fact would explain #310 *and* #265 together. **Cheapest thing that
+   makes a bench evening interpretable — do it before the rig work if there is any doubt.**
+3. **#157 measured from the laptop** (#374), which was that issue's own last open bullet. Two of
+   its three candidates are dead: the server's session bootstrap is **4–10 ms**, and
+   `session.update`'s payload size does **not** matter (171.8 ms empty vs 170.1 ms with the real
+   1901-char M6 prefix). It is the **WebSocket upgrade**, ~575–660 ms warm, host-independent —
+   so **§6.3's ~200 ms budget is wrong, not merely missed**, and pre-warming is the indicated
+   remedy rather than one of three. Still open: the design decision, and the Pi's 6.6 s tail.
+4. **#264 root-caused and fixed** (#375). §7.7's hybrid retrieval had a half that could not reach
+   the score — see the standing gotcha below, it generalises well beyond memory.
+5. **#372** corrected two claims made earlier the same session. Both were caught by checking the
+   tracker instead of the prose around them.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
 `git rev-parse --short origin/main`. See BATON-CAN-BE-WRONG below.
@@ -159,10 +176,26 @@ about **the rig** differs, and until that is known the M9 bench evening should n
 will drive gesture. See the new item 0 below — it is now the first thing to run when the Pi
 answers, ahead of even AC-0.
 
-**3. M11 is the critical path and M9 is not.** PMP §5.4 runs M6 → M10 → M11; §7.3 names M9 as the
-first cut. M11's 30-day soak is also what would retire M10's unrun AC-0 as a side effect. If the
-rig stays out of reach for a while, **starting M11 is more defensible than waiting** — M9 stays
-code-complete and seals whenever the bench is free.
+**3. The laptop-work menu, re-triaged 2026-08-20 by reading all 20 open issues rather than their
+labels.** ⚠️ **Two were mislabelled `hardware-required` and are not** — #264 is now corrected to
+`no-hardware` and was root-caused and fixed from this laptop; #265 is very likely the same (its
+AC-1 is a prompt-path question and `tools/probe_tool_call_rate.py` can now drive the live
+multi-fact conversation its AC-2 wants). What is genuinely left off the rig, best first:
+
+- **#373** — the startup banner. Smallest, and it is what makes every later rig result attributable.
+- **#264 AC-2** — the two gate probes against a real-MiniLM store. Needs the model blobs;
+  ⚠️ `--extra pi` will **not install on Windows** (`pyalsaaudio` has no wheel), so use an ephemeral
+  `uv run --with onnxruntime --with tokenizers` rather than syncing the extra.
+- **#162** — the DEGRADED recovery turn drives no legal transitions. Pure domain + a §3.10.3
+  decision + a test; no hardware, no key.
+- **#265** — see above; a live session costs cents and the harness exists.
+- **#21** — SDS §13. Pure authoring, large, M11-targeted.
+
+**4. M11 is the critical path and M9 is not.** PMP §5.4 runs M6 → M10 → M11; §7.3 names M9 as the
+first cut. M11's 30-day soak is also what would retire M10's unrun AC-0 as a side effect. ⚠️ **M11
+has no epic at all** — the milestone holds only doc-debt #21, against PMP's budget of 11 issues /
+13 IED. If the rig stays out of reach for a while, **decomposing M11 is more defensible than
+waiting** — M9 stays code-complete and seals whenever the bench is free.
 
 ⚠️ **Do not seal M9 from a laptop.** Every remaining AC is written to require the physical head to
 move, and `docs/demos/motion_pi.py` exits non-zero while any of them is unrecorded precisely so
@@ -322,6 +355,28 @@ so it is gross and corroborated many times over.
   to a sway — so a criterion asserting motion passes on the hardware ADR-009 replaced. The claim is
   that nod and turn land on **different axes**. Generalises: when a milestone's headline is a
   *capability*, find the assertion the previous generation would fail.
+
+### A hybrid whose two halves do not both reach the score is not a hybrid (#264)
+
+§7.7 answers "vector search fails on proper nouns" by unioning the vector pool with an FTS5 keyword
+search. That fixed **candidate generation** — and candidate generation was never the binding
+constraint. `HybridRetriever` draws a vector pool of **50**, so any store with fewer than 50 live
+facts already had every fact as a candidate, and the union added nothing. Meanwhile `rank_candidates`
+had no keyword term at all. The keyword branch was architecturally present, tested, documented, and
+**operationally dead at every store size this robot will ever reach**.
+
+Found by deleting the branch outright and diffing: byte-identical results at 3 facts and at 18.
+Fixed by carrying `keyword_hit` into the score as δ (#375).
+
+**The general lesson, which is not about memory:** when a design combines two signals, check that
+*both reach the decision*, not merely that both are computed. A component that only widens an input
+set is inert whenever the set was not the constraint. The test that finds this is always the same
+one — **remove the feature entirely and see whether anything changes** — and it is worth running
+against any "we union / merge / blend two sources" claim in this repo.
+
+⚠️ Related: δ = 1.0 is a **guess**, labelled as one in four places. `tools/eval_recall.py` is what
+would settle it and has not been run against a real-MiniLM store. If recall quality is ever
+measured again, that number is the first thing to tune.
 
 ### `uv sync --extra X` on the LAPTOP silently uninstalls every extra you did not name
 
