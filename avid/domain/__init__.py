@@ -104,12 +104,15 @@ from avid.domain.motion import (
     PAN,
     TILT,
     Axis,
+    Direction,
     Gesture,
     Keyframe,
+    LookAtResult,
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
     duration_ms,
+    gesture_for_direction,
     plan,
 )
 from avid.domain.state import (
@@ -241,4 +244,9 @@ __all__ = [
     "MotionGestureStarted",
     "duration_ms",
     "plan",
+    # look_at's vocabulary (#204, §6.6) — a direction is not a gesture: Gesture includes NOD
+    # and SHAKE, which mean things, while a Direction only points.
+    "Direction",
+    "LookAtResult",
+    "gesture_for_direction",
 ]

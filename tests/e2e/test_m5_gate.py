@@ -69,8 +69,10 @@ from avid.domain import (
     ConversationTurnEnded,
     ConversationTurnStarted,
     ConversationUserTranscribed,
+    Direction,
     Event,
     Fact,
+    LookAtResult,
     RobotState,
     RoutineSpec,
     StateTransitioned,
@@ -399,6 +401,7 @@ async def _drive_session(
         thinking_delay_ms=0,
         affect=_StubAffect(),
         behavior=_StubBehavior(),
+        gesture=_StubGesture(),
     )
 
     collector = _Collector()
@@ -569,6 +572,7 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         thinking_delay_ms=0,
         affect=_StubAffect(),
         behavior=_StubBehavior(),
+        gesture=_StubGesture(),
     )
     collector = _Collector()
     for sub in conversation.subscriptions():
@@ -1047,3 +1051,21 @@ async def test_a_mute_conversation_fails_the_gate() -> None:
     demo = _load_conversation_pi()
     turn = demo._Turn(latency_ms=400.0, played_ms=first.played_ms, elapsed_ms=0.0)
     assert _verdict(demo, [turn]) == 1
+
+
+class _StubGesture:
+    """A :class:`~avid.core.ports.GestureTools` double: records the directions asked for (#204).
+
+    Returns ``ACCEPTED`` unconditionally — the cooldown and the no-axis decline are
+    ``MotionService``'s to decide and are tested there and in the contract suite. What this
+    double is for is the *seam*: that ``ConversationService`` reaches motion through a port it
+    never names a service for."""
+
+    def __init__(self) -> None:
+        self.looks: list[Direction] = []
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        self.looks.append(direction)
+        return LookAtResult.ACCEPTED

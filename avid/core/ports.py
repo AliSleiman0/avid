@@ -51,8 +51,10 @@ from avid.core.realtime import RealtimeEvent
 from avid.core.schedule import Routine
 from avid.domain import (
     Affect,
+    Direction,
     Event,
     Fact,
+    LookAtResult,
     RetrievalMatch,
     RoutineSpec,
     TriggerRecord,
@@ -1114,6 +1116,60 @@ class BehaviorTools(Protocol):
         ⚠️ The override **stacks on top of** rule 1's static window rather than replacing it. "Leave
         me alone for an hour" at 21:30 must not turn into "and then you may talk at 22:30", which is
         exactly what replacing the window would do.
+        """
+        ...
+
+
+@runtime_checkable
+class GestureTools(Protocol):
+    """The ``look_at`` tool, as ``ConversationService`` needs it (SDS §6.6, §3.9.3, #204).
+
+    The fourth member of a family this file already had three of, and the reasons are the
+    family's rather than this tool's. ``ConversationService`` may not import ``motion`` (P5), and
+    ``lint-imports``' ``service-independence`` contract fails CI the moment it names a service
+    module — so the Protocol is load-bearing rather than ceremonial. And *"please nod"* is not an
+    event (P4): an event states what *happened*, so a request for movement crossing the bus would
+    be a command wearing an event's clothes, and one the bus is explicitly allowed to drop
+    (§9.1.4 — notifications, not obligations). A gesture the model asked for and the bus quietly
+    lost is a lie told to the model.
+
+    ``MotionService`` satisfies it **structurally**, with no inheritance and no edit there, the
+    same way ``AffectService`` satisfies :class:`AffectTools`.
+
+    **The signature is intent-level, and that is the safety property.** A ``Direction``, never
+    ``move(channel, degrees)``: the model states what it wants and §3.9.3 decides what that means
+    in degrees on this rig. It is what keeps one tool working across the 2-servo robot, the
+    1-servo fallback and the fake — and what stops the model being handed a lever it can jam. The
+    enum crosses as a domain value rather than a string for the same reason
+    :meth:`AffectTools.set_affect` takes an ``Affect``: the model's raw JSON is the
+    *dispatcher's* problem, and here the enum **is** the constraint.
+    """
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        """Point the robot *direction*, returning what became of the request.
+
+        **Returns when the gesture is accepted, not when the servo arrives** (§6.6 classifies
+        this async/fire-and-forget). A nod is the better part of a second; awaiting one before
+        returning ``function_call_output`` stalls the turn, and §6.6's step-5 ``response.create``
+        then lands late enough to be audible as dead air.
+
+        ⚠️ **Declining is a first-class outcome, which is why this returns a value at all.** Two
+        ways a well-formed request is refused, and the model is told which:
+
+        * :attr:`~avid.domain.LookAtResult.COOLING_DOWN` — inside
+          ``[motion] look_at_cooldown_ms``. A **safety property**, not a nicety: a model that
+          decides gesturing is delightful would otherwise drive both servos continuously, which
+          contradicts the gate's relax clause and puts sustained load on the rail #206 measures.
+        * :attr:`~avid.domain.LookAtResult.NO_AXIS` — this rig cannot look that way (``up`` on a
+          pan-only robot). Honest rather than silent: a no-op would leave the model believing it
+          moved, and a robot that describes motion that never happened is worse than one that
+          says it cannot.
+
+        ``correlation_id`` is required and keyword-only, as on :class:`AffectTools`: a movement
+        with no turn behind it is a fact nothing can be traced back to (§3.12.2 — the id is
+        *propagated*, never minted downstream).
         """
         ...
 
