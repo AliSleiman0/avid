@@ -676,7 +676,12 @@ def _wire_services(
     # The other arm of §3.7.2's fan-out, built beside its sibling on purpose: one publish, the
     # face changes and the servo nods, and neither service knows the other exists (#203). The
     # rig's inventory is the adapter's own `axes` report, never a config list (§3.9.3).
-    motion = MotionService(bus=bus, servo=servo, clock=clock)
+    motion = MotionService(
+        bus=bus,
+        servo=servo,
+        clock=clock,
+        idle_relax_ms=config.motion.idle_relax_ms,
+    )
     audio = AudioService(
         bus=bus,
         clock=clock,

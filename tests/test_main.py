@@ -160,6 +160,10 @@ _EXPECTED_SUBSCRIPTIONS = {
     # affect.changed after ExpressionService. Its catalog row already named it — "MotionService
     # (M9)" — so this is that tag discharged, not a new edge.
     "MotionService.affect_changed",
+    # ...and the state feed, read INDEPENDENTLY of ExpressionService's read of it (#203).
+    # Only SLEEPING is this service's business: a robot nobody is looking at should let go of
+    # its servos now rather than after idle_relax_ms of humming into an empty room.
+    "MotionService.state_transitioned",
     # And the three motion.* rows, whose only §9.1.3 subscriber is Observability. Without them
     # the events publish into an empty room and #207's AC-3 — preemption confirmed "by log AND
     # by eye" — has no log to read.

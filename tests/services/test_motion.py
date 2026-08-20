@@ -35,7 +35,10 @@ from avid.domain import (
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
+    RobotState,
+    StateTransitioned,
     SystemHandlerFailed,
+    Trigger,
     plan,
 )
 from avid.services.motion import MotionService
@@ -46,6 +49,12 @@ _ARRIVAL_TIMEOUT_S = 2.0
 # nod is 880 ms of genuine ``asyncio.sleep`` and there are a dozen gestures in this file.
 # 5x keeps every leg at two or more steps, so a sweep is still interruptible partway.
 _SPEEDUP = 5
+
+# Long enough that no test relaxes by accident between a gesture and its assertion, and short
+# enough that a test which *wants* the countdown can drive it with a fake clock in one step.
+# The shipped default is 3000 ms (config/*.toml); the number is not what is under test here,
+# the arming and cancelling are.
+_IDLE_RELAX_MS = 3000
 
 # The rig config/*.toml declares (#200): pan ch0, tilt ch13, asymmetric reaches.
 _PAN = Axis(name="pan", channel=0, min_deg=30.0, max_deg=150.0)
@@ -162,7 +171,9 @@ async def _make_rig(*axes: Axis) -> tuple[Rig, AsyncioEventBus]:
     clock = FakeClock()
     bus = AsyncioEventBus()
     servo = _TracingServo(axes=axes)
-    service = MotionService(bus=bus, servo=servo, clock=clock)
+    service = MotionService(
+        bus=bus, servo=servo, clock=clock, idle_relax_ms=_IDLE_RELAX_MS
+    )
     collector = _Collector()
 
     _register(bus, service)
@@ -219,6 +230,22 @@ def _affect_changed(
         affect=affect,
         tier=2,
         previous=Affect.IDLE,
+    )
+
+
+def _transitioned(*, to: RobotState) -> StateTransitioned:
+    """A ``state.transitioned`` built by hand — the same shape ``test_expression.py`` uses, and
+    for the same reason: this service reads the state feed independently of whoever drives the
+    machine, so a test drives the feed rather than the machine."""
+    return StateTransitioned(
+        event_id=uuid4(),
+        correlation_id=uuid4(),
+        timestamp_ms=1,
+        monotonic_ns=1,
+        source="StateManager",
+        from_=RobotState.IDLE,
+        to=to,
+        trigger=Trigger.PRESENCE_LOST_TIMEOUT,
     )
 
 
@@ -322,7 +349,9 @@ async def test_a_completed_gesture_reports_a_measured_duration() -> None:
     plan's own arithmetic."""
     bus = AsyncioEventBus()
     servo = _TracingServo(axes=(_PAN, _TILT), speedup=1)  # measuring elapsed time
-    service = MotionService(bus=bus, servo=servo, clock=SystemClock())
+    service = MotionService(
+        bus=bus, servo=servo, clock=SystemClock(), idle_relax_ms=_IDLE_RELAX_MS
+    )
     collector = _Collector()
     bus.subscribe(MotionGestureCompleted, collector.handle, name="test.completed")
     await bus.start()
@@ -528,7 +557,9 @@ async def test_a_raising_subscriber_does_not_disturb_a_gesture() -> None:
 
     bus = AsyncioEventBus()
     servo = _TracingServo(axes=(_PAN, _TILT))
-    service = MotionService(bus=bus, servo=servo, clock=FakeClock())
+    service = MotionService(
+        bus=bus, servo=servo, clock=FakeClock(), idle_relax_ms=_IDLE_RELAX_MS
+    )
     collector = _Collector()
     bus.subscribe(MotionGestureStarted, boom, name="test.boom")
     for event_type in (MotionGestureCompleted, SystemHandlerFailed):
@@ -581,7 +612,9 @@ async def test_a_failing_relax_does_not_stop_the_rest_from_relaxing() -> None:
 
     bus = AsyncioEventBus()
     servo = _SulkyServo(axes=(_PAN, _TILT))
-    service = MotionService(bus=bus, servo=servo, clock=FakeClock())
+    service = MotionService(
+        bus=bus, servo=servo, clock=FakeClock(), idle_relax_ms=_IDLE_RELAX_MS
+    )
     await bus.start()
     try:
         await service.perform(Gesture.CENTER, correlation_id=uuid4())
@@ -595,3 +628,220 @@ async def test_a_failing_relax_does_not_stop_the_rest_from_relaxing() -> None:
     assert not servo.is_energised(_TILT.channel), (
         "a failing relax on pan stopped tilt from being relaxed at all"
     )
+
+
+# --- the I²C-fault path (SDS §3.12.3) ----------------------------------------
+
+
+class _FaultyServo(_TracingServo):
+    """Raises on the *n*-th ``move_to``, the way a NACK arrives mid-gesture."""
+
+    def __init__(self, *, axes: tuple[Axis, ...], fail_on: int = 1) -> None:
+        super().__init__(axes=axes)
+        self._fail_on = fail_on
+        self.calls = 0
+        self.armed = True
+
+    async def move_to(
+        self, channel: int, angle_deg: float, *, duration_ms: int
+    ) -> None:
+        self.calls += 1
+        if self.armed and self.calls >= self._fail_on:
+            raise OSError("[Errno 121] Remote I/O error")
+        await super().move_to(channel, angle_deg, duration_ms=duration_ms)
+
+
+async def _faulty_rig(*, fail_on: int = 1) -> tuple[Rig, AsyncioEventBus]:
+    clock = FakeClock()
+    bus = AsyncioEventBus()
+    servo = _FaultyServo(axes=(_PAN, _TILT), fail_on=fail_on)
+    service = MotionService(
+        bus=bus, servo=servo, clock=clock, idle_relax_ms=_IDLE_RELAX_MS
+    )
+    collector = _Collector()
+    _register(bus, service)
+    for event_type in (
+        MotionGestureStarted,
+        MotionGestureCompleted,
+        MotionGesturePreempted,
+    ):
+        bus.subscribe(event_type, collector.handle, name=f"test.{event_type.__name__}")
+    await bus.start()
+    return Rig(service, bus, servo, clock, collector), bus
+
+
+async def test_a_device_fault_aborts_relaxes_and_reports_by_none() -> None:
+    """§3.12.3 states this as a **fact**, not a suggestion: *"Abort gesture, relax servo,
+    publish ``motion.gesture_preempted``, continue."*
+
+    ``by=None`` is what distinguishes a fault from an ordinary interruption on the shared
+    catalog row (§9.1.3), and it is the field a subscriber watching for hardware trouble
+    filters on — so it is asserted here rather than left to the log."""
+    rig, bus = await _faulty_rig()
+    try:
+        await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+        await _settle(rig.service)
+        await rig.collector.wait_for(2)  # started, then preempted-by-fault
+
+        preempted = rig.collector.of(MotionGesturePreempted)
+        assert [(e.gesture, e.by) for e in preempted] == [("nod", None)]  # type: ignore[attr-defined]
+        assert rig.collector.of(MotionGestureCompleted) == []
+        assert rig.service.gestures_aborted == 1
+    finally:
+        await rig.service.stop()
+        await bus.stop()
+
+
+async def test_a_fault_relaxes_every_channel_not_just_the_one_that_failed() -> None:
+    """⚠️ The decision #203 asks to be made deliberately, made in favour of all of them.
+
+    Two arguments, both pointing the same way. A half-completed gesture leaves the head at an
+    **arbitrary** angle rather than a resting one — so the axis that did *not* fault is
+    precisely the one holding torque somewhere unintended. And a rig that has just failed an
+    I²C write is not a rig anyone should trust to keep holding torque at all.
+
+    The cost of being wrong in this direction is a robot that briefly goes limp. In the other
+    it is a stalled servo on a browning-out rail — R-04, the risk this milestone has a whole
+    spike for."""
+    rig, bus = await _faulty_rig(fail_on=2)
+    try:
+        # CENTER touches both channels, so the first move energises one before the next faults.
+        await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+        await _settle(rig.service)
+        await rig.collector.wait_for(2)
+
+        assert not any(
+            rig.servo.is_energised(axis.channel) for axis in rig.servo.axes
+        ), "a channel was left holding torque after an I2C fault"
+    finally:
+        await rig.service.stop()
+        await bus.stop()
+
+
+async def test_the_service_survives_a_fault_and_performs_the_next_gesture() -> None:
+    """*"Nothing except a bad API key at boot is allowed to stop the robot"* (§3.12.3).
+
+    **"It did not crash" and "it still works" are different claims**, and only the second is
+    worth having: a service whose gesture task died quietly would satisfy the first for as long
+    as nobody asked it to move again. So this asks it to move again."""
+    rig, bus = await _faulty_rig()
+    try:
+        await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+        await _settle(rig.service)
+        await rig.collector.wait_for(2)
+
+        rig.servo.armed = False  # type: ignore[attr-defined]  # the bus recovers
+        await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+        await _settle(rig.service)
+
+        assert rig.service.gestures_performed == 1
+        assert rig.service.gestures_aborted == 1
+    finally:
+        await rig.service.stop()
+        await bus.stop()
+
+
+# --- relaxing when idle — the gate's "no buzz" clause ------------------------
+
+
+async def test_the_rig_relaxes_after_the_idle_window(rig: Rig) -> None:
+    """The gate's fourth clause, driven by a fake clock rather than by waiting three seconds.
+
+    That the countdown sleeps on the injected ``Clock`` is the whole reason this is a
+    millisecond test — the same argument §9.3 makes for ``Clock`` being a port at all: the
+    alternative is a suite nobody runs, and a "no buzz" claim nobody checks."""
+    await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+    await _settle(rig.service)
+    assert any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+
+    await rig.clock.advance(_IDLE_RELAX_MS / 1000)
+    await asyncio.sleep(0)
+
+    assert not any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+
+
+async def test_the_rig_stays_energised_before_the_window_elapses(rig: Rig) -> None:
+    """The other half, and the one that makes the test above mean something.
+
+    A service that relaxed the instant a gesture finished would pass "relaxes when idle" and
+    fail the robot: the head would go limp between the two halves of a reaction, which reads as
+    a fault rather than as restraint."""
+    await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+    await _settle(rig.service)
+
+    await rig.clock.advance(_IDLE_RELAX_MS / 1000 / 2)
+    await asyncio.sleep(0)
+
+    assert any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+
+
+async def test_a_new_gesture_cancels_a_pending_relax(rig: Rig) -> None:
+    """⚠️ The countdown must not fire underneath a sweep that has already begun.
+
+    Otherwise a gesture arriving just before the window closes gets its channels cut mid-move —
+    intermittently, depending on timing, which is the worst possible way for this to be wrong.
+    ``perform`` cancels the timer *before* arming anything else for exactly that reason."""
+    await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+    await _settle(rig.service)
+    await rig.clock.advance(_IDLE_RELAX_MS / 1000 / 2)
+
+    await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+    await rig.servo.moves.wait_for_steps(1)
+    await rig.clock.advance(
+        _IDLE_RELAX_MS / 1000
+    )  # the OLD timer's moment, had it survived
+    await asyncio.sleep(0)
+
+    assert any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes), (
+        "the previous gesture's relax timer fired underneath a live sweep"
+    )
+    await _settle(rig.service)
+
+
+async def test_sleeping_relaxes_immediately_rather_than_waiting_out_the_timer(
+    rig: Rig,
+) -> None:
+    """A robot that has just fallen asleep is a robot nobody is looking at.
+
+    Waiting out ``idle_relax_ms`` there means humming into an empty room for the one interval
+    where it is most obviously wrong — and #207 grades this with an ear, in a quiet room, which
+    is the only instrument that can hear the difference."""
+    await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+    await _settle(rig.service)
+    assert any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+
+    await rig.bus.publish(_transitioned(to=RobotState.SLEEPING))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+
+
+async def test_sleeping_cancels_a_gesture_in_flight(rig: Rig) -> None:
+    """A nod that finishes after the robot is asleep is a contradiction someone eventually
+    watches happen — and it re-energises the channels the sleep just let go of."""
+    await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+    await rig.servo.moves.wait_for_steps(1)
+
+    await rig.bus.publish(_transitioned(to=RobotState.SLEEPING))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await _settle(rig.service)
+    await asyncio.sleep(0)
+
+    assert not any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+    preempted = rig.collector.of(MotionGesturePreempted)
+    assert [(e.gesture, e.by) for e in preempted] == [("nod", None)]  # type: ignore[attr-defined]
+
+
+async def test_waking_up_does_not_move_anything(rig: Rig) -> None:
+    """Only ``SLEEPING`` is this service's business on the state feed.
+
+    Every other transition belongs to the face, and a service that gestured on each would be
+    moving on ``IDLE → LISTENING`` — which fires whenever anyone speaks."""
+    await rig.bus.publish(_transitioned(to=RobotState.IDLE))
+    await rig.bus.publish(_transitioned(to=RobotState.LISTENING))
+    await asyncio.sleep(0)
+
+    assert rig.servo.moves == []
+    assert rig.collector.events == []
