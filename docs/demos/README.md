@@ -313,3 +313,58 @@ an empty room cannot be mistaken for a sealed criterion. Re-measure with someone
 The four ⏸ criteria are reported as `HUMAN` and the harness **exits non-zero while any of them is
 unrecorded**. A gate that scored "the robot wakes when you sit down" from an empty room would be
 M4's lesson repeating: *a gate that can pass on silence is not a gate.*
+
+## M9 — It moves
+
+**Not sealed.** The harness and the mechanised gate are done; the criteria that need a person
+watching a servo are **not run** and are recorded as such rather than scored from a trace. That
+distinction is this section's whole reason for existing — a milestone marked done in the one file
+whose job is proving milestones are done is exactly what M3's gate caught, and M4's printed `PASS`
+over a mute robot.
+
+```sh
+# On the Pi. Stop the service first (PI_OPERATIONS §1) and REPROVISION /etc/robot/config.toml —
+# [[servo.axes]] and the whole [motion] section are new since #200, and a machine still carrying
+# the one-axis [servo] now FAILS TO LOAD rather than silently running on one axis. That failure
+# is deliberate; reinstall from the branch rather than sed-ing the old file into shape.
+sudo systemctl stop robot
+sudo install -m 644 -o root -g root /opt/avid/config/pi.toml /etc/robot/config.toml
+# …then flip [adapters] servo = "pca9685" on the machine. The repo template ships every device
+# "fake" by design (PI_OPERATIONS §3) — selecting real hardware is a provisioning act.
+
+/opt/avid/.venv/bin/python docs/demos/motion_pi.py --config /etc/robot/config.toml \
+    --json docs/demos/m9_evidence/gate.json
+```
+
+| AC | | |
+|---|---|---|
+| AC-0 | ⏸ | both axes present in the **loaded** config, `[adapters] servo = "pca9685"` |
+| AC-1 | ⏸ | `HAPPY` produces a nod that reads as a nod, on the **tilt** axis — **needs a human** (video) |
+| AC-2 | ⏸ | nod **and** turn, on different axes — the claim ADR-009's second servo makes |
+| AC-3 | ⏸ | preemption, by log **and** by eye |
+| AC-4 | ⏸ | relaxes when idle, and is **audibly silent** — **needs an ear**, in a quiet room |
+| AC-5 | ⏸ | no brown-out under stall, in the enclosure (`vcgencmd get_throttled`, kernel log) |
+| AC-6 | ⏸ | a live spoken "look left" — with the **tool call in the log, with its arguments** — **needs a human** |
+| AC-7 | ⏸ | idle micro-motion reads as alive rather than twitchy — **needs a human** |
+| AC-8 | ⏸ | a full conversation with gestures running: no audio glitching, no P8 warnings from motion |
+
+**What is already proven, and what it is not.** `tests/e2e/test_m9_gate.py` runs the whole arc —
+affect → gesture → preemption → relax — on every commit, in about 18 seconds, with no hardware.
+Every criterion in it has a companion that neuters one guard and asserts the criterion goes red,
+so the gate's own pass/fail logic is under test (CLAUDE.md §7.1).
+
+⚠️ **And none of it is sufficient.** `FakeServo` records a movement trace, and **a trace is not a
+moved head.** A wrong channel, a stale one-axis config on the machine, a horn slipping on its
+spline, an I²C address collision — every one of those produces a perfect trace here and a
+motionless robot on the desk. That is the M4 lesson wearing a servo, and it is why every AC above
+is written to require the physical head to move.
+
+⚠️ **#206 (SPK-4) runs before this**, on the bench rather than in the enclosure: R-04's failure
+mode is not a glitch but **SD-card corruption**, and the register line that assumed it was
+mitigated was written for *one* servo. The rig has two, and the worst case is both stalled at
+once.
+
+⚠️ **The display panel cannot be fitted alongside the amp and servo** — the 40-pin header is full
+(`deploy/PI_OPERATIONS.md`). So AC-1's *"affect drives gesture"* likely cannot be watched on the
+face and the head at the same time; plan which half is read from the log before starting, rather
+than discovering it mid-run.
