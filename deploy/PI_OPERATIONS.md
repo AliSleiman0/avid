@@ -148,6 +148,11 @@ shape:
 ```sh
 sudo install -m 644 -o root -g root /opt/avid/config/pi.toml /etc/robot/config.toml
 sudo install -m 644 -o root -g root /opt/avid/deploy/robot.service /etc/systemd/system/robot.service
+# The journald drop-in (AVID-381) — reinstall it here too, for the same reason as the two above:
+# it is a COPY on the machine, and a copy that is not reinstalled is a copy that has drifted.
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo install -m 644 -o root -g root /opt/avid/deploy/journald-avid.conf /etc/systemd/journald.conf.d/avid.conf
+sudo systemctl restart systemd-journald
 sudo systemctl daemon-reload
 ```
 
