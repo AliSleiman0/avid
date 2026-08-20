@@ -81,6 +81,7 @@
  3.9.1 Port/adapter contracts
  3.9.2 Simulator adapters
  3.9.3 Capability negotiation
+ 3.9.4 Gesture realization — ADR-009
 3.10 State management
  3.10.1 Global robot state machine
  3.10.2 Sub-state machines
@@ -348,7 +349,7 @@ Trust boundary: everything except the OpenAI box is local. Audio and, if enabled
 | RAM | 8 GB | Generous. Not a binding constraint. Do not optimize for it. |
 | Display | 480×320 | Sprite-based rendering, not vector. Design for pixel grid. |
 | Storage | microSD (A2) | **Binding.** Random write is slow and the card wears out. Batch DB writes, WAL mode, no chatty logging to card. |
-| Servo | 1× SG90/MG90S | 1 DoF. Gesture vocabulary is nod *or* turn, not both. See §4.7. |
+| Servo | 2× SG90/MG90S | **2 DoF** — pan (body turn) and tilt (head). Gesture vocabulary is nod **and** turn. ADR-009 / §3.9.4. See §4.7. |
 | Power | 27 W USB-C | Servo stall current can brown out the Pi. Separate servo rail. See §4.3. |
 
 ### 2.7.2 Cost
@@ -452,7 +453,7 @@ Full text in Appendix A. Summary:
 | ADR-006 | Personality is composed instruction text + post-hoc affect mapping, not fine-tuning | Accepted |
 | ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Accepted** — see §6.3, §6.10 |
 | ADR-008 | Python 3.13 on PC, system Python 3.11 + `--system-site-packages` on Pi | **Proposed** — see §3.11 |
-| ADR-009 | Pan+tilt (2 servo) target, 1-servo fallback; gesture engine is axis-agnostic | **Proposed** — needs your call |
+| ADR-009 | Pan+tilt (2 servo) target, 1-servo fallback; gesture engine is axis-agnostic | **Accepted** — see §3.9.4 |
 | ADR-010 | WebSocket transport for the Realtime session, not WebRTC | Accepted — see §6.2.1 |
 | ADR-011 | Semantic memory on local `all-MiniLM-L6-v2` via ONNX Runtime, 384-d | Accepted — see §7.4 |
 | ADR-012 | Faces compose to RGB888 bytes in the stdlib; no drawing-library dependency | Accepted — see §3.6.4 |
@@ -610,7 +611,7 @@ A queue hitting its bound publishes `system.handler_failed` with a `queue_overfl
 | `MemoryService` | Be the sole writer and reader of persistent user knowledge. | — (direct calls) | `memory.*` |
 | `AffectService` | Decide the robot's emotional state from all available signals. | `conversation.*`, `vision.*` | `affect.changed` |
 | `ExpressionService` | Turn one affect into display frames. | `affect.changed`, `state.transitioned` | — |
-| `MotionService` | Turn one affect or gesture request into servo movement, safely. | `affect.changed` | `motion.*` |
+| `MotionService` | Turn one affect or gesture request into servo movement, safely. | `affect.changed`, `state.transitioned` | `motion.*` |
 | `PresenceService` | Decide whether a human is present, with hysteresis. | — (polls camera port) | `vision.*` |
 | `BehaviorService` | Decide when the robot should speak first. | `system.started`, `system.degraded_*`, `state.transitioned`, `audio.speech_*`, `conversation.user_transcribed`, `vision.presence_*`, `memory.fact_*`, clock | `behavior.*` |
 
@@ -987,6 +988,13 @@ class MemoryTools(Protocol):             # the §6.6 tool surface ConvSvc dispat
     async def forget(self, query: str, *, correlation_id: UUID | None = None) -> int: ...  # §7.10 hard delete
 
 
+class GestureTools(Protocol):            # the §6.6 look_at surface ConvSvc dispatches to (M9, #204)
+    async def look_at(self, direction: Direction, *,
+                      correlation_id: UUID) -> LookAtResult: ...  # ACCEPTED | COOLING_DOWN | NO_AXIS
+    # Intent-level, never axis-level: a Direction, never move(channel, degrees). §3.9.3 decides
+    # what "left" means in degrees on THIS rig. Declining is a first-class answer, not a no-op.
+
+
 class EpisodeStore(Protocol):            # the §7.5 raw-transcript tier EpisodeRecorder writes (#123)
     async def start_episode(self, correlation_id: UUID, *, at: int) -> None: ...  # ensure a row, started_at
     async def append(self, correlation_id: UUID, line: str, *, at: int) -> None: ...  # accumulate transcript, ended_at
@@ -1021,9 +1029,16 @@ class TextModel(Protocol):               # the cheap off-turn-path text model fo
                                  candidates: Sequence[tuple[int, str]]) -> Sequence[int]: ...  # subset of input ids
 ```
 
-`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap). The tool *dispatch* is `ConversationService`'s (#125): it parses the call and runs it against the injected **`MemoryTools`** port — never the concrete `MemoryService` (P2/P5) — so the composition root injects the service and `ConvSvc` names only the port. The three tool *declarations* (`TOOL_SCHEMA`, §6.6) and the §7.6 capability instructions ship in `services/tools.py` and are seeded into the session's cached prefix by `main` (a `remember_fact` on a barge-in-approximate turn is declined — §6.2.4/§7.6). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
+`RealtimeClient` and `TurnSink` are the two M5 ports (AVID-100). `RealtimeClient` is the vendor blast radius: `ConversationService` depends only on it, the `openai`/`replay` adapters implement it, and it traffics in the neutral `RealtimeEvent` union (`UserTranscript` / `AssistantAudioChunk` / `AssistantTranscript` / `ToolCallRequested(call_id, name, arguments)` / `TurnDone(usage: TokenUsage)` / `SessionClosed`, defined in `core/realtime.py`) so no Realtime message shape ever crosses — if OpenAI changes the API, exactly one adapter changes (R-10). `ToolCallRequested` (#124) is the §6.6 tool-call seam: the adapter maps it off the vendor's `response.output_item.done` finalize frame, and `send_tool_output` returns the result and sends the mandatory `response.create` (§6.6's step-5 trap). The tool *dispatch* is `ConversationService`'s (#125): it parses the call and runs it against the injected **`MemoryTools`** port — never the concrete `MemoryService` (P2/P5) — so the composition root injects the service and `ConvSvc` names only the port. The tool *declarations* (`TOOL_SCHEMAS`, §6.6) and the §7.6 capability instructions ship in `services/tools.py` and are seeded into the session's cached prefix by `main` (a `remember_fact` on a barge-in-approximate turn is declined — §6.2.4/§7.6). `TurnSink` is how a turn's PCM crosses `ConvSvc ↔ AudioSvc` as a **direct call, never a bus event** (§9.1.4).
 
 The five **memory ports** are M7 (AVID-114). `FactRepository` (#117) is durable fact storage behind `SqliteFactRepo`; `Retriever` (#120) is the §7.7 read path + its §8.5 write-through numpy matrix behind `HybridRetriever`; `Embedder` (#118/#119, §9.3) is text→vector behind `LocalMiniLmEmbedder`; `TextModel` (#122) is the cheap off-turn-path supersession judge behind an OpenAI text adapter; `MemoryTools` (#125) is the tool surface `ConversationService` dispatches to. `MemoryService` is a *service*, so it names only these ports and the composition root injects the concretes (P2/P5) — the numpy matrix, the FTS5 shadow and the vendor HTTPS client all stay on the adapter side of the boundary. Every method is `async` (SQLite and model inference are blocking I/O offloaded off the loop, P8) and every signature is numpy-free (`bytes` BLOBs, `Sequence[float]` vectors, `int` ids), so `core`/`domain` never import numpy (ADR-012).
+
+**`GestureTools` is M9 (#204), and it is the fourth member of a family this section had only named once.** A tool the model can call reaches its owning service through a **Protocol the service satisfies structurally**, injected at the composition root — never through an import and never through the bus. `MemoryTools` (#125) is the original; `AffectTools` (#214, the `set_affect` surface) and `BehaviorTools` (#243, `set_quiet`) followed the same shape and ship in `core/ports.py`; `GestureTools` is the same move for `look_at`. The two reasons are worth stating once, here, because both are principles rather than preferences:
+
+- **`ConversationService` may not import `motion` (P5).** Cross-service effect happens via the bus or via a port, and `lint-imports`' `service-independence` contract fails CI the moment `conversation` names a service module directly. The Protocol is therefore load-bearing rather than ceremonial.
+- **"Please nod" is not an event (P4).** An event states what *happened*; a request for movement is a command wearing an event's clothes. §9.1.4 already puts `Servo.move_to()` on the direct-call side for the same reason a memory write is there — the bus carries notifications, not obligations, and a gesture the model asked for that the bus quietly dropped would be a lie told to the model. `TurnSink` (§9.1.4) is the same seam for a turn's audio: two services, one direct call, neither importing the other.
+
+The tool stays **intent-level** — `look_at(direction)` over an enum, never `move(channel, degrees)`. That is what keeps one tool working across the 2-servo rig, the 1-servo fallback and the fake (§3.9.3), and it is what stops the model being handed a lever it can jam.
 
 **`FaceDetector` is M8 (#217, ADR-013), and it brings two types into the HAL vocabulary** beside `Frame`, `AudioChunk`, `DisplayFrame`, `CameraCaps` and `Axis`: **`BBox`** — a face's rectangle in **pixels of the frame that produced it**, top-left origin, `(x, y, w, h)` — and **`Detection {confidence: float, box: BBox}`**, one face seen once. Both are frozen/slotted/kw-only and stdlib-only like every other type in `core/hal.py`; no tensor, session handle or model detail crosses the port. The inversion is the usual one and it is worth naming here because it is easy to get backwards: the port is defined by **what `PresenceService` needs** — one frame in, this frame's faces out — never by what a detection library offers, which is why keypoints, landmarks, tracking ids and identity embeddings are all absent from a port sitting on top of a model that emits some of them. And it stops one step short on purpose: the port never answers *"is a person present."* That is a decision over time, it belongs to the pure hysteresis filter in `domain/vision.py` (§9.1.3), and a port that answered it would put the milestone's headline property behind a device boundary where it can be neither unit-tested nor replayed.
 
@@ -1045,7 +1060,33 @@ Together these are the simulator (§14.5). Which means the simulator is not a se
 
 ### 3.9.3 Capability negotiation
 
-At startup, each adapter reports capabilities. `MotionService` asks: do I have a tilt axis? If yes, `nod` is a tilt gesture. If no, `nod` degrades to a small pan wiggle. The *gesture* stays in the domain layer as an intent; the *realization* is negotiated by the adapter's capabilities. This is what lets ADR-009 stay open without blocking Phase 3–8 work.
+At startup, each adapter reports capabilities. `MotionService` asks: do I have a tilt axis? If yes, `nod` is a tilt gesture. If no, `nod` degrades to a small pan wiggle. The *gesture* stays in the domain layer as an intent; the *realization* is negotiated by the adapter's capabilities. This is what let ADR-009 stay open through Phase 3–8 without blocking any of it.
+
+**The conditional is not hypothetical any more, and it is still a conditional.** The target rig answers *yes* — it has a tilt axis (§3.9.4) — so on the robot as built, `nod` is a tilt gesture. The pan-only branch stays in the code and stays tested, because that is what makes a dead servo a *degradation* rather than an outage, and because a fallback nobody exercises is a fallback nobody has. The question the service asks is answered by `Servo.axes` — the adapter's report of the rig it is actually driving — never by a config key listing the axes a service should expect. Two copies of the inventory is a drift with a delay fuse: a `[motion] axes` left behind after the tilt servo is wired means the robot simply never nods, and nothing anywhere raises.
+
+### 3.9.4 Gesture realization — ADR-009
+
+**The rig is pan + tilt: two servos on one PCA9685 at `0x40`, pan on channel 0 and tilt on channel 13.** The 1-servo rig is retained as a **capability path, not as the target**.
+
+| | |
+|---|---|
+| Decision | Pan + tilt (2 DoF). The gesture engine is axis-agnostic; the 1-servo fallback is a supported degradation |
+| Hardware | 2× SG90/MG90S on a PCA9685 (`0x40`, +`0x70` all-call), ch0 = pan (body turn), ch13 = tilt (head up/down) |
+| Power | ⚠️ Separate 5–6 V rail, **common ground only** — never the Pi's 5 V pin. R-04; measured under two-servo stall by SPK-4 |
+| Pulse mapping | 500–2500 µs at 50 Hz, the SG90/MG90S range (§4.7) |
+| Consequence | `nod` is a **tilt** gesture, and the §2.7.1 vocabulary becomes nod **and** turn |
+
+**What the second servo bought is not range — it is that `nod` stops being a lie.** On a pan-only rig a nod is a horizontal wiggle, which reads as *"no"*. A robot that shakes its head while agreeing with you is worse than a robot that does not move at all, and no amount of gesture tuning fixes it, because the axis is wrong. That is the whole of the decision; the extra degree of freedom is the mechanism, not the point.
+
+**The realization is negotiated, and the negotiation is pure.** `plan(gesture, axes) -> tuple[Keyframe, ...]` is a **pure function in `domain/`**: a `Gesture` is an intent, a `Keyframe` names an **axis by name** and an angle expressed inside that axis's declared reach, and the axes come from `Servo.axes` (§3.9.3). Three consequences, each load-bearing:
+
+- *"nod is a real tilt on two servos and degrades to a pan wiggle on one"* is a table-driven unit test with no hardware, rather than an evening with a screwdriver.
+- A gesture's duration is knowable *before* it runs, which is what lets the relax timer and the `look_at` cooldown derive one number rather than two that drift.
+- A rig that can express nothing for a given gesture returns an **empty plan**. *"This rig cannot do that"* is a legitimate answer and not an exception; the service treats it as a no-op.
+
+**Clamping stays the adapter's job** (§3.9.1). The planner plans *inside* each axis's reach rather than relying on the clamp, so the same gesture does not silently look different on two rigs for a reason no test explains — the clamp remains a safety net, never a control mechanism.
+
+**A note on where `Axis` is declared.** `motion.gesture_started` carries `axes: tuple[Axis, ...]` (§9.1.3), and a `domain/` event must be able to name the type it carries. `core` sits *above* `domain` in the `layers` contract, so `Axis` is **declared in `avid/domain/motion.py` and re-exported from `avid/core/hal.py`** — precisely the move ADR-013 made for `BBox` (§3.6.5). `avid.core.hal.Axis` remains the spelling every port and adapter uses; only the declaration moved.
 
 ## 3.10 State management
 
@@ -1530,6 +1571,7 @@ Per ADR-004, **the model does not own memory. It gets tools.** This is the mecha
 | `forget` | `(query)` → `{deleted: n}` | **Durable before return** | UC-07. Hard delete, not supersession. §7.10. |
 | `set_affect` | `(affect)` → `{ok}` | Async, fire-and-forget | §6.8 |
 | `set_quiet` | `(duration_s)` → `{ok, until}` | Async, fire-and-forget | §10.4's manual override, added at M10. Also reachable over HTTP as `POST /quiet` (§9.5) — **one piece of state, two doors.** |
+| `look_at` | `(direction)` → `{ok}` | Async, fire-and-forget | §3.9.3, added at M9. `direction` is an **enum** — `left \| right \| up \| down \| center` — never an angle: the model states an intent and the rig decides what it means in degrees. At most one accepted call per `[motion] look_at_cooldown_ms`; the cooldown is part of the contract, not an implementation detail. |
 
 Declaration is at session level in `session.update`, as JSON Schema. Static for the session (§6.2.2 — they're part of the cached prefix).
 
@@ -2928,7 +2970,7 @@ class Service(Protocol):
 
 ⚠️ **This is visibility, not supervision.** Nothing yet *reacts* to a dead owned task — deciding whether a dead pump should degrade, restart or tear the session down is a policy question with §3.10.3 consequences and wants its own issue. `spawn`'s `on_death` hook is the seam it will hang off. Note also that a service must **not** publish `system.handler_failed` for this: that fact is the bus's statement about a failing *subscriber* (§9.1.6), and a bus fact for a dead owned task would need its own event and catalog row.
 
-Public methods beyond this Protocol exist only where §9.1.4 requires a direct call — `MemoryService.store_fact/retrieve/forget`, `StateManager.transition`, `AffectService.set_affect`. Everything else is bus-mediated.
+Public methods beyond this Protocol exist only where §9.1.4 requires a direct call — `MemoryService.store_fact/retrieve/forget`, `StateManager.transition`, `AffectService.set_affect`, `MotionService.look_at` (M9's `GestureTools` surface, §3.9.1). Everything else is bus-mediated.
 
 ## 9.3 HAL ports
 
