@@ -109,17 +109,23 @@ ssh alisleiman0@<pi> 'cd /opt/avid && git log -1 --format="%h %ad %s" --date=sho
 
 #310's whole premise is six rig runs in which `set_affect` fired zero times. Off the rig it fires
 4 of 4, on both models, with a **byte-identical** capability clause (`git log -S` confirms nothing
-has touched it since #309). The clause fix is `bc05261`, **2026-08-16 — the same day #310 was
-filed.** So the leading explanation is no longer a prompt at all: *the machine is not the repo*,
-and if `/opt/avid` had not been redeployed, the gate measured the **pre-#309** clause and #310's
-"after #309" rows are mislabelled through no fault of the record.
+has touched it since #309). And the clock is tighter than "the same day": PR #309 merged
+**13:35:54 UTC** on 2026-08-16 and **#310 was filed 13:36:34 UTC — forty seconds later.** So the
+issue's runs, including the two rows it describes as *"after #309"*, cannot have been made against
+a `main` build. *The machine is not the repo*: if `/opt/avid` was not redeployed, the gate measured
+the **pre-#309** clause, and the "after #309" rows are mislabelled through no fault of the record.
 
 **If that SHA predates `bc05261`, #310 closes as already fixed by #309** — and, more importantly,
 every other live-run conclusion drawn in that window is suspect for the same reason. It is one
-command and it should be run before any measurement, not after one disagrees. (The runner-up
-explanations, in order: **#283** — 50 Hz mains hum defeats the voice gate and cost M8's AC-7 nine
-dropped turns, so the rig's audio is materially worse than a synthesized stimulus; then session
-shape — the gate's ~30 turns with a §6.7 memory block against the probe's cold 12.)
+command and it should be run before any measurement, not after one disagrees.
+
+⚠️ **Correction to the first version of this item:** it named **#283** (mains hum) as runner-up and
+called it *"`prio:must` and open"*. It is **closed** — 2026-08-16 11:02 UTC — and the cause was not
+hum but ALSA **Auto Gain Control** (`23d7e9e` 10:45 UTC, `5d86e94` 11:02 UTC; see `journal.md`).
+Both audio fixes predate #310's filing by ~2.5 h, so degraded capture is a *weaker* explanation
+than first ranked — and it only survives at all in the branch where the Pi was not carrying those
+fixes either, which is the same deployment question. The genuine runner-up is now **session
+shape**: the gate's ~30 turns with a §6.7 memory block against the probe's cold 12.
 
 **1. 🎁 Collect M10's AC-0 evidence. One command, and it costs nothing.** M10 was sealed **one
 criterion short, on the record**: AC-0 (the robot initiates on multiple unattended mornings) was

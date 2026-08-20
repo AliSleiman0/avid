@@ -50,13 +50,27 @@ is behaving correctly**. AC-1 exists precisely to stop that, and it just did its
 Six live runs on the rig produced zero. Two laptop sessions produce 8/8. The difference is
 therefore in the **conditions**, not the tool, and the candidates are now, in order:
 
-1. ⚠️ **The rig may not have been running the code the repo shows.** #309's clause fix landed in
-   `bc05261` on **2026-08-16** — the same day #310 was filed. `git log` confirms the clause has
-   not been touched since, so the string this run used is byte-identical to the one #310 reports
-   as failing. *The machine is not the repo* (CLAUDE.md, `deploy/PI_OPERATIONS.md`): if
-   `/opt/avid` had not been redeployed, the gate measured the pre-#309 clause and #310's "after
-   #309" rows are mislabelled through no fault of their author. **One SSH command settles it**
-   and it should be the first thing run when the Pi is back:
+1. ⚠️ **The rig was almost certainly not running the code the repo shows — the clock says so.**
+   `git log` confirms the clause has not been touched since #309, so the string this run used is
+   byte-identical to the one #310 reports as failing. And the timestamps are much tighter than
+   "the same day":
+
+   | | UTC, 2026-08-16 |
+   |---|---|
+   | `23d7e9e` — AGC capture fix (#296) | 10:45:55 |
+   | `5d86e94` — high-pass the level measurement (#283) | 11:02:25 |
+   | #283 closed | 11:02:27 |
+   | **PR #309 merged (`bc05261`, the clause fix)** | **13:35:54** |
+   | **#310 filed** | **13:36:34** |
+
+   **#310 was opened 40 seconds after #309 landed on `main`.** So its runs — including the two
+   rows described as "after #309" — cannot have been made against a `main` build; at best they ran
+   a build from the PR branch, and whether the *rig* was carrying it is exactly the unknown. *The
+   machine is not the repo* (CLAUDE.md, `deploy/PI_OPERATIONS.md`): if `/opt/avid` was not
+   redeployed, the gate measured the **pre-#309** clause — and, given the times above, plausibly
+   the pre-AGC-fix capture as well. Nothing here is a criticism of the record; it is the ordinary
+   hazard of grading a machine against a repo. **One SSH command settles it** and it should be the
+   first thing run when the Pi is back:
 
    ```sh
    ssh alisleiman0@<pi> 'cd /opt/avid && git log -1 --format="%h %ad %s" --date=short'
@@ -64,10 +78,15 @@ therefore in the **conditions**, not the tool, and the candidates are now, in or
 
    If that SHA predates `bc05261`, #310 is explained and closes as *already fixed by #309*.
 
-2. **Audio quality.** #283 — 50 Hz mains hum defeats the voice gate — cost M8's AC-7 conversation
-   nine dropped turns. SAPI speech into a socket is far cleaner than a real mic on that desk, and
-   a model reconstructing a fragmented utterance may well spend the turn answering rather than
-   decorating. #283 is `prio:must` and open.
+2. **Audio quality — demoted on a closer look at the clock.** This first read "#283 is `prio:must`
+   and open"; **it is neither.** #283 closed **2026-08-16 11:02 UTC**, and its real cause was not
+   mains hum at all but ALSA **Auto Gain Control** amplifying a quiet room until its own noise
+   floor read as speech (`23d7e9e` 10:45 UTC, `5d86e94` 11:02 UTC; see `docs/journal.md`). Both
+   fixes therefore predate #310's filing by ~2.5 hours. Degraded capture remains a *plausible*
+   contributor — SAPI speech into a socket is still cleaner than a real mic on that desk, and a
+   model reconstructing a fragmented utterance may spend the turn answering rather than decorating
+   — but it is no longer supported by an open defect, and it only survives at all in the branch
+   where the Pi was **not carrying those fixes either**. Which is candidate 1 again.
 
 3. **Session shape.** These sessions were cold and short (12 turns, no §6.7 memory block); the
    gate's were ~30 turns with layer 4 injected. Cheap to test from a laptop if 1 and 2 come back
