@@ -9,11 +9,13 @@ adapter's own stdlib-only design.
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID
 
 import pytest
 
 from avid.adapters import HealthServer
+from avid.core.metrics import MetricsRegistry, ProvidedMetrics
 
 
 async def _request(port: int, path: str) -> tuple[int, bytes]:
@@ -221,3 +223,70 @@ async def test_quiet_without_a_behaviour_engine_is_503_not_a_silent_success() ->
         await server.stop()
 
     assert b"503 Service Unavailable" in response
+
+
+# ── GET /metrics (#380, SDS §3.12.2, §9.5) ───────────────────────────────────────────────────
+
+
+async def test_metrics_returns_the_snapshot_as_json() -> None:
+    registry = MetricsRegistry()
+    registry.register("turns", lambda: 3)
+    server = HealthServer(bind="127.0.0.1", port=0, metrics=ProvidedMetrics(registry))
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/metrics")
+        assert status == 200
+        assert json.loads(body) == {"metrics": {"turns": 3}, "absent": []}
+    finally:
+        await server.stop()
+
+
+async def test_metrics_without_a_source_is_503_not_an_empty_reading() -> None:
+    """⚠️ The endpoint's own "absent is not zero" rule, applied at the door.
+
+    An unwired registry answering `{}` with 200 would say "I measured, and there was nothing" —
+    which is the M4 failure in HTTP form. 503 says "I cannot measure", and those are different.
+    """
+    server = HealthServer(bind="127.0.0.1", port=0)
+    await server.start()
+    try:
+        status, _ = await _request(server.bound_port, "/metrics")
+        assert status == 503
+    finally:
+        await server.stop()
+
+
+async def test_metrics_reports_a_broken_provider_without_failing_the_request() -> None:
+    """A metrics endpoint that 500s because one counter is broken loses the other eleven — and a
+    reliability defect living inside a reliability feature is the worst place for one (§3.12.3)."""
+    registry = MetricsRegistry()
+    registry.register("fine", lambda: 1)
+    registry.register("broken", lambda: 1 / 0)
+    server = HealthServer(bind="127.0.0.1", port=0, metrics=ProvidedMetrics(registry))
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/metrics")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["metrics"] == {"fine": 1}
+        assert payload["absent"] == ["broken"]
+    finally:
+        await server.stop()
+
+
+async def test_metrics_survives_an_unserialisable_value() -> None:
+    """The registry catches a failing provider; this catches a provider that *succeeds* and hands
+    back something json cannot render. Still never an exception reaching the loop."""
+
+    class _Opaque:
+        pass
+
+    registry = MetricsRegistry()
+    registry.register("weird", _Opaque)
+    server = HealthServer(bind="127.0.0.1", port=0, metrics=ProvidedMetrics(registry))
+    await server.start()
+    try:
+        status, _ = await _request(server.bound_port, "/metrics")
+        assert status == 500
+    finally:
+        await server.stop()

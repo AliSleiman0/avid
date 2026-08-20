@@ -63,6 +63,7 @@ from avid.core.banner import describe_runtime, format_banner
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
+from avid.core.metrics import MetricsRegistry, ProvidedMetrics
 from avid.core.personality import compose, compose_instructions
 from avid.core.ports import (
     BootLog,
@@ -627,6 +628,32 @@ def _build_notifier(config: Config) -> ServiceNotifier:
             return SystemdNotifier(address=config.notify_socket)
 
 
+def _register_service_metrics(
+    metrics: MetricsRegistry,
+    *,
+    observability: ObservabilityService,
+    cost_meter: CostMeterService,
+) -> None:
+    """Feed §3.12.2's registry from the two services that own no task (#380).
+
+    They are wired for their subscriptions and dropped, so they never reach the returned
+    ``services`` and this is the only scope in which they exist. Still the composition root (P3):
+    ``_wire_services`` is called by ``_run`` and nowhere else, and **neither service learns that
+    metrics exist** — the coupling runs one way, through a lambda, exactly as
+    ``ObservabilityService``'s own docstring anticipated ("read by a future GET /metrics").
+    """
+    metrics.register("transitions", lambda: observability.transitions)
+    metrics.register("triggers_fired", lambda: observability.triggers_fired)
+    metrics.register("triggers_disabled", lambda: observability.triggers_disabled)
+    metrics.register("gestures", lambda: observability.gestures)
+    metrics.register("turns", lambda: cost_meter.turns)
+    metrics.register("cost_usd", lambda: round(cost_meter.total_cost_usd, 6))
+    metrics.register(
+        "projected_monthly_usd", lambda: round(cost_meter.projected_monthly_usd, 4)
+    )
+    metrics.register("cached_ratio", lambda: round(cost_meter.cached_ratio, 4))
+
+
 def _wire_services(
     *,
     bus: AsyncioEventBus,
@@ -650,6 +677,10 @@ def _wire_services(
     cues: CueBank,
     config: Config,
     adapter_health: MutableMapping[str, bool] | None = None,
+    # §3.12.2's registry (#380). Optional so the existing direct-call tests keep working with the
+    # arguments they already pass — a metrics registry is an observer of the wiring, not a part of
+    # it, and a test asserting the subscriber graph should not have to know one exists.
+    metrics: MetricsRegistry | None = None,
 ) -> Sequence[Service]:
     """Construct the services, register what they *declared*, return the ones with an owned task.
 
@@ -811,6 +842,14 @@ def _wire_services(
     # catalog and none in the code — state.transitioned's is even tagged (M10). Owns no task, so
     # like the two faces it is wired for its subscriptions and then dropped.
     observability = ObservabilityService()
+    # §3.12.2's registry (#380) is fed HERE because these two services own no task and are
+    # therefore wired and dropped — they never appear in the returned `services`, so this is the
+    # only scope in which they exist. Still the composition root (P3): `_wire_services` is called
+    # by `_run` and nowhere else, and neither service learns that metrics exist.
+    if metrics is not None:
+        _register_service_metrics(
+            metrics, observability=observability, cost_meter=cost_meter
+        )
     # The episode recorder (#123, SDS §7.5): the write-only transcript observer. Subscribes to the four
     # conversation.* facts and mirrors each into the episodes table, keyed by correlation_id; it
     # publishes nothing (no bus handed to it) and reads nothing back into any flow (AC-4). It owns one
@@ -905,6 +944,8 @@ async def _run(config: Config) -> int:
     episode_store = _build_episode_store(config, clock=clock)
     trigger_store = _build_trigger_store(config, clock=clock)
     boot_log = _build_boot_log(config, clock=clock)
+    # Stamped here so `uptime_s` and the boot_log row describe the same instant.
+    boot_started_at = clock.now()
     text_model = _build_text_model(config)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
@@ -939,6 +980,13 @@ async def _run(config: Config) -> int:
     # ``_wire_services`` for why that order is not negotiable. This is the line that makes the
     # display a face and the mic/speaker/VAD an audio loop, rather than health-map entries. It
     # returns the services with an owned task (AudioService) for the lifecycle to start/stop.
+    metrics = MetricsRegistry()
+    metrics.register("build", lambda: describe_runtime(config, config_path="")["build"])
+    metrics.register("uptime_s", lambda: clock.now() - boot_started_at)
+    # The failure a soak exists to surface: §3.5 says silent drops are a debugging catastrophe and
+    # loud drops are a tuning signal — and until now "loud" meant one log line per drop, visible
+    # while someone watched and invisible over thirty days.
+    metrics.register("bus_queues", bus.queue_stats)
     services = _wire_services(
         bus=bus,
         clock=clock,
@@ -961,16 +1009,26 @@ async def _run(config: Config) -> int:
         cues=cues,
         config=config,
         adapter_health=adapter_health,
+        metrics=metrics,
     )
     # The control API is built *after* the services, and that ordering is #244's: §9.5's
     # POST /quiet sets the same state the `set_quiet` tool does, through the same
     # `BehaviorTools` port, so the server needs the behaviour engine to exist first. Two doors,
     # one room — §9.5 calls the route "also reachable via set_quiet tool", and the only way to
     # make that true rather than approximately true is for both to call one method.
+    # §3.12.2's registry (#380). Assembled HERE because the composition root is the only place
+    # that holds every source (P3) — which keeps each service ignorant that metrics exist and keeps
+    # the registry ignorant of what a service is. Nothing registers itself; nothing imports the
+    # registry but this line.
+    #
+    # ⚠️ Every provider is a cheap in-memory read (P8): a snapshot runs inline on the loop while
+    # the robot may be mid-turn. HISTORICAL uptime is deliberately absent — that is the soak
+    # grader's SQL over `boot_log` (#383), not a query behind an HTTP GET.
     health = HealthServer(
         bind=config.api.bind,
         port=config.api.port,
         behavior=next(s for s in services if isinstance(s, BehaviorService)),
+        metrics=ProvidedMetrics(metrics),
     )
     return await lifecycle.run(
         bus=bus,

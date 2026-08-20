@@ -500,3 +500,38 @@ def test_subscribe_rejects_non_positive_maxsize() -> None:
     bus = AsyncioEventBus()
     with pytest.raises(ValueError, match="maxsize"):
         bus.subscribe(TickEvent, _noop, name="tiny", maxsize=0)
+
+
+async def test_queue_stats_reports_depth_capacity_and_drops_per_subscriber() -> None:
+    """#380 — overflow is the failure a 30-day soak exists to surface.
+
+    §3.5's rule is that silent drops are a debugging catastrophe and loud drops are a tuning
+    signal. Until this existed, "loud" meant one log line per drop: visible while someone was
+    watching, invisible over a month. ``dropped`` is monotonic for the process's life, which is
+    what makes it readable *afterwards* rather than only live.
+    """
+    bus = AsyncioEventBus()
+    release = asyncio.Event()
+
+    async def gated(_: Event) -> None:
+        await release.wait()  # block on the first event so the queue can fill
+
+    bus.subscribe(
+        TickEvent, gated, name="gated", policy=OverflowPolicy.DROP_OLDEST, maxsize=2
+    )
+
+    # Readable before start(), so a boot-time snapshot describes the declared graph rather than
+    # raising on a bus that has not run yet.
+    assert bus.queue_stats() == {"gated": {"depth": 0, "maxsize": 2, "dropped": 0}}
+
+    async with bus:
+        await bus.publish(make(source="e1"))
+        await asyncio.sleep(0)  # worker picks up e1 and blocks; queue now empty
+        await bus.publish(make(source="e2"))
+        await bus.publish(make(source="e3"))  # queue full
+        await bus.publish(make(source="e4"))  # overflow -> one drop
+        stats = bus.queue_stats()["gated"]
+        assert stats["dropped"] == 1
+        assert stats["depth"] == 2
+        assert stats["maxsize"] == 2
+        release.set()

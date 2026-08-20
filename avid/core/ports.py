@@ -33,7 +33,7 @@ never imports back — the dependency is one-directional, no cycle.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -1256,4 +1256,26 @@ class BootLog(Protocol):
         Overlapping rather than contained, deliberately: the run that was already going when a
         soak window opened is exactly the run that carries the window's first seconds of uptime,
         and dropping it would understate availability at both ends of every window."""
+        ...
+
+
+@runtime_checkable
+class MetricsSource(Protocol):
+    """What ``GET /metrics`` needs, and nothing more (#380, SDS §3.12.2, §9.5).
+
+    One method, deliberately. The control API's job is to serialise a reading, not to know what a
+    metric is or where one comes from — so this port carries a mapping and no vocabulary. The
+    composition root decides what is in it (P3); ``HealthServer`` depends only on this, exactly as
+    it depends on :class:`BehaviorTools` rather than on ``BehaviorService``.
+
+    ⚠️ **Synchronous, and that is a constraint rather than an oversight.** It is read inline on the
+    event loop while the robot may be mid-turn, so every provider behind it must be a cheap
+    in-memory read (P8). Anything needing a query belongs to the soak grader's SQL, not here.
+    """
+
+    def snapshot(self) -> Mapping[str, object]:
+        """The current reading, plus the names of anything that could not be read.
+
+        ⚠️ The second half is the point: an instrument that is absent must not report ``0``,
+        because a `0` from an unwired counter reads exactly like a real one."""
         ...
