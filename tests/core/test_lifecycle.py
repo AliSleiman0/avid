@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 
 import pytest
 
@@ -473,13 +474,30 @@ async def test_the_heartbeat_keeps_last_seen_moving_while_the_robot_runs() -> No
     await asyncio.wait_for(ready.wait(), timeout=1.0)
     opened = (await boot_log.records(since=0, until=10**12))[0].last_seen_at
 
-    # FakeClock wakes only sleepers it *crosses*, so cross the interval and yield enough for the
-    # woken task to run its UPDATE through the store's executor.
-    await clock.advance(60)
-    for _ in range(50):
+    # ⚠️ **Wait for the heartbeat to be SLEEPING before advancing.** `FakeClock.advance` wakes
+    # only the sleepers it *crosses*; a task that has not yet reached `clock.sleep(60)` registers
+    # its deadline afterwards and waits for a crossing that never comes. `spawn()` returns before
+    # the coroutine has run, so this is a real race — and it is the one that made the first
+    # version of this test pass on both `test` legs and fail under `async-debug`, where task
+    # start-up interleaves differently.
+    for _ in range(200):
+        if clock.sleepers:
+            break
         await asyncio.sleep(0)
+    assert clock.sleepers, "the heartbeat task never reached its sleep"
+
+    await clock.advance(60)
+
+    # ⚠️ Wait on a REAL clock, not on `asyncio.sleep(0)` spins. The heartbeat's UPDATE goes
+    # through the store's ThreadPoolExecutor, and **executor work outlives any number of zero
+    # sleeps** — yielding the loop does not make another thread finish. The first version spun 50
+    # times: it passed on both `test` legs and failed under `async-debug`, which is slower. A race,
+    # not a P8 stall, and green for the wrong reason on two legs out of three.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
         if (await boot_log.records(since=0, until=10**12))[0].last_seen_at > opened:
             break
+        await asyncio.sleep(0.005)
 
     assert (await boot_log.records(since=0, until=10**12))[
         0
