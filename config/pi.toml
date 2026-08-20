@@ -261,5 +261,13 @@ wav_dir     = "/var/lib/robot/speaker"
 bind = "127.0.0.1"              # asserted loopback at load. §9.5.
 port = 8787
 
+[runtime]                       # §12.6 — O5's instrument (#379)
+# How often the process stamps "still alive" into boot_log. This IS the precision of every
+# downtime figure: a run that dies without warning is credited only to its last heartbeat, so
+# uptime may be understated by up to one interval and never overstated. It is also the only
+# timer-driven write in the system, so it is deliberately slow (~1,440 tiny updates/day)
+# against §2.7.1's storage row. NOT the same thing as [systemd] watchdog_interval_s.
+heartbeat_interval_s = 60.0
+
 [systemd]                       # §3.11.3 — supervision knobs (AVID-38)
 watchdog_interval_s = 15.0      # ping WATCHDOG=1 twice per WatchdogSec (unit: 30s)

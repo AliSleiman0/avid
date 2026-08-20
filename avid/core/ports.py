@@ -51,12 +51,14 @@ from avid.core.realtime import RealtimeEvent
 from avid.core.schedule import Routine
 from avid.domain import (
     Affect,
+    BootRecord,
     Direction,
     Event,
     Fact,
     LookAtResult,
     RetrievalMatch,
     RoutineSpec,
+    StopReason,
     TriggerRecord,
 )
 
@@ -1206,4 +1208,52 @@ class Service(Protocol):
     def subscriptions(self) -> Sequence[Subscription]:
         """Declare — not register — what this service wants to hear (SDS §9.2). The
         composition root registers these before the bus starts (P3)."""
+        ...
+
+
+@runtime_checkable
+class BootLog(Protocol):
+    """The record of what ran, and for how long (#379, SDS §12.6).
+
+    **O5's numerator and denominator, and nothing else.** *"30-day soak, ≥99% uptime, zero manual
+    restarts"* was ungradeable before this port existed: `lifecycle.run` minted a `boot_id` and
+    logged one line, and that was the whole trace a run left behind.
+
+    Defined by *what the application needs*, never by what SQLite offers (ADR-003): the lifecycle
+    opens a record, keeps it alive, and closes it — three verbs, matching the three things a
+    process can do about its own existence. The read side is one method, because the only consumer
+    is the M11 gate asking "what ran during this window".
+
+    ⚠️ **A record is closed only on the ordered teardown.** Nothing here writes "crashed", because
+    nothing *can*: a crash, a watchdog kill and a power cut all skip this code entirely. An open
+    record belonging to a process that is no longer running **is** the representation of an
+    unplanned stop, and reading it that way is what makes "zero manual restarts" gradeable
+    (:class:`~avid.domain.runtime.StopReason`).
+    """
+
+    async def open_boot(self, *, boot_id: str, build: str) -> None:
+        """Record that a run has started, stamping wall and monotonic clocks.
+
+        ``build`` comes from the §373 banner. It is stored per-run rather than assumed constant,
+        because §12.6 refuses to grade a window whose build changed mid-flight as one window."""
+        ...
+
+    async def heartbeat(self) -> None:
+        """Mark the current run still alive.
+
+        The only thing that bounds downtime for a run that ends without warning: without it the
+        last *known* liveness is the boot itself, and a crash after 29 days would be
+        indistinguishable from one after 29 seconds."""
+        ...
+
+    async def close_boot(self, *, reason: StopReason) -> None:
+        """Record the ordered teardown — i.e. that a person or a deploy asked for this."""
+        ...
+
+    async def records(self, *, since: int, until: int) -> Sequence[BootRecord]:
+        """Every run overlapping ``[since, until)``, oldest first.
+
+        Overlapping rather than contained, deliberately: the run that was already going when a
+        soak window opened is exactly the run that carries the window's first seconds of uptime,
+        and dropping it would understate availability at both ends of every window."""
         ...

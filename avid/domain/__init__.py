@@ -115,6 +115,7 @@ from avid.domain.motion import (
     gesture_for_direction,
     plan,
 )
+from avid.domain.runtime import BootRecord, StopReason, uptime_ratio
 from avid.domain.state import (
     EVENT_TYPES,
     TRANSITION_TABLE,
@@ -168,6 +169,9 @@ __all__ = [
     "AffectChanged",
     "AffectTier",
     "SEMANTIC_AFFECTS",
+    "BootRecord",
+    "StopReason",
+    "uptime_ratio",
     # audio.* events + pre-roll ring buffer (#86) + the echo gate's arithmetic (AVID-159)
     "AudioCaptureResumed",
     "AudioCaptureStalled",

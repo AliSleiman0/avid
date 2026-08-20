@@ -345,19 +345,36 @@ def test_half_supersession_is_rejected_by_the_check(tmp_path: Path) -> None:
 # --- runner tier: the migration bookkeeping (AC-2) ---------------------------
 
 
-def test_migrate_applies_0001_and_records_its_checksum(tmp_path: Path) -> None:
+def _shipped_migrations() -> list[str]:
+    """The .sql files that actually ship, sorted — the same list ``migrate`` walks.
+
+    Derived rather than hand-written (it said ``== 1`` until #379 added ``0002_runtime.sql``), so
+    the next migration cannot make this test wrong. What is being asserted is *every shipped
+    migration is applied and recorded*, and that claim should not need editing to stay true.
+    """
+    from importlib.resources import files
+
+    entries = files("avid.adapters").joinpath("migrations").iterdir()
+    return sorted(e.name for e in entries if e.name.endswith(".sql"))
+
+
+def test_migrate_applies_every_shipped_migration_and_records_its_checksum(
+    tmp_path: Path,
+) -> None:
     conn = connect(tmp_path / "m.db")
     try:
         migrate(conn, now=123)
         rows = conn.execute(
-            "SELECT version, applied_at, checksum FROM schema_migrations"
+            "SELECT version, applied_at, checksum FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert len(rows) == 1
-        assert rows[0]["version"] == 1
-        assert rows[0]["applied_at"] == 123
-        assert len(rows[0]["checksum"]) == 64  # a sha256 hex digest
-        # The schema is really there.
+        assert len(rows) == len(_shipped_migrations())
+        assert [r["version"] for r in rows] == list(range(1, len(rows) + 1))
+        for row in rows:
+            assert row["applied_at"] == 123
+            assert len(row["checksum"]) == 64  # a sha256 hex digest
+        # The schema is really there — 0001's table and 0002's (#379, SDS §12.6).
         assert conn.execute("SELECT COUNT(*) c FROM facts").fetchone()["c"] == 0
+        assert conn.execute("SELECT COUNT(*) c FROM boot_log").fetchone()["c"] == 0
     finally:
         conn.close()
 
@@ -370,7 +387,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
             conn, now=2
         )  # second run: version already applied, checksum matches → no-op
         count = conn.execute("SELECT COUNT(*) c FROM schema_migrations").fetchone()["c"]
-        assert count == 1
+        assert count == len(_shipped_migrations())
     finally:
         conn.close()
 

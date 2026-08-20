@@ -26,6 +26,7 @@ from avid.adapters import (
     AlsaMicrophone,
     AlsaSpeaker,
     CapturingRealtimeClient,
+    FakeBootLog,
     FakeCamera,
     FakeDisplay,
     FakeEmbedder,
@@ -50,6 +51,7 @@ from avid.adapters import (
     Picamera2Camera,
     ReplayRealtimeClient,
     SileroVad,
+    SqliteBootLog,
     SqliteEpisodeStore,
     SqliteFactRepo,
     SqliteTriggerStore,
@@ -63,6 +65,7 @@ from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import Axis
 from avid.core.personality import compose, compose_instructions
 from avid.core.ports import (
+    BootLog,
     Camera,
     Clock,
     Display,
@@ -413,6 +416,23 @@ def _build_fact_repository(config: Config, *, clock: Clock) -> FactRepository:
                 f"'fake' exist (#117)"
             )
     return repo
+
+
+def _build_boot_log(config: Config, *, clock: Clock) -> BootLog:
+    """Select the ``BootLog`` backing O5's accounting (#379, SDS §12.6).
+
+    Keyed off ``[adapters] store`` like the other repositories, so the whole persistence layer
+    stays one switch: a profile cannot end up with a real fact store and an in-memory boot log,
+    which would produce a soak whose uptime history quietly vanished on restart — and vanished
+    *silently*, since an empty history and a perfect one are both "no gaps recorded".
+    """
+    match config.adapters.store:
+        case "fake":
+            return FakeBootLog(clock=clock)
+        case "sqlite":
+            return SqliteBootLog(db_path=config.memory.db_path, clock=clock)
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(f"store adapter {other!r} is not available")
 
 
 def _build_episode_store(config: Config, *, clock: Clock) -> EpisodeStore:
@@ -884,6 +904,7 @@ async def _run(config: Config) -> int:
     fact_store = _build_fact_repository(config, clock=clock)
     episode_store = _build_episode_store(config, clock=clock)
     trigger_store = _build_trigger_store(config, clock=clock)
+    boot_log = _build_boot_log(config, clock=clock)
     text_model = _build_text_model(config)
     realtime = _build_realtime(config, clock=clock)
     cues = _build_cue_bank(config, speaker=speaker)
@@ -908,6 +929,7 @@ async def _run(config: Config) -> int:
         "embedder": True,
         "fact_store": True,
         "episode_store": True,
+        "boot_log": True,
         "retriever": True,
         "text_model": True,
         "notifier": True,
@@ -959,6 +981,12 @@ async def _run(config: Config) -> int:
         health=health,
         services=services,
         watchdog_interval_s=config.systemd.watchdog_interval_s,
+        boot_log=boot_log,
+        # The same identifier the #373 banner logged, so a row in `boot_log` and a line in the
+        # journal name the same build. Two answers to "which build?" is the drift #373 exists to
+        # end; there is deliberately only one source.
+        build=describe_runtime(config, config_path="")["build"],
+        heartbeat_interval_s=config.runtime.heartbeat_interval_s,
     )
 
 

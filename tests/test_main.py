@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from avid.adapters import (
+    FakeBootLog,
     FakeCamera,
     FakeClock,
     FakeDisplay,
@@ -43,6 +44,7 @@ from avid.adapters import (
     SystemdNotifier,
 )
 from avid.core import lifecycle
+from avid.core.banner import describe_runtime
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
 from avid.core.hal import Axis, DisplayFrame
@@ -457,11 +459,22 @@ def test_main_wires_and_delegates_to_lifecycle(
         "embedder": True,
         "fact_store": True,
         "episode_store": True,
+        # #379: O5's instrument is an adapter like any other, and a soak whose uptime
+        # history silently vanished on restart would be the worst kind of green run.
+        "boot_log": True,
         "retriever": True,
         "text_model": True,
         "notifier": True,
         "health": True,
     }
+    # #379: O5's instrument reaches the lifecycle, with the SAME build string the #373 banner
+    # logs and the heartbeat cadence from config. Two answers to "which build?" is the drift #373
+    # exists to end, so this asserts they agree rather than that each is merely present.
+    assert isinstance(captured["boot_log"], FakeBootLog)
+    sim = load_config(_SIM_TOML)
+    assert captured["heartbeat_interval_s"] == sim.runtime.heartbeat_interval_s
+    assert captured["build"] == describe_runtime(sim, config_path="")["build"]
+
     assert captured["bus"] is not None
     assert captured["clock"] is not None
     assert isinstance(captured["notifier"], FakeServiceNotifier)

@@ -9,6 +9,7 @@ idiomatic name, matching SDS §9.3, AVID-12's acceptance criteria, and the bus's
 ``_SystemClock`` stand-in.
 """
 
+from avid.adapters.boot_log import FakeBootLog, SqliteBootLog
 from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay, FramebufferDisplay
@@ -86,6 +87,8 @@ __all__ = [
     # one class satisfying both ports, SQLite store + in-memory fake
     "SqliteTriggerStore",
     "FakeTriggerStore",
+    "SqliteBootLog",
+    "FakeBootLog",
     # Hybrid retriever + §8.2 vector packing (#120) — the memory read path
     "HybridRetriever",
     "pack_embedding",
