@@ -6,241 +6,223 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = 1d64caa` · **`v0.M10.0` tagged** · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = ddd8e46` · `v0.M10.0` tagged · gh `AliSleiman0`.
 
-## ⭐ Next session — build M9 "It moves"
+## ⭐ Next session — M9 is CODE-COMPLETE. What is left needs the Pi and a person.
 
-**M10 is sealed and nothing is in flight — zero open PRs.** The next milestone is **M9 (motion)**,
-chosen by the owner over M11. Epic **#198**, ten children **#199–#207**, ~7.5 IED labelled against
-PMP's 5.
+**Seven of nine M9 issues are closed and merged. Zero open PRs.** #199 #200 #201 #202 #203 #204
+#205 are done, plus #289 and a new #356. What remains is **#206** (the SPK-4 brown-out spike) and
+**#207** (the live gate), and neither can be advanced from a laptop.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
 `git rev-parse --short origin/main`. See BATON-CAN-BE-WRONG below.
 
-### Start by reading #198. It is unusually good, and it did the homework.
+### The bench evening, in order
 
-M10's epic was wrong in five places and the plan had to open with issue hygiene. **#198 is not**:
-it states five facts "verified against code + SDS" and a scope boundary, and the ones re-checked
-this session hold up. Do not re-derive them — read the epic, then read #199 and #201, and start.
+**1. #206 first, and it is time-boxed to 0.5 IED.** *Does the servo brown out the Pi under stall
+on a shared rail?* Answer it and stop. R-04's failure mode is not "the robot glitches" — it is
+**SD-card corruption**, the one failure here that costs a re-image rather than a restart. The
+register line was written for **one** servo; the rig has two and the worst case is both stalled at
+once. Photograph the wiring *before* power-on; if it is not a separate 5–6 V rail with common
+ground, fix the wiring rather than "just trying it". Bounded holds only — a held stall cooks the
+gearset — and afterwards confirm both servos still traverse their full declared reach.
 
-The three commitments it says are pre-decided are worth internalising before writing anything,
-because each one is a trap the milestone is otherwise prone to:
+**2. Reprovision the Pi. This is not optional and it now fails loudly.**
 
-1. **The gesture is a domain intent; the realization is negotiated** (§3.9.3). `plan(gesture, axes)
-   -> tuple[Keyframe, ...]` is a **pure function in `domain/`**, and the rig's inventory comes from
-   `Servo.axes` — never from a config list that can drift from the wiring. Get this wrong and the
-   gesture engine is untestable without a Pi, which is the whole trap.
-2. **Clamping is the adapter's job and already works** (§3.9.1). `MotionService` owns *scheduling* —
-   one gesture at a time, preemption, relax. It does not re-clamp.
-3. **A moving servo is an effect, not an obligation.** The three `motion.*` events are
-   observability. Nothing publishes "please nod": affect changes, `MotionService` subscribes, it
-   moves. The tool path reaches it through a **port**, exactly as memory does.
-
-### #198's five facts were re-verified against the tree — all five hold
-
-Unlike M10's epic, **#198 is accurate**. Confirmed 2026-08-20:
-
-1. ✅ `"motion"` is in `EVENT_DOMAINS` (`domain/events.py:27`) and the three events are normative in
-   §9.1.3 (`SDS.md:2864-2872`). **No `Event` subclasses exist** — the only occurrences are three
-   strings in `tests/domain/test_events.py:52-54`'s `CATALOG`. #201 writes the classes.
-2. ✅ `gesture_preempted` covers both causes, stated at `SDS.md:2872`.
-3. ✅ Both adapters and the contract suite exist and need no change (`adapters/servo.py`,
-   `tests/contract/test_servo.py`), and `test_move_is_cancellable` already proves the mid-sweep
-   cancel preemption depends on.
-4. ✅ `ServoConfig` is singular (`config.py:143-166`, eight flat keys, **no validators**) and
-   `MotionConfig.axes = ("pan",)` (`config.py:706-709`) is a second copy of the inventory. **No
-   cross-validator ties them** — the reconciliation both docstrings promise does not exist yet.
-5. ✅ The tool transport is merged; `dispatch_tool_call` is a flat `if` chain over five constants.
-
-**So do not re-litigate the epic. Do read these three things it does not say.**
-
-### ⚠️ Three findings the epic does not mention, and each one costs a day if found late
-
-**1. ADR-009 has no text to accept.** The §3.3 index says *"Full text in Appendix A"*, but §16
-Appendices exists only in the table of contents and the document ends *"Sections 4, 5, 11–13, 15, 16
-to follow."* **There is no ADR-009 body anywhere in the repo** (ADR-008 is in the same state). #199
-reads like a status flip; it is actually **writing the ADR**. Size it accordingly.
-
-**2. `motion.gesture_started`'s payload would break P1 as specified.** §9.1.3 gives it
-`axes: tuple[Axis, ...]` — and `Axis` is a **`core.hal`** type (`core/hal.py:145-159`). A
-`domain/motion.py` event carrying it is a `domain → core` import, which the dependency rule forbids
-and `import-linter` fails on. **ADR-013 already solved exactly this shape for `BBox`**: declare the
-type in `domain/vision.py` and re-export it from `core/hal` (`hal.py:18-24`). So #201 has a real
-decision to make — move `Axis` into the domain the way `BBox` went, or change the payload to
-`tuple[str, ...]` and amend §9.1.3. **Pick one deliberately; do not discover it from a red CI.**
-
-**3. `look_at` is not in the SDS at all.** §6.6's tool table (`SDS.md:1526-1532`) lists exactly five
-tools. Per CLAUDE.md an interface that reaches the model must be in the SDS **before** the code, so
-#204 needs a sixth row — and #199 is the natural place to add it, since that issue is already the
-"the SDS leads" one.
-
-### What will break, so budget for it rather than being surprised
-
-- **`.importlinter`** — `avid.services.motion` is **not** on `service-independence` (nine services
-  are). The comment block already anticipates it by name: *"Add one line per service as it arrives
-  (M4 audio, M6 behavior, M8 vision, **M9 motion**, memory)."* Alphabetically between `memory` and
-  `observability`.
-- **`tests/test_main.py:415`** — a **positional, exact** list of wired service types. Adding
-  `MotionService` breaks it by design.
-- **`tests/test_main.py:564`** — a positional tuple unpack of `_wire_services`'s return, asserted
-  positionally *because the tuple's shape is the contract `lifecycle.run` consumes*.
-- **`main.py:925`** — `_ = servo`, with a comment saying in as many words that *"moving it is
-  MotionService's job (M9)"*. That line is deleted and `servo` joins `_wire_services`' parameters.
-- **`dispatch_tool_call`'s signature** gains `gesture: GestureTools`, which changes its only caller
-  (`services/conversation.py:721`).
-
-### Templates worth copying rather than inventing
-
-- **`services/presence.py:316-334`** is the preemption shape: cancel-then-arm, with the cancel
-  **synchronous** so the caller cannot stall, and `spawn()`'s done-callback ignoring `CancelledError`
-  so a cancelled task is a clean teardown rather than a reported death. A gesture needs exactly this,
-  plus a `motion.gesture_preempted` publish on the cancel that the nap does not do.
-- **`services/expression.py:139-146`** for the `Subscription(...)` declaration form and its
-  `event.monotonic_ns` staleness guard — it is the other `affect.changed` subscriber.
-- **`ports.py:985-1020`** (`AffectTools`) is the `GestureTools` template, including the rationale
-  that the Protocol is *load-bearing rather than ceremonial* because import-linter fails CI if
-  `conversation` ever names a service directly.
-
-### Order, and where it can go wrong
-
-```
-#199 ADR-009 accepted + SDS reconciled   [S]  ← FIRST, docs only, the SDS leads
-#200 [servo] grows to N axes             [S]  ← #199
-#201 Gesture vocabulary + pure plan()    [M]  ← #199   ← the heart of the milestone
-#202 Affect → gesture map                [S]  ← #201
-#203 MotionService                       [L]  ← #200 #201 #202   ← split this, it will exceed 400 lines
-#204 look_at tool + GestureTools port    [M]  ← #203
-#205 Idle micro-motion                   [S]  ← #203
-#206 ⚙ SPK-4 brown-out spike             [S]  ← #200
-#207 ⚙ M9 gate + tag v0.M9.0             [M]  ← all
+```sh
+sudo systemctl stop robot
+sudo install -m 644 -o root -g root /opt/avid/config/pi.toml /etc/robot/config.toml
+sudo install -m 644 -o root -g root /opt/avid/deploy/robot.service /etc/systemd/system/robot.service
+sudo systemctl daemon-reload
+# then flip [adapters] servo = "pca9685" on the MACHINE — the repo template ships every device
+# "fake" by design (PI_OPERATIONS §3); selecting real hardware is a provisioning act.
 ```
 
-**#199 first and alone.** Per CLAUDE.md an interface that reaches the model must be in the SDS
-*before* it is in the code, and ADR-009 is still `Proposed — needs your call`. Doing it first stops
-#200–#204 each re-litigating what the rig is.
+⚠️ **A machine still carrying the old one-axis `[servo]` now FAILS TO LOAD** rather than silently
+running on one axis. That is #200's deliberate loudness: sections are `extra="forbid"`, so
+`channel = 0` or `[motion] axes` at the top level is a hard error. Verify with `load_config`, never
+by eye.
 
-**#201 is where the milestone is won or lost.** A pure planner with the axes passed in is what makes
-"nod is a real tilt on two servos and degrades to a pan wiggle on one" a table-driven unit test
-instead of an evening with a screwdriver.
+**3. `#207`'s harness is already written and ready.**
 
-**#203 is labelled `[L]` and the ceiling is 400 changed lines per PR** — plan on two PRs
-(lifecycle + preemption, then fault-abort + relax), the way M10's `BehaviorService` was split.
+```sh
+/opt/avid/.venv/bin/python docs/demos/motion_pi.py --config /etc/robot/config.toml \
+    --json docs/demos/m9_evidence/gate.json
+```
 
-### The two that need hardware, and the rig is not currently ready
+It observes only. It grades AC-0/2/3/4/5, reports AC-1/4/6/7 as `HUMAN`, and **exits non-zero
+while any of those is unrecorded**. A run against `servo = "fake"` prints a loud warning before it
+does anything — that is the M4 failure exactly.
 
-**#206 (SPK-4) is a time-boxed 0.5 IED spike, not an investigation.** It guards **R-04**, whose
-failure mode is not "the robot glitches" but **SD-card corruption** — the Pi browning out mid-write.
-The register line was written for *one* servo; the rig has two, and worst case is both stalled at
-once. `ServoConfig`'s docstring carries the mitigation as an **assumption** the adapter cannot
-enforce. This is where it gets tested rather than restated. **Do it before #207**, and stop when the
-question is answered.
+### Five things to know before standing at the rig
 
-⚠️ **`FakeServo` records a trace, and a trace is not a moved head.** #207 names the trap in advance:
-a wrong channel, a stale one-axis config, a horn slipping on its spline, an I²C address collision —
-every one produces a perfect trace and a motionless robot. The M4 gate printed PASS while the robot
-was mute; this is the motion version of it.
+⚠️ **A trace is not a moved head.** `tests/e2e/test_m9_gate.py` proves the whole arc on every
+commit and every assertion in it is against `FakeServo`. A wrong channel, a stale config, a horn
+slipping on its spline, an I²C address collision — each produces a **perfect trace** and a
+motionless robot.
 
-### Rig state — verify before planning hardware work
+⚠️ **"Did it move" passes on the hardware ADR-009 replaced.** A pan-only robot still nods, because
+#201 degrades a nod to a small pan sway. What separates a 2 DoF rig from a 1 DoF one is that nod
+and turn land on **different axes** — ch13 and ch0. That is AC-2's real content.
 
-- **Servos verified 2026-07-21** through the real `Pca9685Servo` adapter: PCA9685 at **`0x40`**
-  (+`0x70` all-call), **ch0 = pan**, **ch13 = tilt/aux**. Both swept 0→90→0 smoothly and went limp
-  and silent on `relax()`. Pulse params `min 500 µs / max 2500 µs / 50 Hz`.
-- ✅ **R-04's mitigation is already wired**: PCA9685 V+ from a **separate 5–6 V supply**, its ground
-  tied to a Pi ground, Pi VCC feeding logic only. **Never the Pi 5 V pin.** #206 tests it under stall.
-- ⚠️ **`ch13` is NOT in `pi.toml`** — `[servo]` is a flat, singular section with `channel = 0` and
-  no validators, and `[motion] axes = ["pan"]` is a *second* copy of the inventory that nothing
-  reconciles with it. That is exactly what #200 fixes, and it means *no run today drives the second
-  axis*.
-- **`docs/demos/hal_pi.py --device servo`** already sweeps ch0 0→90→0 and relaxes. It is the fastest
-  way to confirm the rig is alive before writing any M9 code — and it drives **only ch0**, so it
-  proves nothing about ch13.
-- ✅ **The last M10 boot reporting `servo` as FAKE is expected, not a wiring problem.**
-  `config/pi.toml:14` ships `servo = "fake"` and always has — the switch has never been flipped to
-  `"pca9685"` in the template. `deploy/README.md:241` documents flipping it in
-  `/etc/robot/config.toml`, so check the **machine's** copy rather than assuming hardware is
-  unplugged. (An earlier draft of this baton guessed at the wiring; it was wrong.)
-- ⚠️ **The ILI9486 display panel still cannot be fitted alongside the amp + servo** — the 40-pin
-  header is full (`deploy/PI_OPERATIONS.md:374-376`). For #207's gate that means **you likely cannot
-  watch the face and the motion at the same time**, which matters because the gate criterion is
-  "affect drives gesture". Plan how you will observe both, or accept reading one from the log.
-- ⚠️ **The Pi dropped off the hotspot at ~02:05 on 2026-08-20** and was not reachable at the end of
-  the session. Address moves with the network; `172.20.10.6` was last known good.
+⚠️ **The direction convention is fixed in code and must be confirmed against the head.**
+Increasing degrees is **up** on tilt and **left** on pan. A mirrored horn is corrected
+**mechanically**, by reseating it on its spline — *not* by inverting a sign, because an inverted
+sign is invisible in a trace and surfaces months later as a servo aiming at the wrong side of the
+room (`domain/vision.py` already carries that warning for `BBox`).
 
-### What M10 left behind
+⚠️ **The reaches are provisional and AC-10 pins them.** `pi.toml` ships pan 30–150, tilt 60–120,
+commented `# provisional — #207`. `0–180` is the servo's *electrical* range, not the bracket's.
+⚠️ And they are now **genuinely different** from `[servo] actuation_deg` — see #356: the adapter
+used to calibrate its degree→pulse mapping from `max_deg`, which was accidentally correct only
+while both were 180.
 
-- **AC-0 was never run** and M10 was sealed one criterion short, on the record (PMP §5.2,
-  `docs/journal.md`). 🎁 **The trigger is still armed** — 23:55 EEST daily, `ignore_streak 0`, nothing
-  staged. Reading `proactive_log` on any morning costs one command and is free evidence:
+⚠️ **The display cannot be fitted alongside the amp and servo** — the 40-pin header is full. So
+AC-1 ("affect drives gesture") probably cannot be watched on the face and the head at once.
+**Decide which half is read from the log before starting**, not mid-run.
 
-  ```sh
-  ssh alisleiman0@<pi> 'sudo python3 -c "
-  import sqlite3
-  c=sqlite3.connect(\"/var/lib/robot/robot.db\")
-  for r in c.execute(\"select id,considered_at,outcome,reason,utterance,user_reaction from proactive_log order by id desc limit 5\"): print(r)"'
-  ```
+### What M9 changed that a later reader will trip over
 
-  An id≥16 `delivered` on an untouched night is AC-0's first real morning. **Append it to
-  `docs/journal.md` even though the tag has shipped.**
-- **#328** — the P8 async-debug gate now has **three false positives on three unrelated PRs** with
-  three different untouched tests (0.083 s, 0.074 s, **0.052 s** — two milliseconds over). Its
-  signal-to-noise on P8 is 0:3. Every red costs a merge-past-a-red-gate judgement call. M9 will hit
-  it too.
-- **#310** (`set_affect` never fires) matters more now than it did: **#202 maps affect → gesture**, so
-  a robot that cannot infer affect from what it just said will nod on the Tier-1 state baseline only.
-  Not a blocker — #198 says so explicitly — but it caps how alive M9 feels.
-- **#289** — `Pca9685Servo` shares the AVID-266 lazy-open shape. **Latent until #203 wires
-  preemption**, which is this milestone. Read it before writing the service.
-- ⚠️ **`facts` id=19 says "8 in the morning" while `routines` says `00:00`.** #346 makes the robot
-  state the schedule so the utterance is right, but the rows still disagree. Fix by **voice**, never
-  SQL — a raw `UPDATE` leaves an embedding for the old sentence and skews §7.7 retrieval silently.
+- **`Axis` moved into `domain/motion.py`** and is re-exported from `core/hal.py` — the ADR-013
+  `BBox` move, for ADR-009's reason. `avid.core.hal.Axis` is still the spelling every port and
+  adapter uses. Recorded in SDS §3.9.4.
+- **`[motion] axes` is deleted, not reconciled.** The rig's inventory is `Servo.axes` and there is
+  exactly one copy of it (§3.9.3). `[motion]` is now the service's tuning only.
+- **`MotionService` is the only caller of `move_to`/`relax`** — asserted by a test over the source
+  tree. `main.py`'s `_ = servo` is gone.
+- **The P8 gate was rebuilt mid-milestone** (#328). It still detects at 50 ms but now convicts only
+  on **gross** (≥ 100 ms, asyncio's own default) or **corroborated** (the same frame twice). A
+  declared load generator's own coroutine is exempt via `@pytest.mark.p8_load`. See below.
 
 ## Current state
 
-- **M10 sealed 2026-08-20 as `v0.M10.0`** on `1d64caa`. Epic #230, #245 and all 14 children closed;
-  milestone closed. PMP §5.2 and `docs/journal.md` both carry the seal **including what it did not
-  prove** — AC-0 never run, AC-1 staged, O3 unmeasured.
-- **Nine of eleven milestones tagged.** Only **M9** (motion, chosen next) and **M11** (product /
-  30-day soak, the critical path) remain.
-- **Zero open PRs.** `main = 1d64caa`.
-- **29 open issues, only 11 in a milestone** — 10 of those are M9, 1 is M11. The rest are
-  unscheduled: M7 memory-quality defects (#264/#265/#267), feature ideas, infrastructure.
-- **M9 is fully unblocked.** Five of the six issues #198's sequencing note put ahead of it are
-  closed; only **#157** (Realtime session-open latency, an M5 defect) is open and it does not block
-  motion.
-- **The Pi** was last at `alisleiman0@172.20.10.6` running `main` with `robot.service` active and
-  enabled; `/etc/robot/config.toml` carries `capture_stall_s = 5.0` (backup `.bak-pre-347`).
-  ⚠️ **It dropped off the hotspot at ~02:05 and was unreachable at session end.**
+- **M9 code-complete, not sealed.** Seven issues merged this session (#199–#205), plus #289, #356
+  and #328. Zero open PRs. `main = ddd8e46`.
+- **M10 sealed as `v0.M10.0`.** Nine of eleven milestones tagged; M9 and M11 remain.
+- **The suite is 1668 passed / 65 skipped**, on 3.11 and 3.13. `avid/domain/motion.py`,
+  `avid/services/motion.py`, `avid/services/tools.py` and `avid/core/ports.py` are all at 100%.
+- ⚠️ **The e2e M9 gate adds ~18 s to a suite run**, deliberately: `FakeServo` sweeps in real time
+  because a servo sweep is not fakeable, and that test's job is to look like the robot. The
+  *service* suite scales its sweeps 5×; the gate does not.
+- ⚠️ **The Pi** was last at `alisleiman0@172.20.10.6` and **dropped off the hotspot at ~02:05 on
+  2026-08-20**. Address moves with the network. Nothing has been run on it this session.
+- ⚠️ **`mypy` cannot run bare locally** — numpy's stubs use 3.12 `type` syntax against the 3.11
+  target. `uv run --frozen --exact mypy avid` reproduces CI exactly.
 - ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.**
-  Deliberate: the routine is 00:00 decaf, which the shipped window would suppress every night. **Do
-  not reconcile in either direction** — `tests/core/test_config.py:504` asserts the repo's window
-  precisely *because* it crosses midnight, and `02:00→09:00` does not.
-- ⚠️ **`mypy` cannot run locally.** `numpy/__init__.pyi` — *"Type statement is only supported in
-  Python 3.12 and greater"*. Pre-existing on clean `main`, verified by stashing; CI is unaffected. Do
-  **not** "fix" it by re-syncing with `--extra memory` on 3.13 (numpy 1.26.4 has no cp313 wheel and
-  builds from source, which fails). `uv sync --dev --frozen --python 3.13` then
-  `uv pip install "numpy>=2.1"` restores a working env without touching `uv.lock`.
+  Deliberate. **Do not reconcile in either direction.**
 
-## What just shipped (2026-08-19 → 20)
+## What just shipped (2026-08-20, M9)
 
-Five PRs in one session, four of them fixes the rig found and CI could not:
+Ten PRs. In dependency order, with what each one is actually *for*:
 
-- **#344** — CI cost cut. The numpy cap is now marker-conditional; it had been leaking into the
-  `memory` extra, and 1.26.4 has no cp313 wheel, so `test (3.13)` and `async-debug` were **compiling
-  numpy from source on every run** — 5m02s each, ~10 of the 13 billable minutes. `pull_request` was
-  removed and then **restored at the owner's call**: the trigger was never where the minutes were.
-- **#345** — the scheduler slept through a booking when the clock stepped. Every sleep is now bounded
-  by `min(stale_grace_s, IDLE_SLEEP_S)`, and a step is logged. `FakeClock.step_wall_clock()` exists
-  because the fake could not previously *state* the defect.
-- **#346** — `behavior.trigger_fired` carries `occurrence_at`, so §10.8's block states the schedule
-  rather than re-reading the hour out of prose. Also closed two untested holes in
-  `memory.fact_superseded`: a soft-deleted fact orphaned its `routines` row, and a correction with no
-  `schedule` silently deleted a working trigger.
-- **#347** — `AudioService` gained a capture watchdog and two events; `BehaviorService` refuses to
-  score an unanswered turn as an ignore when the mic was not delivering. `user_reaction` stays NULL —
-  §8.3 already defines that as *"unknown yet"*, so no migration.
-- **#343** — AC-2's evidence and the fixture that was blocking AC-1.
+- **#355 (#199)** — ADR-009 accepted. The §3.3 index pointed at an *Appendix A that does not
+  exist*, so this **wrote** the ADR (new §3.9.4) rather than flipping a status. §2.7.1 is now 2
+  DoF; §6.6 gained a `look_at` row before the code existed; §3.9.1 gained the `GestureTools`
+  paragraph — and, writing it, that `AffectTools` and `BehaviorTools` had **never been documented
+  there at all**.
+- **#357 (#289)** — the servo's lazy open and its bookkeeping, landed *before* #203 so preemption
+  was built on a safe adapter. The regression test uses a **bounded rendezvous** rather than raw
+  concurrency: #266 measured that 2 and 8 concurrent renders never lost the race and 32 always
+  did. ⚠️ A `threading.Barrier` deadlocks the *fixed* adapter.
+- **#358 (#356)** — **new defect.** `Pca9685Servo` calibrated `actuation_range` from `axis.max_deg`
+  — the *linkage's* reach — when it is the *servo's* electrical span. Accidentally correct at 180°
+  and **armed by #200's narrowed reaches**, silently: `position()`, the contract suite and
+  `FakeServo` all keep agreeing, and the only instrument that disagrees is the horn.
+- **#359 (#200)** — `[[servo.axes]]` with pan ch0 + tilt ch13, and `[motion] axes` **deleted**.
+  Four validators turn silent misconfigurations into boot-time errors. The contract suite now runs
+  both adapters against **two axes with different reaches**, which is what makes "clamps per axis"
+  a claim a test can fail.
+- **#361 / #362 (#328)** — the P8 gate, twice. See below; it had failed 9 CI runs across 3 M9 PRs.
+- **#360 (#201)** — `domain/motion.py`. `Axis` moved in, `Gesture`, `Keyframe`, the pure `plan()`,
+  and the three `motion.*` events. Degradation happens **only where it does not invert the
+  meaning**: `NOD` falls back to a small pan sway (well under a shake's amplitude, asserted as a
+  *relation* so tuning cannot close the gap), while `SHAKE` and `LOOK_UP` return an **empty plan**
+  rather than a gesture that means the opposite.
+- **#363 (#202)** — `gesture_for`. `HAPPY → NOD` is normative; **most affects map to nothing**, and
+  a test asserts the *ratio* because an edit making gesturing the default would satisfy every
+  individual row and still ship a twitchy robot.
+- **#364 / #365 (#203)** — `MotionService`, split as #198 advised. Preemption, the I²C-fault abort
+  (**every** channel relaxed, reasoned on the issue), relax-when-idle, and `stop()` releasing the
+  rig — the one failure that outlives the process.
+- **#366 (#204)** — `look_at`. A `GestureTools` port, an intent-level `Direction`, and a cooldown
+  that is a **safety property** — it advances only on *acceptance*, and is charged to the model
+  rather than to the robot.
+- **#367 (#205)** — idle micro-motion, resolving the relax tension as option (b): each drift
+  re-energises, moves, and relaxes immediately after. Tested as a **proportion**.
+- **#368 (#207)** — the mechanised e2e gate and `docs/demos/motion_pi.py`. The criteria are unrun.
+
+### #328 ate a chunk of this session, and the story is worth keeping
+
+The P8 async-debug gate failed **9 CI runs across 3 of M9's PRs** before it was repaired — on six
+different untouched tests, at 0.052–0.083 s against a 50 ms bar. #360 failed three attempts in a
+row. Every red cost a rerun *and* a judgement call, and a gate whose reds are usually wrong is a
+gate people learn to rerun without reading.
+
+**The bar did not move.** It still detects at 50 ms and reports every warning against it. What
+changed is that one graze is now *evidence* rather than a *verdict*: a warning convicts when it is
+**gross** (≥ 100 ms — asyncio's own default, so anything the library would have complained about
+unprompted) or **corroborated** (the same callback *frame* twice in a session). Grazes print in
+their own block above the verdict, and each verdict states which rule convicted it.
+
+Within the hour it convicted `test_a_few_thousand_rows_stay_off_the_loop` — **correctly**: that
+frame is the test's own 3,000-await insert loop, i.e. the harness, which is precisely what the
+issue was titled about. `@pytest.mark.p8_load` now exempts a declared load generator's **own
+coroutine** and nothing it drives; a non-marked coroutine grazing twice inside a marked test is
+still convicted, and there is a test asserting exactly that.
+
+⚠️ **The cost, on the record:** a genuine *one-off* blocking call between 50 and 100 ms now passes.
+#168's ONNX starvation — the defect P8 exists for — was hundreds of milliseconds on *every* embed,
+so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A test that arms a task and asserts immediately is testing the scheduler.** `perform()`
+  spawns and returns, so an assertion made straight afterwards runs *before the coroutine has
+  executed at all*. M9's "an empty plan is a no-op" test stayed **green** with the no-op removed
+  for exactly this reason, and only a deliberate neuter found it. Settle first, and add a counter
+  assertion so a no-op that somehow performed something has to lie about the count as well.
+
+- ⚠️ **`FakeClock` + a device fake that sleeps on `asyncio.sleep` reports a perfectly measured
+  zero.** `MotionService` times gestures with the injected clock (correct — §9.1.1), but
+  `FakeServo.move_to` burns *real* time because a servo sweep is not fakeable time. Together they
+  produce `duration_ms == 0`, which satisfies a `>= 0` assertion and proves nothing. Use
+  `SystemClock` for the one test that measures elapsed time, and bound it on **both** sides — "> 0"
+  alone also accepts a service that reports the plan's own arithmetic.
+
+- ⚠️ **Two `FakeClock` traps compound, and together they make a test pass on silence.** `spawn`
+  returns *before* the coroutine runs, so a loop may not have reached its first `clock.sleep()`
+  when a test advances — and `FakeClock` wakes only the sleepers an advance **crosses**, so landing
+  exactly on a deadline can leave one parked. #205's "a failing drift is not a fault" test was
+  green because nothing had drifted at all; coverage pointed at the unexecuted branch. Advance
+  *past* a band rather than to it, `await asyncio.sleep(0)` after `start()`, and **assert the
+  instrument's own liveness before asserting anything about the result**.
+
+- ⚠️ **A device fake's sweep is real wall clock, and it adds up.** Running M9's gestures at their
+  true lengths cost the service suite **16 s**. The tracing servo scales sweeps 5× — still multiple
+  awaits per leg, so still genuinely interruptible — while `tests/contract/test_servo.py` keeps
+  mid-sweep cancellation unscaled, because that is the *adapter's* contract. The e2e gate
+  deliberately does **not** scale: its job is to look like the robot.
+
+- ⚠️ **A contract suite over two axes needs two DIFFERENT reaches.** With both clamped 0–180, an
+  adapter keying its limits by a shared value, by the first axis, or by the last one all give the
+  same right-looking answer. The asymmetry (pan 30–150, tilt 60–120) is what makes "clamps per
+  axis" a claim a test can fail.
+
+- ⚠️ **A rate limit that advances on rejection is a trap.** `look_at`'s cooldown moves only on
+  *acceptance* — otherwise a model retrying politely locks itself out for as long as it keeps
+  asking. And the test for it **cannot fail unless the clock moves between the accept and the
+  refusal**: with both calls at one monotonic instant, a service that *did* reset the deadline sets
+  it to the value it already had. Found by neutering the rule and watching the test stay green.
+
+- ⚠️ **A gate tool that crashes while reporting is worse than one that reports plainly.**
+  `docs/demos/motion_pi.py` died on its very first warning line — `UnicodeEncodeError` on a cp1252
+  stdout. Output now folds to ASCII at the print boundary so the typography degrades instead of the
+  run. Anything that prints `⚠️`, `—` or `°` and might be read over SSH from Windows has this bug.
+
+- ⚠️ **"Did it move" is not the 2 DoF claim.** A pan-only robot still nods — `plan()` degrades it
+  to a sway — so a criterion asserting motion passes on the hardware ADR-009 replaced. The claim is
+  that nod and turn land on **different axes**. Generalises: when a milestone's headline is a
+  *capability*, find the assertion the previous generation would fail.
 
 ### `uv sync` on the Pi is the same mistake as `uv run` — and it destroys the venv
 
