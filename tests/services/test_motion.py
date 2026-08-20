@@ -295,9 +295,15 @@ async def test_a_gesture_the_rig_cannot_express_is_a_silent_no_op(
     ⚠️ And **no ``gesture_started``** — a started event for a gesture that never started would
     make the log claim motion that did not happen, which is the one thing #207 grades by eye."""
     await pan_only.service.perform(Gesture.LOOK_UP, correlation_id=uuid4())
+    # ⚠️ Settle before asserting. `perform` ARMS a task and returns, so an assertion made
+    # straight afterwards passes even against a service that publishes eagerly — the task
+    # simply has not run yet. Found by neutering the no-op and watching this test stay green.
+    await _settle(pan_only.service)
+    await asyncio.sleep(0)
 
     assert pan_only.servo.moves == []
     assert pan_only.collector.of(MotionGestureStarted) == []
+    assert pan_only.service.gestures_performed == 0
 
 
 async def test_a_completed_gesture_reports_a_measured_duration() -> None:
