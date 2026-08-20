@@ -488,6 +488,7 @@ def _build_retriever(
             recency=weights.recency,
             importance=weights.importance,
             relevance=weights.relevance,
+            keyword=weights.keyword,
         ),
     )
 

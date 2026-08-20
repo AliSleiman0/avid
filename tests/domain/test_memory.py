@@ -173,10 +173,23 @@ _EQUAL = ScoreWeights()  # α=β=γ=1
 
 
 def _cand(
-    fact_id: int, importance: int, age_days: float, relevance: float
+    fact_id: int,
+    importance: int,
+    age_days: float,
+    relevance: float,
+    *,
+    keyword_hit: bool = False,
 ) -> RetrievalCandidate:
+    # The domain value requires `keyword_hit` (#264, deliberately — see its comment). The default
+    # lives HERE rather than there: these cases are about the other three components, and a test
+    # helper choosing a value is a local convenience, while a domain default would be a silent
+    # licence for production code to drop the evidence.
     return RetrievalCandidate(
-        fact_id=fact_id, importance=importance, age_days=age_days, relevance=relevance
+        fact_id=fact_id,
+        importance=importance,
+        age_days=age_days,
+        relevance=relevance,
+        keyword_hit=keyword_hit,
     )
 
 
@@ -190,7 +203,10 @@ def test_single_candidate_survives_min_max() -> None:
         [_cand(1, 5, 3.0, 0.7)], weights=_EQUAL, half_life_days=14.0, k=5
     )
     assert only.fact_id == 1
-    assert only.score == pytest.approx(3.0)  # 1·1 + 1·1 + 1·1, all components uniform
+    # 1·1 + 1·1 + 1·1 + 1·1 — all FOUR components uniform since #264 added δ. The keyword term
+    # is degenerate here too (a lone candidate cannot differ from itself), so it contributes the
+    # same constant 1.0 as the other three.
+    assert only.score == pytest.approx(4.0)
 
 
 def test_ranks_best_combined_score_first() -> None:
@@ -239,6 +255,63 @@ def test_zeroing_a_weight_changes_the_order() -> None:
     )
 
 
+def test_a_keyword_hit_rescues_a_fact_the_vector_side_ranks_last() -> None:
+    """#264 — §7.7's proper-noun case, as a scoring property.
+
+    ``mush`` is the Biscuit fact: FTS5 matched it exactly, but its embedding is poor and it is
+    older and less important than its rival. Before δ existed it had no way to win, which is why
+    the keyword branch could be deleted outright without changing a single result.
+    """
+    mush = _cand(1, 1, 30.0, 0.0, keyword_hit=True)
+    rival = _cand(2, 10, 0.0, 1.0, keyword_hit=False)
+    ranked = rank_candidates([mush, rival], weights=_EQUAL, half_life_days=14.0, k=5)
+    assert [s.fact_id for s in ranked] == [2, 1]  # rival still leads 3 components to 1
+    # ...but δ has closed the gap from a clean sweep to a single component, and zeroing it
+    # restores the pre-#264 behaviour exactly. This is the assertion that fails if the fix is
+    # neutered: without the keyword term the two scores differ by the full 3.0.
+    no_keyword = ScoreWeights(keyword=0.0)
+    before = rank_candidates(
+        [mush, rival], weights=no_keyword, half_life_days=14.0, k=5
+    )
+    assert before[0].score - before[1].score == pytest.approx(3.0)
+    assert ranked[0].score - ranked[1].score == pytest.approx(2.0)
+
+
+def test_keyword_weight_can_decide_the_winner() -> None:
+    """δ is a real term, not decoration: at a high enough weight the keyword hit wins outright."""
+    mush = _cand(1, 1, 30.0, 0.0, keyword_hit=True)
+    rival = _cand(2, 10, 0.0, 1.0, keyword_hit=False)
+    keyword_led = ScoreWeights(recency=1.0, importance=1.0, relevance=1.0, keyword=4.0)
+    ranked = rank_candidates(
+        [mush, rival], weights=keyword_led, half_life_days=14.0, k=5
+    )
+    assert ranked[0].fact_id == 1
+
+
+def test_keyword_term_cannot_reorder_when_every_candidate_matched() -> None:
+    """All-hits (and no-hits) hit :func:`_min_max`'s degenerate branch — a constant, so no reorder.
+
+    Worth pinning because FTS5 ORs its tokens, so a query full of ordinary words really does
+    match most of a small store. If that case reordered anything, δ would be noise.
+    """
+    cands = [
+        _cand(1, 5, 1.0, 0.9, keyword_hit=True),
+        _cand(2, 5, 1.0, 0.2, keyword_hit=True),
+    ]
+    none = [
+        _cand(1, 5, 1.0, 0.9, keyword_hit=False),
+        _cand(2, 5, 1.0, 0.2, keyword_hit=False),
+    ]
+    order = [
+        s.fact_id
+        for s in rank_candidates(cands, weights=_EQUAL, half_life_days=14.0, k=5)
+    ]
+    assert order == [
+        s.fact_id
+        for s in rank_candidates(none, weights=_EQUAL, half_life_days=14.0, k=5)
+    ]
+
+
 def test_all_equal_scores_is_stable_and_ordered() -> None:
     ranked = rank_candidates(
         [_cand(3, 7, 1.0, 0.4), _cand(1, 7, 1.0, 0.4), _cand(2, 7, 1.0, 0.4)],
@@ -247,7 +320,9 @@ def test_all_equal_scores_is_stable_and_ordered() -> None:
         k=5,
     )
     assert [s.fact_id for s in ranked] == [1, 2, 3]
-    assert all(s.score == pytest.approx(3.0) for s in ranked)
+    # 4.0, not 3.0, since #264: none of these is a keyword hit, so δ's component is degenerate
+    # and adds a constant 1.0 to every candidate — which is exactly why it cannot reorder them.
+    assert all(s.score == pytest.approx(4.0) for s in ranked)
 
 
 def test_importance_extremes_normalise_to_the_endpoints() -> None:

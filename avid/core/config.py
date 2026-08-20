@@ -533,11 +533,17 @@ class CuesConfig(_Section):
 
 
 class WeightsConfig(_Section):
-    """Retrieval scoring weights — recency/importance/relevance (Park et al., SDS §7.7)."""
+    """Retrieval scoring weights — recency/importance/relevance/keyword (SDS §7.7).
+
+    The first three are Park et al.'s equal-weight baseline. ``keyword`` (δ) is #264's addition
+    and has no published baseline behind it — see :class:`~avid.domain.ScoreWeights`. It is
+    **unmeasured**; `tools/eval_recall.py` is what would settle it.
+    """
 
     recency: float = 1.0
     importance: float = 1.0
     relevance: float = 1.0
+    keyword: float = 1.0
 
 
 class MemoryConfig(_Section):
