@@ -6,8 +6,9 @@ No I/O, no async, no globals, and no third-party imports beyond the stdlib and
 ``Affect`` (AVID-8), the ``audio.*`` events + pre-roll ring buffer (#86), the
 degraded-mode cue vocabulary ``Cue`` (AVID-80), the ``conversation.*`` events +
 ``TokenUsage`` value (#99), the ``Fact`` value + ``memory.*`` events + §7.7 scoring
-(#116), and ``BBox`` + the ``vision.*`` events (#219), and §10.4's interruption policy — the
-pure gate that decides whether the robot may speak first (#235).
+(#116), and ``BBox`` + the ``vision.*`` events (#219), §10.4's interruption policy — the
+pure gate that decides whether the robot may speak first (#235) — and ``Axis`` + the gesture
+vocabulary, the pure keyframe planner and the ``motion.*`` events (#201).
 """
 
 from avid.domain.affect import (
@@ -98,6 +99,18 @@ from avid.domain.memory import (
     rank_candidates,
     recency_decay,
     select_top_facts,
+)
+from avid.domain.motion import (
+    PAN,
+    TILT,
+    Axis,
+    Gesture,
+    Keyframe,
+    MotionGestureCompleted,
+    MotionGesturePreempted,
+    MotionGestureStarted,
+    duration_ms,
+    plan,
 )
 from avid.domain.state import (
     EVENT_TYPES,
@@ -214,4 +227,18 @@ __all__ = [
     "VisionFaceDetected",
     "VisionPresenceGained",
     "VisionPresenceLost",
+    # motion (#201) — the gesture vocabulary, the pure planner, the motion.* events.
+    # ``Axis`` is re-exported by core/hal.py for the same reason ``BBox`` is: a domain
+    # event names it, and the layers contract forbids declaring it in core (ADR-009,
+    # SDS §3.9.4).
+    "PAN",
+    "TILT",
+    "Axis",
+    "Gesture",
+    "Keyframe",
+    "MotionGestureCompleted",
+    "MotionGesturePreempted",
+    "MotionGestureStarted",
+    "duration_ms",
+    "plan",
 ]
