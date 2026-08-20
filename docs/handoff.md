@@ -117,8 +117,14 @@ free.
 (`deploy/PI_OPERATIONS.md` §0), so the check to run first is whether the laptop and the Pi are on
 the same one, before concluding anything about the machine.
 
-**0. ⚠️ NEW — the first command to run when the Pi answers, ahead of everything else. What is
+**0. ⚠️ The first command to run when the Pi answers, ahead of everything else. What is
 actually deployed at `/opt/avid`?**
+
+> 🎁 **And it is now cheap to answer for every future run.** #373 shipped the startup banner: the
+> first line of the journal names the config path, the resolved models and every `[adapters]`
+> selection. `journalctl -u robot | head -1` answers "which build, which model, which adapters"
+> without archaeology. The command below is still what settles #310 *retrospectively*, because no
+> run before today left that line.
 
 ```sh
 ssh alisleiman0@<pi> 'cd /opt/avid && git log -1 --format="%h %ad %s" --date=short'
@@ -199,9 +205,10 @@ clock that cannot be compressed, parallelised or bought down. It has not started
 does not is a day added to `v1.0.0`. So #377 is decomposed into **Group A — blocks the clock** and
 **Group B — written while it runs**, and putting a package in the wrong group costs calendar days.
 
-- **Group A (~6.25 IED):** #373 (startup banner) · #378 (SDS §12) · #379 (uptime + restart
-  accounting) · #380 (`GET /metrics`) · #381 (journald `Storage=volatile`) · #382 (**boot from USB
-  SSD**) · #383 (the soak harness + O5 gate).
+- **Group A — ✅ SOFTWARE COMPLETE.** #378 · #373 · #379 · #380 · #381 · #383 are all **merged
+  and closed**. ⚠️ **Only #382 (boot from USB SSD) is left, and it is the one item that needs the
+  Pi.** So the path from "Pi answers" to "clock starts" is now: migrate to the SSD, deploy, run
+  each item's verification tail, dry-run `soak_pi.py`, start sampling. An evening, not a week.
 - **Group B (~6.5 IED):** #384 (SDS §11) · #21 (SDS §13) · #385 (`/state` + `/events/stream`) ·
   #386 (`/facts`) · #387 (runbook) · #388 (v1.0.0 release path).
 - **Gate:** #389 — 30 days, O5 met, `v1.0.0` tagged.
