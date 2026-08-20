@@ -188,6 +188,8 @@
 12.3 Watchdog and supervision
 12.4 Crash recovery
 12.5 Data durability guarantees
+12.6 O5, defined precisely enough to grade
+12.7 Operations
 
 ## 13. Security and Privacy
 13.1 Threat model
@@ -1234,7 +1236,9 @@ Supervision is a port, not a bare syscall: the run loop announces `ready()` on r
 
 Every event carries a `correlation_id`, minted at the head of a turn (`audio.speech_started` or `behavior.trigger_fired`) and propagated to every downstream event. One `grep` on a correlation ID reconstructs the entire turn across all seven services. Given the control-flow opacity that §3.5.1 admits the bus creates, this isn't a nice-to-have — it's the mitigation that makes the bus affordable.
 
-Logging: structured JSON via `structlog`, to journald, **not to the SD card** (§2.7.1 — the card is the constraint). `journald` with `Storage=volatile` and a memory cap; ship to a host over the network if you want history.
+Logging: **structured JSON via the stdlib `logging` module**, to journald, **not to the SD card** (§2.7.1 — the card is the constraint). `journald` with `Storage=volatile` and a memory cap (shipped as `deploy/journald-avid.conf`, AVID-381); ship to a host over the network if you want history.
+
+> ⚠️ **This sentence said `structlog` until AVID-378, and that was never true.** `structlog` is not a dependency of this project and is imported nowhere; `ObservabilityService` composes its JSON with `logging` + `json.dumps`. The requirement §3.12.2 actually imposes — structured, JSON, to journald, carrying a `correlation_id` — is met without it, and adding a runtime dependency to the Pi to buy formatting we already have is not a trade worth making. **The spec is amended to match the code, rather than the code changed to match a library name.** A spec that describes something which does not exist is worse than one that describes something plain.
 
 Metrics: an in-process registry exposed on the local control API (§9.5). Turn latency histogram, API cost counter, event queue depths, servo duty cycle, frame rate, SD write bytes. If you can't see cost per day on a dashboard, §2.7.2 will surprise you at the end of the month.
 
@@ -3174,6 +3178,163 @@ Secrets are **not here**. `OPENAI_API_KEY` is read from the environment exactly 
 The `[adapters]` block is the whole of §3.11.1's development story. `uv run robot --config config/sim.toml` is a running robot on a laptop, no hardware, no network. Same binary, same code path, different six lines of TOML. That is what G6 means and it is why the HAL exists.
 
 ---
+
+---
+
+# 12. Reliability and Failure Management
+
+> **This chapter is written from evidence, not from intent.** Every row below is a failure that
+> actually happened on this hardware, in a numbered issue, with a fix or a decision behind it. A
+> reliability chapter composed of plausible failure modes would be fiction; M11's soak grades the
+> robot against *this*, so it has to be the truth.
+
+The through-line is §3.12.3's, and it is the design's single most important reliability claim:
+**nothing except a bad API key at boot is allowed to stop the robot.** A companion that crashes is
+worse than a companion that is briefly stupid.
+
+## 12.1 Failure mode and effects analysis
+
+Severity is *user-visible* severity, not engineering embarrassment. "Detected" is the column that
+matters: a failure nothing notices is one nobody will fix.
+
+| # | Failure mode | Effect | Sev | Mitigation as built | Detected by |
+|---|---|---|---|---|---|
+| F-1 | Realtime session drops mid-turn | Robot cannot answer | High | any state → DEGRADED (§3.10.3); cue bank speaks a canned line (§6.9); reopen on the next rising edge | `conversation.session_lost`, `system.degraded_entered` |
+| F-2 | Model never produces a first token | Turn hangs | High | §6.9 think timeout → DEGRADED via the same `_degrade` helper as F-1 | `THINK_TIMEOUT` trigger |
+| F-3 | Recovery lands mid-turn | Turn is stateless — no thinking face, no barge-in | Med | DEGRADED → **LISTENING**, plus DEGRADED absorbing the user's own two edges (AVID-162, `3f764aa`) | `test_session_loss_degrades_then_reopen_recovers`, `tests/e2e/test_m5_gate.py` |
+| F-4 | A subscriber raises | Could kill unrelated services | High | Logged, swallowed, republished as `system.handler_failed` (§3.5) | `system.handler_failed` |
+| F-5 | A subscriber falls behind | Events silently lost | Med | Bounded per-subscriber queue; `DROP_OLDEST`/`DROP_NEWEST`; **`BLOCK` forbidden**; overflow publishes `system.handler_failed` with `reason="queue_overflow"` | overflow counter, exposed at `GET /metrics` (AVID-380) |
+| F-6 | **Misprovisioned unit → `PermissionError: /dev/fb0`** | **942 restarts**; robot never usable | **High** | Reinstall from the repo rather than patch the machine (`PI_OPERATIONS.md`) | ⚠️ **only by reading the journal** — see §12.3 |
+| F-7 | **No RTC: boot comes up hours wrong, NTP steps it later** | Scheduler slept ~34,700 s through its own booking | **High** | AVID-345; monotonic for durations, never wall subtraction (§9.1.1) | `proactive_log`, and the boot record's clock-step flag (§12.4) |
+| F-8 | Booking missed while the robot was off | Proactive turn fires hours late | Med | AVID-339 | `proactive_log` |
+| F-9 | Deployed config drifts from the repo | **Silently wrong behaviour, not an error** | **High** | §9.6 sections are `extra="forbid"`, so an *unknown* key fails loudly | ⚠️ a **missing** key still falls back to a schema default — AVID-373 |
+| F-10 | Storage exhaustion / wear | Corruption; re-image | Med | journald `Storage=volatile` (§3.12.2, AVID-381); WAL; **root on USB SSD** (R-05's contingency, AVID-382) | `GET /metrics` |
+| F-11 | Bad API key at boot | Robot refuses to start | Low | **Deliberate.** §3.12.3's one permitted hard stop | Fails fast, loudly |
+
+**F-9 is the row this project underestimated for longest, and it deserves its own sentence.** A
+config that is missing a key does not fail — it silently adopts a schema default, and `[ai] model`
+defaults to the *mini* while `pi.toml` pins the flagship. Three separate live-behaviour defects
+(#310, #265, #264) were investigated as model or prompt problems before anyone asked which build
+and which model had actually been running. *The machine is not the repo* is not a slogan; it is
+F-9.
+
+**F-6 is the row with no detector**, and that is the finding rather than an oversight. Nothing
+watches restart *count*: `Restart=always` faithfully restarted a robot that could never work, 942
+times, and the only evidence was a journal nobody was reading. §12.3 says what is done about it.
+
+## 12.2 Degraded operating modes
+
+`DEGRADED` is an operational state (§3.10), orthogonal to `Affect` — a degraded robot still has a
+face and the face is still honest.
+
+**What DEGRADED guarantees:** the robot keeps listening, keeps its face, keeps its local loop, and
+says something rather than nothing (§6.9's cue bank). **What it does not guarantee:** any use of
+the network — no conversation, no memory write, no proactive turn.
+
+Recovery is **rising-edge-driven** and therefore always mid-turn: `_exit_degraded` has exactly one
+caller, the `audio.speech_started` handler, after `open()` succeeds. That is why recovery targets
+LISTENING and not IDLE, and why DEGRADED absorbs the user's own two edges as self-loops — the
+network machine is dead, the local one is not, and a user goes on talking to a robot that cannot
+yet answer. Full reasoning in §3.10.3.
+
+⚠️ **The absorbing set covers the user's edges only.** Both `audio.playback_*` triggers are driven
+solely from `ConversationService`'s pump, and every path into DEGRADED tears that pump down first,
+so a row for either would be unreachable — **and an unreachable row in a normative table is a
+lie.**
+
+## 12.3 Watchdog and supervision
+
+As built, in `deploy/robot.service`:
+
+| Setting | Value | Why |
+|---|---|---|
+| `Type=notify` + `NotifyAccess=main` | — | The robot says READY only after its services' loops are live (§9.2) |
+| `WatchdogSec` | `30` | Half is the ping cadence, so two pings fit per period |
+| `[systemd] watchdog_interval_s` | `15.0` | Config, not a literal — the two must stay consistent, and CI asserts it |
+| `Restart` | `always` | §3.12.3: nothing but a bad key stops the robot |
+| `RestartSec` | `5` | |
+| `StartLimitIntervalSec` | `0` | **Disables systemd's own crash-loop brake** |
+
+⚠️ **`StartLimitIntervalSec=0` is retained deliberately, and it is the setting that permitted F-6's
+942 restarts.** The reasoning stands: a rate limiter that gives up would turn a *transient*
+failure — a wet boot, a slow USB enumeration, a network stack not yet up — into a robot that is
+off until a human notices, which is a worse outcome for a companion than restarting forever. The
+correct answer to a crash loop is not to stop restarting; it is to **notice**. Noticing is what
+was missing, and AVID-379's restart accounting plus `GET /metrics` is what supplies it: an
+unplanned-restart count is a first-class metric, and O5 grades it (§12.6).
+
+A wedge is distinct from a crash: `WATCHDOG=1` stops arriving, systemd kills at `WatchdogSec`, and
+`Restart=always` brings it back (~30 s). `deploy/README.md` verifies both paths.
+
+## 12.4 Crash recovery
+
+**Survives a restart:** every fact, routine, trigger and episode (SQLite, §8); quiet-hours
+overrides and cooldowns (`triggers`/`proactive_log`); the boot history (§12.5).
+**Does not survive, by design:** the Realtime session — it is **cold**, there is no resumption
+(§6.2.3), and a dropped connection means a new session re-seeded with instructions and memory. In
+flight audio, in flight events (the bus is in-memory, at-most-once, no replay, no dead-letter
+queue) and the current turn are all lost.
+
+That asymmetry is the design: **the bus carries notifications, not obligations** (§9.1.4). Anything
+whose loss would be a correctness bug — a memory write, a deletion, a render, a servo move — is a
+direct awaited call and not an event, so a crash cannot silently drop it.
+
+⚠️ **Boot-time clock correction is a recovery hazard, not a curiosity** (F-7). The Pi has no RTC.
+An offline boot restores a stale clock and NTP steps it forward later, so **any duration computed
+by subtracting wall clocks across a boot is wrong, sometimes by hours.** Durations use
+`monotonic_ns`; wall clock is for humans (§9.1.1). The boot record stores both precisely so a step
+is detectable after the fact rather than inferred from a scheduler that overslept.
+
+## 12.5 Data durability guarantees
+
+SQLite in **WAL** with `synchronous = NORMAL` — the durable-enough sweet spot for a single-user
+device: a process crash loses nothing committed; an abrupt power cut may lose the last transaction
+or two. That trade is deliberate. `FULL` would fsync every commit, and the write volume this robot
+produces does not justify the wear or the latency.
+
+Migrations are ordered, checksummed and one-transaction-each (§8.6): editing an applied migration
+fails at boot rather than letting a dev DB quietly diverge.
+
+**`forget` is a hard cascading DELETE** (§7.10) — the row and its FTS5 index entry are gone, not
+tombstoned, and the guarantee is behavioural as well as structural because `facts_fts` is
+external-content and a naive `SELECT` reads through to a deleted row.
+
+## 12.6 O5, defined precisely enough to grade
+
+O5 is *"30-day soak, ≥99% uptime, zero manual restarts."* Those words are not gradeable as written.
+For M11's gate (AVID-389) they mean:
+
+- **Denominator** — wall-clock seconds in the measurement window, from the first boot record after
+  the window opens to the window's close. A window whose build identifier changes mid-flight
+  (AVID-373) is **not graded as one window**; it is reported as two, or as a failure to hold the
+  variable still.
+- **Numerator** — seconds in which the robot process was up. **A SLEEPING robot is UP.** SLEEPING
+  is an operational state the design intends (§3.10, M8's nap), not an absence; grading it as
+  downtime would penalise the feature.
+- **Down** — the interval between a boot record's last heartbeat and the next boot record's start.
+  Bounded by the heartbeat interval, which is why the bound is stated with the result rather than
+  hidden: downtime is known only to within one heartbeat.
+- **99% of 30 days = 7 h 12 m** of permitted downtime. State the achieved figure, always, not a
+  verdict.
+- **"Manual restart"** — a restart that a *person* caused. Operationally: a clean stop
+  (SIGTERM → the ordered teardown → a recorded `stop_reason`) followed by a start. An unclean stop
+  is a **crash or watchdog kill** and is *not* manual — but it is a defect, counted and reported
+  separately. ⚠️ **The mechanism cannot distinguish a deploy from an operator `systemctl stop`:**
+  both are signals. That limit is stated rather than papered over; AVID-389 logs interventions
+  independently.
+- **Watchdog restarts are not manual, and are not free.** Zero is the expectation; any occurrence
+  is a finding with its own issue.
+
+⚠️ **If O5 is missed, report the number.** Widening a target to fit a measurement is a last resort,
+taken only with the diagnosis attached, and the original target stays visible in the report — or it
+quietly becomes whatever was last achieved.
+
+## 12.7 Operations
+
+The design document stops at the boundary of *what the system is*. **What to do when it
+misbehaves** lives in the runbook (PMP WBS 8.4, AVID-387), symptom-first, and in
+`deploy/PI_OPERATIONS.md` for bring-up and provisioning. This subsection exists so that a work
+package which had no SDS section now has one — PMP §4.3's rule, honoured rather than worked around.
 
 ---
 
