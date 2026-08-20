@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import random
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import NamedTuple
@@ -61,6 +62,14 @@ _IDLE_RELAX_MS = 3000
 # The look_at rate limit (#204). Long enough that a second call in the same test is refused
 # unless the clock is deliberately advanced, so a test cannot pass by accident of timing.
 _LOOK_AT_COOLDOWN_MS = 4000
+
+# The idle-drift band (#205). Wide enough that the fixtures' default rig never drifts by
+# accident inside a test about something else, and short enough to advance in one step when a
+# test is *about* the drift. The shipped band is 12-40 s.
+_DRIFT_MIN_S, _DRIFT_MAX_S = 10.0, 20.0
+# The service's own drift duration — matched here so a fake can tell a drift from a gesture.
+_DRIFT_MS = 700
+_DRIFT_AMPLITUDE = 0.03
 
 # The rig config/*.toml declares (#200): pan ch0, tilt ch13, asymmetric reaches.
 _PAN = Axis(name="pan", channel=0, min_deg=30.0, max_deg=150.0)
@@ -183,6 +192,10 @@ async def _make_rig(*axes: Axis) -> tuple[Rig, AsyncioEventBus]:
         clock=clock,
         idle_relax_ms=_IDLE_RELAX_MS,
         look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
+        drift_interval_min_s=_DRIFT_MIN_S,
+        drift_interval_max_s=_DRIFT_MAX_S,
+        drift_amplitude_frac=_DRIFT_AMPLITUDE,
+        rng=random.Random(1234),
     )
     collector = _Collector()
 
@@ -365,6 +378,10 @@ async def test_a_completed_gesture_reports_a_measured_duration() -> None:
         clock=SystemClock(),
         idle_relax_ms=_IDLE_RELAX_MS,
         look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
+        drift_interval_min_s=_DRIFT_MIN_S,
+        drift_interval_max_s=_DRIFT_MAX_S,
+        drift_amplitude_frac=_DRIFT_AMPLITUDE,
+        rng=random.Random(1234),
     )
     collector = _Collector()
     bus.subscribe(MotionGestureCompleted, collector.handle, name="test.completed")
@@ -577,6 +594,10 @@ async def test_a_raising_subscriber_does_not_disturb_a_gesture() -> None:
         clock=FakeClock(),
         idle_relax_ms=_IDLE_RELAX_MS,
         look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
+        drift_interval_min_s=_DRIFT_MIN_S,
+        drift_interval_max_s=_DRIFT_MAX_S,
+        drift_amplitude_frac=_DRIFT_AMPLITUDE,
+        rng=random.Random(1234),
     )
     collector = _Collector()
     bus.subscribe(MotionGestureStarted, boom, name="test.boom")
@@ -636,6 +657,10 @@ async def test_a_failing_relax_does_not_stop_the_rest_from_relaxing() -> None:
         clock=FakeClock(),
         idle_relax_ms=_IDLE_RELAX_MS,
         look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
+        drift_interval_min_s=_DRIFT_MIN_S,
+        drift_interval_max_s=_DRIFT_MAX_S,
+        drift_amplitude_frac=_DRIFT_AMPLITUDE,
+        rng=random.Random(1234),
     )
     await bus.start()
     try:
@@ -683,6 +708,10 @@ async def _faulty_rig(*, fail_on: int = 1) -> tuple[Rig, AsyncioEventBus]:
         clock=clock,
         idle_relax_ms=_IDLE_RELAX_MS,
         look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
+        drift_interval_min_s=_DRIFT_MIN_S,
+        drift_interval_max_s=_DRIFT_MAX_S,
+        drift_amplitude_frac=_DRIFT_AMPLITUDE,
+        rng=random.Random(1234),
     )
     collector = _Collector()
     _register(bus, service)
@@ -926,3 +955,262 @@ async def test_an_affect_gesture_does_not_consume_the_look_at_cooldown(
     await _settle(rig.service)
 
     assert outcome is LookAtResult.ACCEPTED
+
+
+# --- idle micro-motion (#205) ------------------------------------------------
+
+
+async def _advance_past_one_drift(rig: Rig) -> None:
+    """Advance the fake clock past the drift band and let the movement finish.
+
+    ⚠️ Past the band's maximum, not *to* it. ``FakeClock`` wakes only the sleepers an advance
+    **crosses**, so landing exactly on a sleeper's deadline can leave it parked — and a drift
+    that never happened makes every assertion below pass on silence. Coverage caught one of
+    these: a test asserting "no fault was reported" was green because nothing had drifted at
+    all."""
+    await rig.clock.advance(_DRIFT_MAX_S + 1)
+    await asyncio.sleep(0)
+    await _settle(rig.service)
+    await asyncio.sleep(0)
+
+
+async def test_an_idle_robot_drifts(rig: Rig) -> None:
+    """The feature, in one line: a robot that holds perfectly still reads as switched off.
+
+    Nobody has spoken to it and no affect has changed — the drift loop starts with the service,
+    because an unattended robot should look alive without anyone having to talk to it first."""
+    await _advance_past_one_drift(rig)
+
+    assert rig.servo.moves, "an idle robot never moved at all"
+
+
+async def test_a_drift_relaxes_the_channel_it_just_moved(rig: Rig) -> None:
+    """⚠️ **The resolution of the relax tension, asserted rather than described.**
+
+    The gate asks for *"idle micro-motion"* **and** *"servo relaxes when idle (no buzz)"*, and
+    a servo that drifts every few seconds is never idle long enough to relax. #205's option (b)
+    — re-energise, move, relax immediately — satisfies both literally, and this is the line that
+    says so. Without it the robot hums continuously *between* drifts, which is worse than either
+    clause failing on its own: it looks alive and sounds broken."""
+    await _advance_past_one_drift(rig)
+
+    assert not any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes)
+
+
+async def test_the_rig_is_de_energised_for_most_of_an_idle_window(rig: Rig) -> None:
+    """AC-2's actual claim, stated as a proportion because a vaguer one is satisfiable by a
+    robot that hums half the time.
+
+    Sampled across a long idle stretch: the channels must be quiet for the **majority** of it.
+    A drift costs a few hundred milliseconds of pulse against a band measured in tens of
+    seconds, so the honest number is overwhelming rather than marginal — which is the point,
+    and why a bare "it relaxes eventually" would not have caught option (a) or (c) going wrong.
+    """
+    energised_samples = 0
+    total_samples = 0
+    for _ in range(12):
+        await _advance_past_one_drift(rig)
+        total_samples += 1
+        if any(rig.servo.is_energised(axis.channel) for axis in rig.servo.axes):
+            energised_samples += 1
+
+    assert energised_samples * 2 < total_samples, (
+        f"the rig was energised at {energised_samples}/{total_samples} idle samples"
+    )
+
+
+async def test_a_drift_publishes_no_motion_events(rig: Rig) -> None:
+    """AC-3: **a drift is not a gesture.**
+
+    Hundreds of these an hour would flood the ``motion.*`` catalog and make those events
+    useless for debugging the ones that matter — which is exactly what #207 reads them for when
+    it reconciles a log against a moving head."""
+    await _advance_past_one_drift(rig)
+
+    assert rig.servo.moves, "nothing drifted, so this proves nothing about publishing"
+    assert rig.collector.events == []
+
+
+async def test_the_drift_amplitude_is_a_fraction_of_each_axis_reach(rig: Rig) -> None:
+    """AC-1: a fraction of the **declared reach**, never absolute degrees.
+
+    A few degrees on a 120° pan and a few degrees on a 60° tilt are not the same gesture — and
+    on the narrow axis an absolute amplitude is the difference between breathing and straining
+    against a bracket.
+
+    ⚠️ Asserted on each drift's **destination**, not on the steps it passes through. A sweep
+    starts from the channel's last *commanded* position, which at boot is its ``min_deg`` — so
+    the first drift legitimately travels a long way to arrive somewhere near centre, and
+    grading the journey would fail a robot that is behaving correctly. (That first move is also
+    the honest one physically: a de-energised servo is wherever it was left, and ``position()``
+    is a guess until something commands it.)"""
+    by_channel = {axis.channel: axis for axis in rig.servo.axes}
+    destinations = []
+    for _ in range(6):
+        before = len(rig.servo.moves)
+        await _advance_past_one_drift(rig)
+        if len(rig.servo.moves) > before:
+            destinations.append(rig.servo.moves[-1])
+
+    assert destinations, "nothing drifted, so this proves nothing about amplitude"
+    for channel, angle in destinations:
+        axis = by_channel[channel]
+        excursion = abs(angle - axis.centre_deg)
+        assert excursion <= _DRIFT_AMPLITUDE * axis.half_span_deg + 1e-9, (
+            f"{axis.name} drifted to {excursion:.2f}° off centre — more than "
+            f"{_DRIFT_AMPLITUDE:.0%} of its half-span"
+        )
+
+
+async def test_a_sleeping_robot_does_not_drift(rig: Rig) -> None:
+    """AC-3. A sleeping robot that twitches is a robot that did not go to sleep.
+
+    It is also the case where drift is most expensive: nobody is watching, so the movement buys
+    nothing, and the rail is being loaded for an audience of zero."""
+    await rig.bus.publish(_transitioned(to=RobotState.SLEEPING))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    for _ in range(4):
+        await _advance_past_one_drift(rig)
+
+    assert rig.servo.moves == []
+
+
+async def test_drift_resumes_when_the_robot_wakes(rig: Rig) -> None:
+    """The other half — a suppressed drift must not stay suppressed.
+
+    A flag set on sleep and never cleared is the classic version of this bug, and it is silent:
+    the robot simply stops looking alive after its first nap and nobody can say when."""
+    await rig.bus.publish(_transitioned(to=RobotState.SLEEPING))
+    await asyncio.sleep(0)
+    await _advance_past_one_drift(rig)
+    assert rig.servo.moves == []
+
+    await rig.bus.publish(_transitioned(to=RobotState.IDLE))
+    await asyncio.sleep(0)
+    await _advance_past_one_drift(rig)
+
+    assert rig.servo.moves
+
+
+async def test_a_real_gesture_takes_the_rig_from_a_drift(rig: Rig) -> None:
+    """AC-3: micro-motion yields to anything that means something.
+
+    True by construction rather than by a check — a drift is armed through the *same* slot a
+    gesture uses, so there is only ever one thing moving the rig. What this asserts is that the
+    construction holds: the nod completes, and the drift did not fight it for a channel."""
+    await rig.clock.advance(_DRIFT_MAX_S)
+    await asyncio.sleep(0)
+
+    await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+    await _settle(rig.service)
+    await rig.collector.wait_for(2)
+
+    completed = rig.collector.of(MotionGestureCompleted)
+    assert [e.gesture for e in completed] == ["nod"]  # type: ignore[attr-defined]
+
+
+async def test_preempting_a_drift_reports_nothing(rig: Rig) -> None:
+    """A drift being cut short is not a ``motion.gesture_preempted``.
+
+    The event names a *gesture*, and there is no gesture here to name. Publishing one with an
+    invented name would put a fact in the catalog that never happened — and #207 grades
+    preemption by reading exactly that line."""
+    await rig.clock.advance(_DRIFT_MAX_S)
+    await asyncio.sleep(0)
+
+    await rig.service.perform(Gesture.CENTER, correlation_id=uuid4())
+    await _settle(rig.service)
+
+    assert rig.collector.of(MotionGesturePreempted) == []
+
+
+async def test_the_interval_is_irregular(rig: Rig) -> None:
+    """AC-4: **a perfectly periodic twitch reads as a mechanism**, which is worse than stillness.
+
+    The eye picks up a rhythm in seconds and the illusion inverts. Asserted on the sampler
+    rather than by timing drifts, because timing them would measure the fake clock. The
+    randomness lives in the service and never in ``plan()``, which must stay pure — a random
+    planner would make every gesture assertion in this file a flake."""
+    intervals = {rig.service._drift_interval_s() for _ in range(20)}
+
+    assert len(intervals) > 1, "the drift interval is constant"
+    assert all(_DRIFT_MIN_S <= value <= _DRIFT_MAX_S for value in intervals)
+
+
+async def test_stop_ends_the_drift_loop(rig: Rig) -> None:
+    """A scheduler that outlived the service would keep a stopped robot twitching — and would
+    hold the event loop open past shutdown, which §9.2's 5 s budget has no room for."""
+    await rig.service.stop()
+    before = len(rig.servo.moves)
+
+    await rig.clock.advance(_DRIFT_MAX_S * 3)
+    await asyncio.sleep(0)
+
+    assert len(rig.servo.moves) == before
+
+
+async def test_a_failing_drift_is_not_a_fault(rig: Rig) -> None:
+    """A drift is decoration. It must never become an ``motion.gesture_preempted(by=None)``,
+    and it must never leave a channel energised.
+
+    The distinction matters at #207: a fault line in the log is a claim about the hardware, and
+    a robot that reported one every time an idle twitch glitched would make that signal
+    worthless — the same argument as flooding the catalog with drift events, one level up."""
+
+    class _SulkyDrift(_TracingServo):
+        """Fails every drift, and records that it was asked — the instrument's own liveness."""
+
+        def __init__(self, *, axes: tuple[Axis, ...]) -> None:
+            super().__init__(axes=axes)
+            self.attempts = 0
+
+        async def move_to(
+            self, channel: int, angle_deg: float, *, duration_ms: int
+        ) -> None:
+            if duration_ms == _DRIFT_MS:
+                self.attempts += 1
+                raise OSError("i2c glitch")
+            await super().move_to(channel, angle_deg, duration_ms=duration_ms)
+
+    clock = FakeClock()
+    bus = AsyncioEventBus()
+    servo = _SulkyDrift(axes=(_PAN, _TILT))
+    service = MotionService(
+        bus=bus,
+        servo=servo,
+        clock=clock,
+        idle_relax_ms=_IDLE_RELAX_MS,
+        look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
+        drift_interval_min_s=_DRIFT_MIN_S,
+        drift_interval_max_s=_DRIFT_MAX_S,
+        drift_amplitude_frac=_DRIFT_AMPLITUDE,
+        rng=random.Random(7),
+    )
+    collector = _Collector()
+    bus.subscribe(MotionGesturePreempted, collector.handle, name="test.preempted")
+    await bus.start()
+    await service.start()
+    try:
+        # ⚠️ `spawn` returns BEFORE the coroutine runs, so the drift loop has not reached its
+        # first `clock.sleep` yet — advancing now would cross no sleeper and the loop would
+        # then park for an interval that never arrives. The `rig` fixture gets this for free
+        # from pytest's own await points between setup and the test body; here it has to be
+        # explicit.
+        await asyncio.sleep(0)
+        await clock.advance(_DRIFT_MAX_S + 1)
+        await asyncio.sleep(0)
+        await _settle(service)
+        await asyncio.sleep(0)
+
+        # Liveness first: without it this whole test passes on a run where nothing drifted,
+        # which is how it was silently green until coverage pointed at the unexecuted branch.
+        assert servo.attempts, (
+            "no drift was attempted — the assertions below prove nothing"
+        )
+        assert collector.events == [], "a failed drift was reported as a hardware fault"
+        assert not any(servo.is_energised(axis.channel) for axis in servo.axes)
+    finally:
+        await service.stop()
+        await bus.stop()
