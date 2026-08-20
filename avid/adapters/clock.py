@@ -95,6 +95,22 @@ class FakeClock:
         """Monotonic nanoseconds (SDS §9.1.1) — same elapsed counter as :meth:`now`."""
         return self._elapsed_ns
 
+    @property
+    def sleepers(self) -> int:
+        """How many coroutines are currently parked on this clock.
+
+        Exists for one recurring test hazard: :meth:`advance` wakes only the sleepers it
+        **crosses**, so a task that has not yet reached its ``sleep()`` registers a deadline
+        *after* the advance and then waits for a crossing that never comes. ``spawn()`` returns
+        before its coroutine has run, which makes that a genuine race rather than a theoretical
+        one — and one that surfaces as "passes on two CI legs, fails on the slower third".
+
+        A test that means "let the loop settle, then move time" can now say so
+        (``while not clock.sleepers: await asyncio.sleep(0)``) instead of guessing at a number of
+        yields.
+        """
+        return len(self._sleepers)
+
     async def sleep(self, seconds: float) -> None:
         """Park until the clock is advanced ``seconds`` past *now*.
 
