@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.ports import Clock, Service, ServiceNotifier
+from avid.core.ports import BootLog, Clock, Service, ServiceNotifier
 from avid.core.state_manager import StateManager
 from avid.core.tasks import spawn
 from avid.domain import (
@@ -81,6 +81,27 @@ async def _ping_watchdog(
         await notifier.watchdog()
 
 
+async def _beat_boot_log(*, boot_log: BootLog, clock: Clock, interval_s: float) -> None:
+    """Stamp "still alive" into the boot log every *interval_s* until cancelled (#379, §12.6).
+
+    ⚠️ **Deliberately a second task rather than a line inside :func:`_ping_watchdog`.** They answer
+    different questions on different clocks: the watchdog tells the *supervisor* the loop is alive
+    right now and its cadence is set by ``WatchdogSec``; this tells the *future* the process was
+    alive, and its cadence is the precision of every downtime figure the M11 gate will report.
+    Sharing a timer would silently couple a storage-write rate to a supervision deadline, and the
+    next person to tune one would move the other without knowing.
+
+    A failure here must never take the robot down (§3.12.3): the record is an instrument, and an
+    instrument that kills its subject is worse than one that misses a sample.
+    """
+    while True:
+        await clock.sleep(interval_s)
+        try:
+            await boot_log.heartbeat()
+        except Exception:  # noqa: BLE001 - an instrument must not kill its subject
+            _log.warning("boot-log heartbeat failed", exc_info=True)
+
+
 async def run(
     *,
     bus: AsyncioEventBus,
@@ -91,6 +112,9 @@ async def run(
     health: ControlSurface | None = None,
     services: Sequence[Service] = (),
     watchdog_interval_s: float = 15.0,
+    boot_log: BootLog | None = None,
+    build: str = "unknown",
+    heartbeat_interval_s: float = 60.0,
     shutdown: asyncio.Event | None = None,
     ready: asyncio.Event | None = None,
 ) -> int:
@@ -123,6 +147,11 @@ async def run(
 
     boot_id = uuid4()
     async with bus:
+        # Opened before anything else can fail, so a run that dies during start-up still leaves a
+        # row. A boot that crashed while wiring adapters is exactly the kind of downtime O5 must
+        # count, and it is the kind a record written *after* start-up would miss entirely.
+        if boot_log is not None:
+            await boot_log.open_boot(boot_id=str(boot_id), build=build)
         if health is not None:
             await health.start()
         try:
@@ -150,6 +179,16 @@ async def run(
             if ready is not None:
                 ready.set()
 
+            heartbeat_task: asyncio.Task[None] | None = None
+            if boot_log is not None and heartbeat_interval_s > 0:
+                heartbeat_task = spawn(
+                    _beat_boot_log(
+                        boot_log=boot_log,
+                        clock=clock,
+                        interval_s=heartbeat_interval_s,
+                    ),
+                    name="boot-log-heartbeat",
+                )
             watchdog_task: asyncio.Task[None] | None = None
             if watchdog_interval_s > 0:
                 watchdog_task = spawn(
@@ -169,6 +208,26 @@ async def run(
                     watchdog_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await watchdog_task
+                # Stop beating BEFORE closing the record: a heartbeat landing after the close
+                # would claim the run was alive past its own stop. (The adapter guards this too —
+                # belt and braces, because the two are written years apart by definition.)
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat_task
+                # ⚠️ THIS is what makes a restart "manual" (§12.6), and the `shutdown.is_set()`
+                # guard is the whole of it. `finally` runs for ANY exit from the block — a
+                # cancellation, or an exception propagating out of the robot — and closing the
+                # record there would file a crash as a deliberate stop, which is the exact
+                # inversion of what O5 grades. Only a *set* shutdown event means SIGTERM/SIGINT
+                # reached the handler, i.e. that a person or a deploy asked.
+                #
+                # A crash, a watchdog kill or a power cut leaves the row open, and that absence
+                # IS the representation of an unplanned stop. Caught by
+                # `test_a_run_that_never_shuts_down_leaves_its_record_open`, which failed against
+                # the first version of this code.
+                if boot_log is not None and shutdown.is_set():
+                    await boot_log.close_boot(reason="signal")
                 await notifier.stopping()
                 shutdown_id = uuid4()
                 _log.info("shutting down [correlation_id=%s]", shutdown_id)

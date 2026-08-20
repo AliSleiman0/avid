@@ -866,6 +866,24 @@ class SystemdConfig(_Section):
     watchdog_interval_s: float = 15.0
 
 
+class RuntimeConfig(_Section):
+    """Process-liveness accounting — O5's instrument (#379, SDS §12.6).
+
+    ``heartbeat_interval_s`` is how often the running process refreshes its "still alive" stamp in
+    ``boot_log``. It is the **precision of every downtime figure**: a run that dies without warning
+    is credited only up to its last heartbeat, so the reported uptime may understate availability
+    by up to one interval — never overstate it, which is the direction that matters.
+
+    ⚠️ It is also a **write cadence on the robot's storage**, and this is the only thing in the
+    system that writes on a timer with nothing happening. 60 s is ~1,440 single-column updates a
+    day; shortening it buys precision no soak needs and spends it against §2.7.1's storage row.
+    Distinct from ``[systemd] watchdog_interval_s``, which tells the *supervisor* the loop is
+    alive: this one tells the *future* the process was.
+    """
+
+    heartbeat_interval_s: float = 60.0
+
+
 class Config(_Section):
     """The whole configuration, frozen (SDS §9.6).
 
@@ -896,6 +914,7 @@ class Config(_Section):
     motion: MotionConfig = MotionConfig()
     api: ApiConfig = ApiConfig()
     systemd: SystemdConfig = SystemdConfig()
+    runtime: RuntimeConfig = RuntimeConfig()
     openai_api_key: SecretStr | None = Field(default=None)
     # systemd's ``$NOTIFY_SOCKET`` handoff (AVID-38), injected from the env like the
     # key. ``None`` off systemd — the real notifier then no-ops (SDS §3.11.3).

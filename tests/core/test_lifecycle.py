@@ -9,10 +9,11 @@ The e2e SIGTERM/subprocess path is covered by ``tests/e2e/test_supervision.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
-from avid.adapters import FakeClock, FakeServiceNotifier
+from avid.adapters import FakeBootLog, FakeClock, FakeServiceNotifier
 from avid.core import lifecycle
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.state_manager import StateManager
@@ -360,3 +361,130 @@ async def test_no_watchdog_pings_when_interval_non_positive() -> None:
     shutdown.set()
     await asyncio.wait_for(task, timeout=1.0)
     assert notifier.notifications == ["READY", "STOPPING"]
+
+
+# ── the boot log (#379, SDS §12.6) ───────────────────────────────────────────────────────────
+
+
+async def test_a_clean_shutdown_closes_the_boot_record() -> None:
+    """The ordered teardown is what makes a restart "manual" (§12.6).
+
+    Reaching the close only happens on SIGTERM/SIGINT — i.e. because a person or a deploy asked.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    boot_log = FakeBootLog(clock=clock)
+    shutdown, ready = asyncio.Event(), asyncio.Event()
+
+    task = asyncio.create_task(
+        lifecycle.run(
+            bus=bus,
+            clock=clock,
+            state=StateManager(bus=bus, clock=clock),
+            adapter_health={"clock": True},
+            notifier=FakeServiceNotifier(),
+            watchdog_interval_s=0,
+            boot_log=boot_log,
+            build="9.9.9",
+            heartbeat_interval_s=0,  # no beats — this test is about open + close
+            shutdown=shutdown,
+            ready=ready,
+        )
+    )
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+
+    # Open while running: the row exists from the start, so a boot that died during wiring would
+    # still have left one.
+    (during,) = await boot_log.records(since=0, until=10**12)
+    assert during.build == "9.9.9"
+    assert during.was_clean is False
+
+    shutdown.set()
+    assert await asyncio.wait_for(task, timeout=1.0) == 0
+
+    (after,) = await boot_log.records(since=0, until=10**12)
+    assert after.was_clean is True
+    assert after.stop_reason == "signal"
+    await boot_log.aclose()
+
+
+async def test_a_run_that_never_shuts_down_leaves_its_record_open() -> None:
+    """⚠️ The representation of an *unplanned* stop is an absence, not a record.
+
+    A crash, a watchdog kill and a power cut all skip the teardown entirely, so nothing can write
+    "crashed" — an open row belonging to a process that is no longer running is what O5 reads as
+    an unplanned restart. Simulated by cancelling the loop, which is the closest a test gets to a
+    process being killed.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    boot_log = FakeBootLog(clock=clock)
+    ready = asyncio.Event()
+
+    task = asyncio.create_task(
+        lifecycle.run(
+            bus=bus,
+            clock=clock,
+            state=StateManager(bus=bus, clock=clock),
+            adapter_health={"clock": True},
+            notifier=FakeServiceNotifier(),
+            watchdog_interval_s=0,
+            boot_log=boot_log,
+            build="9.9.9",
+            heartbeat_interval_s=0,
+            shutdown=asyncio.Event(),
+            ready=ready,
+        )
+    )
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    (record,) = await boot_log.records(since=0, until=10**12)
+    assert record.stopped_at is None
+    assert record.was_clean is False
+    await boot_log.aclose()
+
+
+async def test_the_heartbeat_keeps_last_seen_moving_while_the_robot_runs() -> None:
+    """Without it, the last *known* liveness of a crashed run is the boot itself — and a crash
+    after 29 days would be indistinguishable from one after 29 seconds."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    boot_log = FakeBootLog(clock=clock)
+    shutdown, ready = asyncio.Event(), asyncio.Event()
+
+    task = asyncio.create_task(
+        lifecycle.run(
+            bus=bus,
+            clock=clock,
+            state=StateManager(bus=bus, clock=clock),
+            adapter_health={"clock": True},
+            notifier=FakeServiceNotifier(),
+            watchdog_interval_s=0,
+            boot_log=boot_log,
+            build="x",
+            heartbeat_interval_s=60,
+            shutdown=shutdown,
+            ready=ready,
+        )
+    )
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+    opened = (await boot_log.records(since=0, until=10**12))[0].last_seen_at
+
+    # FakeClock wakes only sleepers it *crosses*, so cross the interval and yield enough for the
+    # woken task to run its UPDATE through the store's executor.
+    await clock.advance(60)
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if (await boot_log.records(since=0, until=10**12))[0].last_seen_at > opened:
+            break
+
+    assert (await boot_log.records(since=0, until=10**12))[
+        0
+    ].last_seen_at == opened + 60
+
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    await boot_log.aclose()
