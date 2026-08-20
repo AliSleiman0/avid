@@ -54,7 +54,9 @@ from avid.domain import (
     BehaviorTriggerFired,
     ConversationAssistantResponded,
     ConversationTurnStarted,
+    Direction,
     Event,
+    LookAtResult,
     PolicyLimits,
     RoutineSpec,
     ScoreWeights,
@@ -171,6 +173,7 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
         memory=memory,
         affect=_GateAffect(),
         behavior=behavior,
+        gesture=_StubGesture(),
         session_idle_close_s=600,
         memory_inject_timeout_s=1.0,
         default_timezone=_ZONE,
@@ -712,3 +715,21 @@ async def test_the_proactive_turn_actually_plays_audio(db: Path) -> None:
         )
     finally:
         await _teardown(rig)
+
+
+class _StubGesture:
+    """A :class:`~avid.core.ports.GestureTools` double: records the directions asked for (#204).
+
+    Returns ``ACCEPTED`` unconditionally — the cooldown and the no-axis decline are
+    ``MotionService``'s to decide and are tested there and in the contract suite. What this
+    double is for is the *seam*: that ``ConversationService`` reaches motion through a port it
+    never names a service for."""
+
+    def __init__(self) -> None:
+        self.looks: list[Direction] = []
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        self.looks.append(direction)
+        return LookAtResult.ACCEPTED

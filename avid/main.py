@@ -681,6 +681,7 @@ def _wire_services(
         servo=servo,
         clock=clock,
         idle_relax_ms=config.motion.idle_relax_ms,
+        look_at_cooldown_ms=config.motion.look_at_cooldown_ms,
     )
     audio = AudioService(
         bus=bus,
@@ -761,6 +762,10 @@ def _wire_services(
         # AffectService satisfies AffectTools structurally — no inheritance, no edit there.
         # It is built above, before this call, so no reordering was needed (AVID-214).
         affect=affect,
+        # MotionService as the GestureTools port (#204), the same shape again. Built beside
+        # ExpressionService above, so again no reordering — and it adds no bus edge, because
+        # tool dispatch rides the Realtime pump rather than the bus.
+        gesture=motion,
         behavior=behavior,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,

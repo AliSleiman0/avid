@@ -23,22 +23,33 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
-from avid.core.ports import AffectTools, BehaviorTools, MemoryTools
+from avid.core.ports import AffectTools, BehaviorTools, GestureTools, MemoryTools
 from avid.core.realtime import ToolCallRequested
-from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact, RoutineSpec
+from avid.domain import (
+    FACT_KINDS,
+    SEMANTIC_AFFECTS,
+    Affect,
+    Direction,
+    Fact,
+    LookAtResult,
+    RoutineSpec,
+)
 
 _log = logging.getLogger(__name__)
 
-# The three tool names (§6.6). Constants, not literals, so the schema declaration below and the
+# The tool names (§6.6). Constants, not literals, so the schema declaration below and the
 # dispatch routing cannot disagree about a spelling.
 REMEMBER_FACT = "remember_fact"
 RECALL = "recall"
 FORGET = "forget"
 SET_AFFECT = "set_affect"
 SET_QUIET = "set_quiet"
+LOOK_AT = "look_at"
 
 # The default recall cutoff (§7.7, k=5) when the model omits ``k``.
 _DEFAULT_RECALL_K = 5
@@ -86,7 +97,17 @@ CAPABILITY_INSTRUCTIONS = (
     # silence is not, because the user has no way to tell it from a broken robot.
     "If the user asks to be left alone or says they are busy right now, call set_quiet with "
     "roughly how long they asked for. Only when they ask — never because you think they might "
-    "want it."
+    "want it. "
+    # M9 (#204). Weighted like set_quiet rather than like set_affect, and for the same reason:
+    # this one rides an explicit request, so the failure mode is not under-firing but a model
+    # that decorates every reply with a gesture — which would run the servos continuously,
+    # contradict the gate's relax clause and load the rail #206 measures. §6.5's finding says a
+    # negative constraint is followed far more strongly than an encouragement, so the sentence
+    # that stops it gesturing constantly matters more than the one that enables it. The cooldown
+    # is a hard backstop underneath, but a backstop the model keeps hitting is a model that
+    # spends its turns being told no.
+    "If the user asks you to look somewhere — left, right, up, down, or back at them — call "
+    "look_at. Only when they ask; never as decoration on an ordinary reply."
 )
 
 
@@ -241,6 +262,31 @@ TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
             "required": ["duration_s"],
         },
     },
+    {
+        "type": "function",
+        "name": LOOK_AT,
+        "description": (
+            "Turn to look in a direction, when the user asks you to look somewhere. "
+            "Your body turns left and right; your head tilts up and down."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    # Derived from the domain enum, not spelled out, for the reason
+                    # remember_fact's `kind` derives from FACT_KINDS: the model is then
+                    # structurally prevented from inventing a sixth direction, and the schema it
+                    # is told about cannot drift from the code that executes its calls.
+                    "enum": [d.name.lower() for d in Direction],
+                    "description": (
+                        "Where to look: left, right, up, down, or center to face forward."
+                    ),
+                },
+            },
+            "required": ["direction"],
+        },
+    },
 )
 
 
@@ -260,6 +306,7 @@ async def dispatch_tool_call(
     *,
     affect: AffectTools,
     behavior: BehaviorTools,
+    gesture: GestureTools,
     correlation_id: UUID,
     approximate: bool,
     default_timezone: str,
@@ -328,12 +375,57 @@ async def dispatch_tool_call(
             # never wrong. Awaiting a render would import that latency into the turn for nothing.
             return _result({"ok": True})
 
+        if call.name == LOOK_AT:
+            args = _load_object(call.arguments)
+            outcome = await gesture.look_at(
+                _parse_direction(str(args["direction"])), correlation_id=correlation_id
+            )
+            # {ok} immediately, never after the sweep: §6.6 classifies this fire-and-forget
+            # because a gesture is the better part of a second, and step 5's response.create
+            # landing behind it is audible as dead air.
+            #
+            # A decline is a *successful* tool call reporting a refusal, not an error — the
+            # model needs to say "I just did" or "I cannot look up", and an error output invites
+            # it to apologise for a malfunction that did not happen.
+            if outcome is LookAtResult.ACCEPTED:
+                return _result({"ok": True})
+            return _result({"ok": False, "reason": _LOOK_AT_REASONS[outcome]})
+
         return _error(f"unknown tool {call.name!r}")
     except Exception as exc:  # noqa: BLE001 — AC-6: no tool failure may reach the pump
         _log.warning(
             "tool %r failed [%s]: %s", call.name, correlation_id, exc, exc_info=True
         )
         return _error(f"{call.name} failed: {exc}")
+
+
+# What the model is told when a look_at is declined. Phrased for a listener rather than a log:
+# the model reads these and speaks, so "I just looked over there a moment ago" has to be
+# derivable from the string. Keyed on the enum so a fourth outcome cannot be added without an
+# answer to "and what does the robot say about it".
+_LOOK_AT_REASONS: Mapping[LookAtResult, str] = MappingProxyType(
+    {
+        LookAtResult.COOLING_DOWN: "just moved a moment ago — ask again shortly",
+        LookAtResult.NO_AXIS: "this robot has no axis that can look that way",
+    }
+)
+
+
+def _parse_direction(name: str) -> Direction:
+    """Map the model's string to a :class:`~avid.domain.Direction`, or raise.
+
+    The raise becomes a tool error in the dispatcher, so an invented direction is told to the
+    model and the turn continues (AC-6) — the same treatment ``kind`` and ``affect`` get. The
+    JSON-Schema ``enum`` should make this unreachable; it is here because *should* is not a
+    guarantee about a model, and the alternative to raising is a ``KeyError`` in the pump.
+    """
+    try:
+        return Direction[name.strip().upper()]
+    except KeyError:
+        allowed = ", ".join(d.name.lower() for d in Direction)
+        raise ValueError(
+            f"unknown direction {name!r} — expected one of {allowed}"
+        ) from None
 
 
 def _parse_affect(name: str) -> Affect:

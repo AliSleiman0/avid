@@ -30,8 +30,10 @@ from avid.domain import (
     Affect,
     AffectChanged,
     Axis,
+    Direction,
     Event,
     Gesture,
+    LookAtResult,
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
@@ -55,6 +57,10 @@ _SPEEDUP = 5
 # The shipped default is 3000 ms (config/*.toml); the number is not what is under test here,
 # the arming and cancelling are.
 _IDLE_RELAX_MS = 3000
+
+# The look_at rate limit (#204). Long enough that a second call in the same test is refused
+# unless the clock is deliberately advanced, so a test cannot pass by accident of timing.
+_LOOK_AT_COOLDOWN_MS = 4000
 
 # The rig config/*.toml declares (#200): pan ch0, tilt ch13, asymmetric reaches.
 _PAN = Axis(name="pan", channel=0, min_deg=30.0, max_deg=150.0)
@@ -172,7 +178,11 @@ async def _make_rig(*axes: Axis) -> tuple[Rig, AsyncioEventBus]:
     bus = AsyncioEventBus()
     servo = _TracingServo(axes=axes)
     service = MotionService(
-        bus=bus, servo=servo, clock=clock, idle_relax_ms=_IDLE_RELAX_MS
+        bus=bus,
+        servo=servo,
+        clock=clock,
+        idle_relax_ms=_IDLE_RELAX_MS,
+        look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
     )
     collector = _Collector()
 
@@ -350,7 +360,11 @@ async def test_a_completed_gesture_reports_a_measured_duration() -> None:
     bus = AsyncioEventBus()
     servo = _TracingServo(axes=(_PAN, _TILT), speedup=1)  # measuring elapsed time
     service = MotionService(
-        bus=bus, servo=servo, clock=SystemClock(), idle_relax_ms=_IDLE_RELAX_MS
+        bus=bus,
+        servo=servo,
+        clock=SystemClock(),
+        idle_relax_ms=_IDLE_RELAX_MS,
+        look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
     )
     collector = _Collector()
     bus.subscribe(MotionGestureCompleted, collector.handle, name="test.completed")
@@ -558,7 +572,11 @@ async def test_a_raising_subscriber_does_not_disturb_a_gesture() -> None:
     bus = AsyncioEventBus()
     servo = _TracingServo(axes=(_PAN, _TILT))
     service = MotionService(
-        bus=bus, servo=servo, clock=FakeClock(), idle_relax_ms=_IDLE_RELAX_MS
+        bus=bus,
+        servo=servo,
+        clock=FakeClock(),
+        idle_relax_ms=_IDLE_RELAX_MS,
+        look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
     )
     collector = _Collector()
     bus.subscribe(MotionGestureStarted, boom, name="test.boom")
@@ -613,7 +631,11 @@ async def test_a_failing_relax_does_not_stop_the_rest_from_relaxing() -> None:
     bus = AsyncioEventBus()
     servo = _SulkyServo(axes=(_PAN, _TILT))
     service = MotionService(
-        bus=bus, servo=servo, clock=FakeClock(), idle_relax_ms=_IDLE_RELAX_MS
+        bus=bus,
+        servo=servo,
+        clock=FakeClock(),
+        idle_relax_ms=_IDLE_RELAX_MS,
+        look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
     )
     await bus.start()
     try:
@@ -656,7 +678,11 @@ async def _faulty_rig(*, fail_on: int = 1) -> tuple[Rig, AsyncioEventBus]:
     bus = AsyncioEventBus()
     servo = _FaultyServo(axes=(_PAN, _TILT), fail_on=fail_on)
     service = MotionService(
-        bus=bus, servo=servo, clock=clock, idle_relax_ms=_IDLE_RELAX_MS
+        bus=bus,
+        servo=servo,
+        clock=clock,
+        idle_relax_ms=_IDLE_RELAX_MS,
+        look_at_cooldown_ms=_LOOK_AT_COOLDOWN_MS,
     )
     collector = _Collector()
     _register(bus, service)
@@ -845,3 +871,58 @@ async def test_waking_up_does_not_move_anything(rig: Rig) -> None:
 
     assert rig.servo.moves == []
     assert rig.collector.events == []
+
+
+# --- the GestureTools surface (#204) -----------------------------------------
+
+
+async def test_look_at_declines_a_direction_this_rig_cannot_express(
+    pan_only: Rig,
+) -> None:
+    """AC-8: an honest ``{ok: false}``, never a silent no-op **and never a lie**.
+
+    Three possible answers and only one is acceptable. ``ACCEPTED`` would leave the model
+    describing motion that never happened. A tool *error* would have it apologise for a
+    malfunction. ``NO_AXIS`` is the robot working correctly and able to say what it cannot do."""
+    outcome = await pan_only.service.look_at(Direction.UP, correlation_id=uuid4())
+
+    assert outcome is LookAtResult.NO_AXIS
+    assert pan_only.servo.moves == []
+    assert pan_only.collector.of(MotionGestureStarted) == []
+
+
+async def test_look_at_shares_the_preemption_path_with_affect_driven_gestures(
+    rig: Rig,
+) -> None:
+    """One scheduler, not two.
+
+    A voice-driven look and an affect-driven nod are the same kind of thing to the rig, so they
+    contend through the same ``perform`` — which is why a look preempts a nod in flight and says
+    so. Two separate paths would let the model's request and the robot's feelings drive the
+    servos simultaneously, which on a shared rail is the failure #206 measures."""
+    await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+    await rig.servo.moves.wait_for_steps(1)
+
+    await rig.service.look_at(Direction.LEFT, correlation_id=uuid4())
+    await _settle(rig.service)
+
+    preempted = rig.collector.of(MotionGesturePreempted)
+    assert [(e.gesture, e.by) for e in preempted] == [("nod", "turn_left")]  # type: ignore[attr-defined]
+
+
+async def test_an_affect_gesture_does_not_consume_the_look_at_cooldown(
+    rig: Rig,
+) -> None:
+    """⚠️ The rate limit is on the **model**, not on the robot.
+
+    The cooldown exists because a model that finds gesturing delightful would drive the servos
+    continuously (AC-6). The robot's own affect-driven gestures are already rate-limited by how
+    often affect changes, and charging them against the same budget would mean a lively
+    conversation silently disables the user's ability to say "look left"."""
+    await rig.service.perform(Gesture.NOD, correlation_id=uuid4())
+    await _settle(rig.service)
+
+    outcome = await rig.service.look_at(Direction.LEFT, correlation_id=uuid4())
+    await _settle(rig.service)
+
+    assert outcome is LookAtResult.ACCEPTED

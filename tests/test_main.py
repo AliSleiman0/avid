@@ -45,7 +45,7 @@ from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
 from avid.core.hal import Axis, DisplayFrame
-from avid.core.ports import AffectTools
+from avid.core.ports import AffectTools, GestureTools
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AffectChanged,
@@ -646,6 +646,10 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
     assert isinstance(motion, MotionService)
     # the ConversationService names the port; the concrete injected is the wired MemoryService
     assert conversation._memory is memory
+    # #204: MotionService injected as the GestureTools port — the same shape as the two above,
+    # and it adds NO bus edge, because tool dispatch rides the Realtime pump rather than the bus.
+    assert conversation._gesture is motion
+    assert isinstance(conversation._gesture, GestureTools)
     # ...and the same for AffectTools (AVID-214). The wired AffectService is not in the returned
     # tuple — it owns no task and is kept alive by its bound-method subscription — so this is
     # asserted through the service that holds it: it must be an AffectService, satisfying the

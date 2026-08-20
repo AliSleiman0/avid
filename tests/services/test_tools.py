@@ -16,10 +16,19 @@ from uuid import UUID, uuid4
 import pytest
 
 from avid.core.realtime import ToolCallRequested
-from avid.domain import FACT_KINDS, SEMANTIC_AFFECTS, Affect, Fact, RoutineSpec
+from avid.domain import (
+    FACT_KINDS,
+    SEMANTIC_AFFECTS,
+    Affect,
+    Direction,
+    Fact,
+    LookAtResult,
+    RoutineSpec,
+)
 from avid.services.tools import (
     CAPABILITY_INSTRUCTIONS,
     FORGET,
+    LOOK_AT,
     RECALL,
     REMEMBER_FACT,
     SET_AFFECT,
@@ -149,6 +158,34 @@ class _RecordingBehavior:
         return self._until
 
 
+class _RecordingGesture:
+    """A :class:`~avid.core.ports.GestureTools` double (#204) — a fake, not a mock (SDS §14.3).
+
+    ``outcome`` is settable so a test can drive the two decline paths through the dispatcher
+    without owning a servo: what the dispatcher must get right is the *shape* of each answer —
+    ``{ok: true}`` versus ``{ok: false, reason}`` — while whether to decline is
+    ``MotionService``'s judgement, tested there."""
+
+    def __init__(self, *, outcome: LookAtResult = LookAtResult.ACCEPTED) -> None:
+        self.looks: list[tuple[Direction, UUID]] = []
+        self.outcome = outcome
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        self.looks.append((direction, correlation_id))
+        return self.outcome
+
+
+class _BoomGesture:
+    """A ``GestureTools`` that raises — AC-6's rule applied to the new route."""
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        raise OSError("[Errno 121] Remote I/O error")
+
+
 async def _dispatch(
     memory: object,
     call: ToolCallRequested,
@@ -156,6 +193,7 @@ async def _dispatch(
     approximate: bool = False,
     affect: object | None = None,
     behavior: object | None = None,
+    gesture: object | None = None,
     default_timezone: str = _TEST_TZ,
 ) -> dict[str, object]:
     """Dispatch and parse the tool output back to a dict for assertion."""
@@ -164,6 +202,7 @@ async def _dispatch(
         call,
         affect=affect or _RecordingAffect(),  # type: ignore[arg-type]
         behavior=behavior or _RecordingBehavior(),  # type: ignore[arg-type]
+        gesture=gesture or _RecordingGesture(),  # type: ignore[arg-type]
         correlation_id=uuid4(),
         approximate=approximate,
         default_timezone=default_timezone,
@@ -187,6 +226,7 @@ async def test_remember_fact_maps_to_the_port_and_returns_the_id() -> None:
         ),
         affect=_RecordingAffect(),
         behavior=_RecordingBehavior(),  # type: ignore[arg-type]
+        gesture=_RecordingGesture(),  # type: ignore[arg-type]
         correlation_id=corr,
         approximate=False,
         default_timezone=_TEST_TZ,
@@ -386,14 +426,15 @@ def test_capability_instructions_both_invite_and_bound_set_affect() -> None:
 # --- the shipped declarations (AC-2/AC-4) ------------------------------------------------------
 
 
-def test_tool_schemas_declare_the_five_tools() -> None:
-    """Three memory tools, the face, and — since #243 — §10.4's manual override.
+def test_tool_schemas_declare_the_six_tools() -> None:
+    """Three memory tools, the face, §10.4's manual override (#243), and — since #204 — the body.
 
     An exact-set assertion rather than a subset: the declarations are the *cached prefix* (§6.2.2),
     so a tool appearing here that nothing dispatches is billed on every turn of every session for
-    a capability the robot does not have."""
+    a capability the robot does not have. ``look_at`` grows that prefix slightly on every session;
+    it is cached, so the cost is negligible, but it is not zero."""
     names = {schema["name"] for schema in TOOL_SCHEMAS}
-    assert names == {REMEMBER_FACT, RECALL, FORGET, SET_AFFECT, SET_QUIET}
+    assert names == {REMEMBER_FACT, RECALL, FORGET, SET_AFFECT, SET_QUIET, LOOK_AT}
     assert all(schema["type"] == "function" for schema in TOOL_SCHEMAS)
 
 
@@ -565,3 +606,164 @@ def test_the_capability_instruction_only_permits_an_explicit_request() -> None:
     assert "call set_quiet" in CAPABILITY_INSTRUCTIONS
     assert "Only when they ask" in CAPABILITY_INSTRUCTIONS
     assert "never because you think they might want it" in CAPABILITY_INSTRUCTIONS
+
+
+# --- look_at (#204, SDS §6.6) ------------------------------------------------
+
+
+def test_the_direction_enum_is_the_domain_direction() -> None:
+    """Derived from the domain enum, not spelled out — the same rule ``kind`` follows.
+
+    The model is then **structurally prevented** from inventing a sixth direction, and the
+    schema it is told about cannot drift from the code that executes its calls. A hand-written
+    list here would be a second copy of the vocabulary, free to diverge the first time one grows.
+    """
+    schema = next(s for s in TOOL_SCHEMAS if s["name"] == LOOK_AT)
+    enum = schema["parameters"]["properties"]["direction"]["enum"]
+    assert enum == [d.name.lower() for d in Direction]
+    assert schema["parameters"]["required"] == ["direction"]
+
+
+def test_the_direction_is_an_enum_and_never_an_angle() -> None:
+    """§3.9.3, as a property of the schema rather than a paragraph.
+
+    ``move(channel, degrees)`` is the shape this deliberately is not: an intent keeps one tool
+    working across the 2-servo robot, the 1-servo fallback and the fake, and it is what stops
+    the model being handed a lever it can jam. A numeric parameter appearing here would be that
+    regression, and it would look like a feature in the diff."""
+    schema = next(s for s in TOOL_SCHEMAS if s["name"] == LOOK_AT)
+    properties = schema["parameters"]["properties"]
+    assert set(properties) == {"direction"}
+    assert properties["direction"]["type"] == "string"
+
+
+@pytest.mark.parametrize("direction", list(Direction), ids=lambda d: d.name.lower())
+async def test_every_direction_dispatches_to_the_port(direction: Direction) -> None:
+    """Parametrised over the domain enum, so a sixth direction is covered the day it exists."""
+    gesture = _RecordingGesture()
+    out = await _dispatch(
+        _RecordingMemory(),
+        _call(LOOK_AT, json.dumps({"direction": direction.name.lower()})),
+        gesture=gesture,
+    )
+    assert out == {"ok": True}
+    assert [d for d, _ in gesture.looks] == [direction]
+
+
+async def test_the_turn_carries_its_correlation_id_into_the_gesture() -> None:
+    """§3.12.2: the movement traces back to the turn that caused it.
+
+    Propagated, never minted — a gesture with no turn behind it is a fact nothing can be
+    grepped back to the conversation that produced it."""
+    gesture = _RecordingGesture()
+    corr = uuid4()
+    await dispatch_tool_call(
+        _RecordingMemory(),  # type: ignore[arg-type]
+        _call(LOOK_AT, '{"direction": "left"}'),
+        affect=_RecordingAffect(),  # type: ignore[arg-type]
+        behavior=_RecordingBehavior(),  # type: ignore[arg-type]
+        gesture=gesture,  # type: ignore[arg-type]
+        correlation_id=corr,
+        approximate=False,
+        default_timezone=_TEST_TZ,
+    )
+    assert [c for _, c in gesture.looks] == [corr]
+
+
+async def test_it_returns_immediately_rather_than_awaiting_the_sweep() -> None:
+    """§6.6 classifies this async/fire-and-forget, and the reason is audible.
+
+    A gesture is the better part of a second. Awaiting one before returning
+    ``function_call_output`` stalls the turn, and step 5's ``response.create`` then lands late
+    enough to be heard as dead air — the same argument §6.8 makes for ``set_affect``'s ~400 ms.
+    The port's contract carries the "returns on acceptance" half; what this asserts is that the
+    dispatcher does not add a wait of its own."""
+    out = await _dispatch(_RecordingMemory(), _call(LOOK_AT, '{"direction": "center"}'))
+    assert out == {"ok": True}
+    assert "duration_ms" not in out
+
+
+@pytest.mark.parametrize(
+    ("outcome", "fragment"),
+    [
+        (LookAtResult.COOLING_DOWN, "moment ago"),
+        (LookAtResult.NO_AXIS, "no axis"),
+    ],
+    ids=["cooldown", "no_axis"],
+)
+async def test_a_decline_is_a_successful_call_reporting_a_refusal(
+    outcome: LookAtResult, fragment: str
+) -> None:
+    """⚠️ ``{ok: false, reason}``, **not** a tool error — and the distinction is not pedantry.
+
+    A tool *error* tells the model something malfunctioned, and it apologises for a breakage
+    that did not happen. A declined call is the robot working correctly and saying so, which the
+    model can turn into *"I just looked over there"* or *"I cannot look up"*. The reason string
+    is written to be spoken, not logged.
+
+    The silent third option — returning ``{ok: true}`` and doing nothing — is the one that must
+    never exist: it leaves the model believing it moved, and a robot that describes motion that
+    never happened is worse than one that says it cannot."""
+    out = await _dispatch(
+        _RecordingMemory(),
+        _call(LOOK_AT, '{"direction": "up"}'),
+        gesture=_RecordingGesture(outcome=outcome),
+    )
+    assert out["ok"] is False
+    assert "error" not in out, "a decline is not a malfunction"
+    assert fragment in str(out["reason"])
+
+
+async def test_an_invented_direction_is_a_tool_error_and_the_turn_continues() -> None:
+    """The JSON-Schema ``enum`` should make this unreachable. *Should* is not a guarantee about
+    a model, and the alternative to catching it is a ``KeyError`` reaching the Realtime pump
+    (AC-6). The message names what was allowed, so the model can correct itself."""
+    gesture = _RecordingGesture()
+    out = await _dispatch(
+        _RecordingMemory(),
+        _call(LOOK_AT, '{"direction": "sideways"}'),
+        gesture=gesture,
+    )
+    assert out["ok"] is False
+    assert "sideways" in str(out["error"])
+    assert gesture.looks == [], "an invalid direction reached the port"
+
+
+async def test_malformed_arguments_are_a_tool_error() -> None:
+    """Same treatment as every other tool: the turn continues (AC-6)."""
+    out = await _dispatch(_RecordingMemory(), _call(LOOK_AT, "{not json"))
+    assert out["ok"] is False
+    assert "error" in out
+
+
+async def test_a_raising_port_becomes_a_tool_error_rather_than_reaching_the_pump() -> (
+    None
+):
+    """A servo fault must not crash a conversation.
+
+    ``MotionService`` already handles a fault mid-sweep (#203) and stays live; this is the other
+    end — a port that raises on the way in. Both roads lead to the same place: the model is told,
+    and the turn goes on."""
+    out = await _dispatch(
+        _RecordingMemory(),
+        _call(LOOK_AT, '{"direction": "left"}'),
+        gesture=_BoomGesture(),
+    )
+    assert out["ok"] is False
+    assert "look_at failed" in str(out["error"])
+
+
+def test_the_instruction_leads_with_the_constraint_not_the_encouragement() -> None:
+    """§6.5's finding, applied in the direction this tool needs it.
+
+    ``set_affect`` had to be **re-weighted toward encouragement** (AVID-214/216) because the
+    model would not call it at all. ``look_at`` is the opposite case and is weighted like
+    ``set_quiet``: it rides an explicit request, so the failure mode is not under-firing but a
+    model that decorates every reply with a gesture — which would run the servos continuously,
+    contradict the gate's relax clause, and load the rail #206 measures.
+
+    So the sentence that *stops* it gesturing constantly matters more than the one that enables
+    it, and this asserts the negative clause is actually present rather than trusting that
+    someone kept it."""
+    assert "call look_at" in CAPABILITY_INSTRUCTIONS
+    assert "never as decoration" in CAPABILITY_INSTRUCTIONS

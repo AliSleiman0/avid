@@ -54,14 +54,17 @@ from avid.core.tasks import spawn
 from avid.domain import (
     AffectChanged,
     Axis,
+    Direction,
     Event,
     Gesture,
     Keyframe,
+    LookAtResult,
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
     RobotState,
     StateTransitioned,
+    gesture_for_direction,
     plan,
 )
 
@@ -84,12 +87,19 @@ class MotionService:
     name = _SOURCE
 
     def __init__(
-        self, *, bus: EventBus, servo: Servo, clock: Clock, idle_relax_ms: int
+        self,
+        *,
+        bus: EventBus,
+        servo: Servo,
+        clock: Clock,
+        idle_relax_ms: int,
+        look_at_cooldown_ms: int,
     ) -> None:
         self._bus = bus
         self._servo = servo
         self._clock = clock
         self._idle_relax_s = idle_relax_ms / 1000
+        self._look_at_cooldown_ns = look_at_cooldown_ms * _NS_PER_MS
 
         # Axis name -> channel, resolved once from the rig's own report. The domain addresses
         # an axis by name (a Keyframe says "tilt"); the port is keyed by channel. This dict is
@@ -106,6 +116,11 @@ class MotionService:
         # timer starts when a gesture *ends* and its whole job is to still be there some
         # seconds later, when nothing else is.
         self._relax_task: asyncio.Task[None] | None = None
+
+        # When the last look_at was ACCEPTED — the cooldown's origin. Only accepted calls move
+        # it: a rejected one extending its own cooldown would lock a politely-retrying model out
+        # for as long as it kept asking.
+        self._last_look_ns: int | None = None
 
         # The monotonic stamp of the newest event acted on — the same staleness guard
         # ``ExpressionService`` carries, and for the same reason. This service reads two
@@ -388,6 +403,76 @@ class MotionService:
                 by=None,
             )
         )
+
+    # --- the GestureTools port (#204, SDS §6.6, §3.9.1) ----------------------------------
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        """Point the robot *direction* — the model's one motion tool (§6.6).
+
+        Satisfies :class:`~avid.core.ports.GestureTools` **structurally**: nothing here inherits
+        from it, nothing in this module imports ``ai``, and the composition root injects this
+        service into ``ConversationService`` as the port. That is the whole mechanism by which
+        the model can move a servo without the conversation layer knowing a servo exists.
+
+        Returns as soon as the gesture is **accepted**, never after the sweep — §6.6 classifies
+        this fire-and-forget because awaiting the better part of a second before returning
+        ``function_call_output`` stalls the turn and makes step 5's ``response.create`` land as
+        audible dead air.
+
+        Two ways a well-formed request is declined, and the model is told which:
+
+        ⚠️ **The cooldown is a safety property, not a nicety.** A model that decides gesturing is
+        delightful would otherwise drive both servos continuously — which contradicts the gate's
+        relax clause by construction and puts sustained load on the rail #206 is measuring. Note
+        it advances **only on acceptance**: a rejected call must not extend its own cooldown, or
+        a model retrying politely would lock itself out for as long as it kept asking.
+
+        And a direction this rig has no axis for is declined **honestly** rather than performed
+        as a no-op. A silent success would leave the model believing it moved, and a robot that
+        describes motion that never happened is worse than one that says it cannot — the same
+        argument §7.6 makes about memory, in a different organ.
+
+        There is deliberately **no** *"decline while SPEAKING"* rule (the issue asks for the
+        decision either way). Gesturing mid-sentence is what people do, the cooldown already
+        bounds the rate, and a robot that will not look at you while it is talking is a robot
+        that will not look at you during most of the conversation.
+        """
+        remaining_ns = self._cooldown_remaining_ns()
+        if remaining_ns > 0:
+            _log.debug(
+                "look_at(%s) declined: %d ms of cooldown left [correlation_id=%s]",
+                direction.name.lower(),
+                remaining_ns // _NS_PER_MS,
+                correlation_id,
+            )
+            return LookAtResult.COOLING_DOWN
+
+        gesture = gesture_for_direction(direction)
+        if not plan(gesture, self._servo.axes):
+            _log.info(
+                "look_at(%s) declined: this rig has no axis for it [correlation_id=%s]",
+                direction.name.lower(),
+                correlation_id,
+            )
+            return LookAtResult.NO_AXIS
+
+        self._last_look_ns = self._clock.monotonic_ns()
+        await self.perform(gesture, correlation_id=correlation_id)
+        return LookAtResult.ACCEPTED
+
+    def _cooldown_remaining_ns(self) -> int:
+        """Nanoseconds left before another ``look_at`` may be accepted; ``0`` if it may now.
+
+        Monotonic, never wall clock (§9.1.1). A cooldown measured on ``timestamp_ms`` would be
+        skipped entirely by an NTP step forward — and the Pi corrects its clock seconds after
+        boot, which is exactly when a first conversation is likely to be happening.
+        """
+        if self._last_look_ns is None:
+            return 0
+        elapsed = self._clock.monotonic_ns() - self._last_look_ns
+        return max(0, self._look_at_cooldown_ns - elapsed)
 
     # --- relaxing when idle — the gate's "no buzz" clause ---------------------------------
 

@@ -86,6 +86,7 @@ from avid.core.ports import (
     BehaviorTools,
     Clock,
     EventBus,
+    GestureTools,
     MemoryTools,
     RealtimeClient,
     TurnSink,
@@ -253,6 +254,7 @@ class ConversationService:
         memory: MemoryTools,
         affect: AffectTools,
         behavior: BehaviorTools,
+        gesture: GestureTools,
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
         default_timezone: str,
@@ -275,6 +277,10 @@ class ConversationService:
         # §6.6's set_quiet door. A Protocol, never BehaviorService (P2/P5) — this service must be
         # able to reach the behaviour engine without knowing one exists.
         self._behavior = behavior
+        # The §6.6 look_at surface (#204) — MotionService as the GestureTools port, so this
+        # service names no motion module (P2/P5) and adds no bus edge: tool dispatch rides the
+        # Realtime pump, not the bus.
+        self._gesture = gesture
         self._idle_close_s = session_idle_close_s
         self._memory_inject_timeout_s = memory_inject_timeout_s
         # [behavior] timezone, injected (P7) purely to fill in remember_fact's schedule when the
@@ -723,6 +729,7 @@ class ConversationService:
             ev,
             affect=self._affect,
             behavior=self._behavior,
+            gesture=self._gesture,
             correlation_id=self._corr(),
             approximate=self._turn_approximate,
             default_timezone=self._default_timezone,

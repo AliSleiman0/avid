@@ -44,9 +44,10 @@ invisible in a trace, and #207 is where the convention is confirmed against the 
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
+from types import MappingProxyType
 from typing import ClassVar
 
 from avid.domain.events import Event
@@ -312,6 +313,74 @@ def duration_ms(keyframes: Iterable[Keyframe]) -> int:
     return sum(frame.duration_ms for frame in keyframes)
 
 
+# --- the look_at vocabulary (#204, SDS §6.6) ---------------------------------
+#
+# A *direction* is not a gesture, and the distinction is why the tool is safe to hand to a
+# model. `Gesture` includes NOD and SHAKE, which mean things; a `Direction` only points. The
+# model may ask the robot to look somewhere and may not ask it to agree with someone.
+
+
+class Direction(Enum):
+    """Where the model may ask the robot to look (SDS §6.6).
+
+    Deliberately a small closed set of **intents**, never an angle. The model states what it
+    wants and §3.9.3 decides what that means in degrees on this rig — which is what keeps one
+    tool working across the 2-servo robot, the 1-servo fallback and the fake, and what stops the
+    model being handed a lever it can jam.
+
+    ``CENTER`` is here because *"look at me"* and *"face forward"* are things people say, and
+    because it is the one direction that always has somewhere to go.
+    """
+
+    LEFT = auto()
+    RIGHT = auto()
+    UP = auto()
+    DOWN = auto()
+    CENTER = auto()
+
+
+class LookAtResult(Enum):
+    """What became of a ``look_at`` request (SDS §6.6, §3.9.1).
+
+    **Declining is a first-class outcome**, which is the whole reason this is an enum rather
+    than a ``bool`` or a bare ``None``. §6.6 classifies the tool fire-and-forget, so the model
+    never learns whether the servo arrived — but it must learn whether the robot *tried*, and
+    why not if it did not. A silent no-op would leave the model believing it moved, and a robot
+    that describes motion that never happened is worse than one that says it cannot.
+    """
+
+    ACCEPTED = auto()
+    #: Inside ``[motion] look_at_cooldown_ms``. Not an error — the guard working (#204 AC-6).
+    COOLING_DOWN = auto()
+    #: This rig has no axis for that direction (``up`` on a pan-only robot). Honest, not silent.
+    NO_AXIS = auto()
+
+
+_DIRECTION_GESTURES: Mapping[Direction, Gesture] = MappingProxyType(
+    {
+        Direction.LEFT: Gesture.TURN_LEFT,
+        Direction.RIGHT: Gesture.TURN_RIGHT,
+        Direction.UP: Gesture.LOOK_UP,
+        Direction.DOWN: Gesture.LOOK_DOWN,
+        Direction.CENTER: Gesture.CENTER,
+    }
+)
+
+
+def gesture_for_direction(direction: Direction) -> Gesture:
+    """The gesture that realises *direction*. Pure, total, and indexes directly.
+
+    Total over :class:`Direction` by an exhaustive test rather than by a default, for the reason
+    every table in this project indexes directly: a sixth direction added later must be a build
+    failure, not a robot that quietly ignores one word.
+
+    Note what this mapping is *not*: it does not consult the rig. Whether the resulting gesture
+    is expressible here is :func:`plan`'s answer, and the difference matters — *"there is no
+    such direction"* and *"this robot cannot look up"* are different things to tell a model.
+    """
+    return _DIRECTION_GESTURES[direction]
+
+
 # --- the three motion.* events (SDS §9.1.3, transcribed) ------------------------------------
 #
 # Transcription, not design: §9.1.3 already specifies publisher, subscribers, payload and
@@ -383,11 +452,14 @@ __all__ = [
     "PAN",
     "TILT",
     "Axis",
+    "Direction",
     "Gesture",
     "Keyframe",
     "MotionGestureCompleted",
     "MotionGesturePreempted",
     "MotionGestureStarted",
+    "LookAtResult",
     "duration_ms",
+    "gesture_for_direction",
     "plan",
 ]

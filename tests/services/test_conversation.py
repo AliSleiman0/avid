@@ -59,8 +59,10 @@ from avid.domain import (
     ConversationTurnEnded,
     ConversationTurnStarted,
     ConversationUserTranscribed,
+    Direction,
     Event,
     Fact,
+    LookAtResult,
     MemoryFactStored,
     RobotState,
     RoutineSpec,
@@ -234,6 +236,7 @@ async def _rig(
         memory=mem,
         affect=_StubAffect(),
         behavior=_StubBehavior(),
+        gesture=_StubGesture(),
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
         default_timezone="Asia/Beirut",
@@ -573,6 +576,7 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         thinking_delay_ms=0,
         affect=_StubAffect(),
         behavior=_StubBehavior(),
+        gesture=_StubGesture(),
     )
     ended: list[Event] = []
     stored: list[MemoryFactStored] = []
@@ -1002,6 +1006,7 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         thinking_delay_ms=0,
         affect=_StubAffect(),
         behavior=_StubBehavior(),
+        gesture=_StubGesture(),
     )
     for sub in service.subscriptions():
         bus.subscribe(
@@ -2025,3 +2030,21 @@ def test_a_block_with_no_routine_time_is_unchanged() -> None:
     )
     assert without == explicit_none
     assert "scheduled for" not in without
+
+
+class _StubGesture:
+    """A :class:`~avid.core.ports.GestureTools` double: records the directions asked for (#204).
+
+    Returns ``ACCEPTED`` unconditionally — the cooldown and the no-axis decline are
+    ``MotionService``'s to decide and are tested there and in the contract suite. What this
+    double is for is the *seam*: that ``ConversationService`` reaches motion through a port it
+    never names a service for."""
+
+    def __init__(self) -> None:
+        self.looks: list[Direction] = []
+
+    async def look_at(
+        self, direction: Direction, *, correlation_id: UUID
+    ) -> LookAtResult:
+        self.looks.append(direction)
+        return LookAtResult.ACCEPTED
