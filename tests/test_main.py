@@ -42,7 +42,7 @@ from avid.adapters import (
     SystemdNotifier,
 )
 from avid.core import lifecycle
-from avid.core.config import load_config
+from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
 from avid.core.hal import DisplayFrame
 from avid.core.ports import AffectTools
@@ -176,6 +176,41 @@ def test_build_servo_selects_fake() -> None:
     # proven by the on-hardware contract run (AVID-52 / #57).
     config = load_config(_SIM_TOML)
     assert isinstance(_build_servo(config), FakeServo)
+
+
+def test_build_servo_reports_every_declared_axis() -> None:
+    """#200: the composition root turns ``[[servo.axes]]`` into what ``Servo.axes`` reports.
+
+    This is the whole inventory path in one assertion. §3.9.3 makes the adapter's report the
+    authority the gesture planner negotiates against, so an axis that is declared and does not
+    arrive here is an axis the robot will never move — and the failure looks like a planner bug
+    rather than a wiring one.
+
+    Both shipped profiles are checked, then a three-axis rig the files do not contain, because
+    "reads the two we ship" and "reads whatever is declared" are different claims and only the
+    second is what §3.9.3 promises."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        servo = _build_servo(load_config(profile))
+        assert [(a.name, a.channel) for a in servo.axes] == [
+            ("pan", 0),
+            ("tilt", 13),
+        ], profile
+
+    six_dof = Config.model_validate(
+        {
+            "servo": {
+                "axes": [
+                    {"name": "pan", "channel": 0},
+                    {"name": "tilt", "channel": 13},
+                    {"name": "roll", "channel": 7, "min_deg": 80.0, "max_deg": 100.0},
+                ]
+            }
+        }
+    )
+    servo = _build_servo(six_dof)
+    assert [a.name for a in servo.axes] == ["pan", "tilt", "roll"]
+    # The reach travels with the axis: it is what the adapter clamps to, per axis (§3.9.1).
+    assert servo.axes[2].min_deg == 80.0 and servo.axes[2].max_deg == 100.0
 
 
 def test_build_microphone_selects_fake() -> None:

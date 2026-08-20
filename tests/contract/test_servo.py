@@ -28,10 +28,26 @@ from avid.core.ports import Servo
 
 from ._hardware import FAKE_REAL_PARAMS, skip_off_pi
 
-# One-servo pan rig, matching config/*.toml's [servo]. The clamp test drives past max_deg.
+# The pan+tilt rig config/*.toml declares since #200 (ADR-009, SDS §3.9.4): ch0 body turn,
+# ch13 head, with *different* reaches — which is the point. The clamp test drives past max_deg.
+#
+# ⚠️ Two axes with two different reaches, not two with the same one. A suite that clamped both
+# to 0–180 would pass against an adapter that keyed its limits by anything at all — a shared
+# limit, the first axis's, the last one's — because every answer would be identical. The
+# asymmetry is what makes "clamps per axis" a claim a test can fail.
 _CHANNEL = 0
-_MIN_DEG, _MAX_DEG = 0.0, 180.0
-_AXES = (Axis(name="pan", channel=_CHANNEL, min_deg=_MIN_DEG, max_deg=_MAX_DEG),)
+_MIN_DEG, _MAX_DEG = 30.0, 150.0
+_TILT_CHANNEL = 13
+_TILT_MIN_DEG, _TILT_MAX_DEG = 60.0, 120.0
+_AXES = (
+    Axis(name="pan", channel=_CHANNEL, min_deg=_MIN_DEG, max_deg=_MAX_DEG),
+    Axis(
+        name="tilt",
+        channel=_TILT_CHANNEL,
+        min_deg=_TILT_MIN_DEG,
+        max_deg=_TILT_MAX_DEG,
+    ),
+)
 
 
 @runtime_checkable
@@ -101,6 +117,73 @@ async def test_relax_deenergises(servo: _IntrospectableServo) -> None:
     assert servo.is_energised(_CHANNEL)
     await servo.relax(_CHANNEL)
     assert not servo.is_energised(_CHANNEL)
+
+
+# --- multi-axis: the 2 DoF rig ADR-009 accepted (#200, SDS §3.9.4) -----------
+
+
+def test_axes_reports_the_whole_rig(servo: _IntrospectableServo) -> None:
+    """§3.9.3: the adapter's own report is the inventory the gesture engine negotiates against.
+
+    Asserted through the port rather than against the constructor argument, because that is the
+    direction the dependency actually runs: ``MotionService`` asks *"do I have a tilt axis?"* and
+    plans a real nod or a degraded pan wiggle on the answer. An adapter that accepted two axes
+    and reported one would silently make the fallback the only path anyone ever sees."""
+    assert [(axis.name, axis.channel) for axis in servo.axes] == [
+        ("pan", _CHANNEL),
+        ("tilt", _TILT_CHANNEL),
+    ]
+
+
+async def test_a_command_past_each_axiss_max_lands_on_that_axiss_max(
+    servo: _IntrospectableServo,
+) -> None:
+    """The clamp is per axis, and the two reaches are deliberately different (SDS §3.9.1).
+
+    A head binds against its bracket sooner than a body turns against its cable, so tilt is the
+    narrower axis on this rig. Both channels are driven past their own maxima and each must land
+    on *its* limit — 150° and 120°. That is a claim which fails if an adapter keys its limits by
+    anything other than the channel: a shared limit, the first axis's, or the last one's. With
+    two identical reaches every one of those wrong answers would look right."""
+    assert _MAX_DEG != _TILT_MAX_DEG, "the asymmetry is what lets this test fail"
+
+    await servo.move_to(_CHANNEL, angle_deg=400, duration_ms=60)
+    await servo.move_to(_TILT_CHANNEL, angle_deg=400, duration_ms=60)
+
+    assert servo.position(_CHANNEL) == _MAX_DEG
+    assert servo.position(_TILT_CHANNEL) == _TILT_MAX_DEG
+
+
+async def test_relax_de_energises_one_channel_and_leaves_the_other(
+    servo: _IntrospectableServo,
+) -> None:
+    """Relax is addressed to a channel, not to the rig.
+
+    #203's I²C-fault path relaxes *every* channel deliberately, and #205's micro-motion relaxes
+    the one it just drifted — both need this to be a per-channel act. An adapter that cut every
+    pulse on any relax would make the fault path look correct and the idle path look like a
+    robot that goes limp mid-gesture."""
+    await servo.move_to(_CHANNEL, 90.0, duration_ms=60)
+    await servo.move_to(_TILT_CHANNEL, 90.0, duration_ms=60)
+    assert servo.is_energised(_CHANNEL) and servo.is_energised(_TILT_CHANNEL)
+
+    await servo.relax(_TILT_CHANNEL)
+
+    assert servo.is_energised(_CHANNEL), "relaxing tilt de-energised pan as well"
+    assert not servo.is_energised(_TILT_CHANNEL)
+
+
+async def test_both_channels_start_relaxed_and_inside_their_reach(
+    servo: _IntrospectableServo,
+) -> None:
+    """No buzz at boot, on every channel — and no channel parked outside its own limits.
+
+    The second half matters more than it looks: a rig whose axes start at a shared 0° would have
+    the tilt servo held 60° below its bracket's floor from the moment the process starts, which
+    is a stall the gate would hear as a hum and diagnose as the relax timer."""
+    for axis in servo.axes:
+        assert not servo.is_energised(axis.channel), axis.name
+        assert axis.min_deg <= servo.position(axis.channel) <= axis.max_deg, axis.name
 
 
 # --- FakeServo-specific: the recorded movement trace (SDS §14.3, §14.4) ------
