@@ -201,17 +201,22 @@ def _build_servo(config: Config) -> Servo:
 
     ``fake`` is the laptop/sim default — a recorded movement trace, no hardware; ``pca9685``
     is the real PCA9685 over I2C (the servo-lib import lives inside that adapter, apt/pip on
-    the Pi only, ADR-008). Both are handed the same single ``Axis`` built from ``[servo]``
+    the Pi only, ADR-008). Both are handed the same ``Axis`` tuple built from ``[servo] axes``
     (P7), so clamp/cancel/relax behave identically. Any other value fails loudly rather than
     silently doing nothing.
+
+    This tuple is the **only** inventory of the rig (#200, SDS §3.9.3): whatever is declared
+    here is what ``Servo.axes`` reports, and what the gesture planner negotiates against.
+    There is deliberately no second list anywhere for it to disagree with.
     """
-    axes = (
+    axes = tuple(
         Axis(
-            name=config.servo.name,
-            channel=config.servo.channel,
-            min_deg=config.servo.min_deg,
-            max_deg=config.servo.max_deg,
-        ),
+            name=axis.name,
+            channel=axis.channel,
+            min_deg=axis.min_deg,
+            max_deg=axis.max_deg,
+        )
+        for axis in config.servo.axes
     )
     match config.adapters.servo:
         case "fake":

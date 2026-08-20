@@ -140,35 +140,73 @@ class CameraConfig(_Section):
     fps: int = 5
 
 
-class ServoConfig(_Section):
-    """Physical servo channel, injected into the servo adapter (P7, AVID-52).
+class AxisConfig(_Section):
+    """One servo axis as it is physically wired (P7, ADR-009 / SDS §3.9.4).
 
-    Describes the *one* servo the M2 rig drives: which PCA9685 ``channel`` it is on, its
-    named axis, and the safe angular reach the adapter clamps to (SDS §3.9.1 — clamping is
-    the adapter's job). The pulse-width range and PWM ``freq_hz`` are the ``Pca9685Servo``
-    degree→pulse mapping for an SG90/MG90S (SDS §4.7); the ``FakeServo`` ignores them.
-    ⚠️ R-04 (PMP §9.2, SPK-4): the servo runs on a **separate 5 V rail, common ground only**,
-    never the Pi 5 V pin — a wiring assumption the adapter documents but cannot enforce.
+    The fields are exactly :class:`~avid.core.hal.Axis`'s, because that is what the
+    composition root parses this into. ``name`` is the axis the *gesture* vocabulary speaks
+    — ``"pan"``, ``"tilt"`` — and it is the only handle the domain ever gets: a
+    :class:`~avid.domain.motion.Keyframe` addresses an axis by name, and which PCA9685
+    ``channel`` that lands on is the adapter's business (SDS §3.9.4).
 
-    ``[motion] axes`` is the *gesture* vocabulary (ADR-009), reconciled with this physical
-    channel by MotionService (M9); ``[servo]`` is the hardware. The adapter never reaches
-    for these itself — the composition root injects them.
-
-    ⚠️ **``actuation_deg`` and ``max_deg`` are different quantities and the difference is
-    not cosmetic** (#356). ``actuation_deg`` is the **servo's electrical span** — the angle
-    the full ``min_pulse_us``–``max_pulse_us`` range sweeps, ~180° for an SG90/MG90S — and it
-    is what the degree→pulse mapping is calibrated against. ``max_deg`` is the **linkage's
-    safe reach**, the limit the adapter clamps commands to (SDS §3.9.1). They coincide at
-    ``180`` on the M2 rig, which is why deriving one from the other went unnoticed; the
-    moment a reach is narrowed to keep the head out of its own chassis they diverge, and
-    every commanded angle on the real adapter is then wrong by ``180 / max_deg`` while the
-    fake — which ignores pulse widths entirely — reports a perfect trace.
+    ``min_deg``/``max_deg`` are the **linkage's** safe reach, which the adapter clamps to
+    (SDS §3.9.1) — not the servo's electrical span, which is ``[servo] actuation_deg`` and
+    is shared by every channel on the board (#356).
     """
 
-    channel: int = 0
-    name: str = "pan"
+    name: str
+    channel: int = Field(ge=0, le=15)  # PCA9685 has 16 channels
     min_deg: float = 0.0
     max_deg: float = 180.0
+
+    @model_validator(mode="after")
+    def _reach_is_a_range(self) -> AxisConfig:
+        if self.min_deg >= self.max_deg:
+            raise ValueError(
+                f"servo axis {self.name!r} has min_deg ({self.min_deg}) >= max_deg "
+                f"({self.max_deg}): an axis with no reach cannot express any gesture, and "
+                f"the adapter's clamp would pin every command to one angle rather than "
+                f"failing (SDS §3.9.1)."
+            )
+        return self
+
+
+class ServoConfig(_Section):
+    """The servo rig: shared electrical settings, plus one entry per wired axis (P7, AVID-52).
+
+    Two kinds of setting, and the split is the point (#200). ``i2c_address``, the pulse-width
+    range, ``freq_hz`` and ``actuation_deg`` describe **the board and the servo model** — they
+    are properties of the parts, identical on every channel, so they stay flat. ``axes`` is
+    **what is bolted where**, which differs per axis, so it is a table per axis.
+
+    The rig is pan + tilt as of ADR-009 (SDS §3.9.4): ch0 body turn, ch13 head. It is still
+    written as a list rather than two named fields because §3.9.3's whole design is that the
+    same code runs on a 1-servo rig, a 2-servo rig, or a simulator with six.
+
+    ⚠️ R-04 (PMP §9.2, SPK-4): the servos run on a **separate 5–6 V rail, common ground only**,
+    never the Pi 5 V pin — a wiring assumption the adapter documents but cannot enforce, and
+    one that now covers **two** servos whose worst case is both stalled at once (#206).
+
+    **There is no second copy of the inventory** (#200). ``[motion] axes`` used to list the
+    axes a *service* should expect, and nothing reconciled it with what was actually wired;
+    §3.9.3 says the rig reports its own capabilities and the service asks, so the authority is
+    ``Servo.axes`` — built from here — and the duplicate is deleted rather than validated
+    against. Config drift yields *silently wrong results, not errors*
+    (``deploy/PI_OPERATIONS.md`` §3): a stale ``[motion] axes = ["pan"]`` left on the machine
+    after the tilt servo is wired means the robot simply never nods, and nothing raises.
+
+    ⚠️ **``actuation_deg`` and an axis's ``max_deg`` are different quantities and the
+    difference is not cosmetic** (#356). ``actuation_deg`` is the **servo's electrical span** —
+    the angle the full ``min_pulse_us``–``max_pulse_us`` range sweeps, ~180° for an SG90/MG90S
+    — and it is what the degree→pulse mapping is calibrated against. ``max_deg`` is the
+    **linkage's safe reach**, the limit the adapter clamps commands to (SDS §3.9.1). They
+    coincide at ``180`` on an unmounted servo, which is why deriving one from the other went
+    unnoticed; the moment a reach is narrowed to keep the head out of its own chassis they
+    diverge, and every commanded angle on the real adapter is then wrong while the fake —
+    which ignores pulse widths entirely — reports a perfect trace.
+    """
+
+    axes: tuple[AxisConfig, ...] = (AxisConfig(name="pan", channel=0),)
     i2c_address: int = 0x40
     min_pulse_us: int = 500
     max_pulse_us: int = 2500
@@ -176,6 +214,32 @@ class ServoConfig(_Section):
     # The servo model's own sweep across the pulse range above (SDS §4.7). A property of the
     # part, not of the linkage — see the ⚠️ in the docstring.
     actuation_deg: float = Field(default=180.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def _axes_are_a_usable_rig(self) -> ServoConfig:
+        if not self.axes:
+            raise ValueError(
+                "servo.axes is empty: a robot with zero declared axes is a "
+                "misconfiguration, not a valid headless mode (SDS §3.9.3). It must fail "
+                "while the composition root is still wiring rather than at the first "
+                "gesture, where an empty plan is indistinguishable from a rig that simply "
+                "cannot express that gesture."
+            )
+        channels = [axis.channel for axis in self.axes]
+        if len(set(channels)) != len(channels):
+            raise ValueError(
+                f"servo.axes declares the same PCA9685 channel twice ({sorted(channels)}): "
+                f"two axes on one channel is a wiring error, and the adapter would key both "
+                f"to the same position — one axis silently driving the other."
+            )
+        names = [axis.name for axis in self.axes]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"servo.axes declares the same axis name twice ({sorted(names)}): a "
+                f"Keyframe addresses an axis by name (SDS §3.9.4), so a duplicate makes the "
+                f"gesture planner's output ambiguous."
+            )
+        return self
 
 
 class MicrophoneConfig(_Section):
@@ -717,9 +781,50 @@ class VisionConfig(_Section):
 
 
 class MotionConfig(_Section):
-    """Servo axes, capability-negotiated (ADR-009, SDS §3.9.3)."""
+    """``MotionService``'s tuning — timings and amplitudes, never inventory (M9, SDS §3.9.4).
 
-    axes: tuple[str, ...] = ("pan",)
+    This section used to hold ``axes``, a list of the rig's axes. That was a **second copy of
+    a fact ``[servo]`` already states**, with nothing keeping the two honest, and #200 deleted
+    it rather than writing reconciliation logic: §3.9.3's design is that the adapter reports
+    its capabilities and the service asks, so the authority is ``Servo.axes``. What is left
+    here is what a *service* legitimately owns — how long to wait, how far to drift, how often
+    to allow a tool call — none of which the hardware can report.
+    """
+
+    # How long after the last gesture every channel is de-energised (#203). The gate's "no
+    # buzz" clause: an SG90 holding position buzzes audibly and heats, and an idle robot that
+    # hums is a robot that gets unplugged. Long enough not to relax between the legs of one
+    # reaction, short enough that nothing holds torque through a conversation.
+    idle_relax_ms: int = Field(default=3000, gt=0)
+
+    # Minimum spacing between accepted `look_at` calls (#204). A safety property, not a
+    # nicety: a model that decides gesturing is delightful would otherwise drive both servos
+    # continuously, which contradicts the relax clause above and puts sustained load on the
+    # rail #206 is measuring. A gesture is ~1 s, so this allows roughly one look per few turns.
+    look_at_cooldown_ms: int = Field(default=4000, gt=0)
+
+    # Idle micro-motion (#205): the drift that makes a stationary object read as alive rather
+    # than switched off. The interval is a *band*, sampled irregularly — a perfectly periodic
+    # twitch reads as a mechanism, which is worse than stillness — and the randomness lives in
+    # the service, never in the pure planner.
+    micro_motion_interval_min_s: float = Field(default=12.0, gt=0.0)
+    micro_motion_interval_max_s: float = Field(default=40.0, gt=0.0)
+    # As a fraction of each axis's declared reach, not absolute degrees: a few degrees on a
+    # wide pan and a few degrees on a narrow tilt are not the same gesture. Smaller than
+    # instinct suggests, deliberately — micro-motion that is *noticeable* is a tic.
+    micro_motion_amplitude_frac: float = Field(default=0.03, gt=0.0, le=0.5)
+
+    @model_validator(mode="after")
+    def _micro_motion_band_is_a_band(self) -> MotionConfig:
+        if self.micro_motion_interval_min_s >= self.micro_motion_interval_max_s:
+            raise ValueError(
+                f"motion.micro_motion_interval_min_s "
+                f"({self.micro_motion_interval_min_s}) must be < "
+                f"micro_motion_interval_max_s ({self.micro_motion_interval_max_s}): the "
+                f"irregularity is the design (#205), and a collapsed band is a metronome — "
+                f"which reads as a mechanism rather than as a living thing."
+            )
+        return self
 
 
 class ApiConfig(_Section):

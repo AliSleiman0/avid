@@ -12,6 +12,7 @@ from avid.core.config import (
     AdaptersConfig,
     ApiConfig,
     Config,
+    MotionConfig,
     PersonalityConfig,
     load_config,
 )
@@ -542,20 +543,30 @@ def test_both_profiles_ship_the_servos_electrical_span_explicitly() -> None:
     for profile in (_SIM_TOML, _PI_TOML):
         servo = load_config(profile).servo
         assert servo.actuation_deg == 180.0, profile
-        assert servo.min_deg == 0.0 and servo.max_deg == 180.0, profile
+        # And every declared reach is narrower than that span — which is the whole point:
+        # the two numbers now disagree in the shipped config, so a regression that derives
+        # one from the other cannot hide behind them being equal, as it did before #200.
+        for axis in servo.axes:
+            assert axis.max_deg < servo.actuation_deg, (profile, axis.name)
 
 
 def test_a_narrowed_reach_does_not_change_the_calibration() -> None:
     """The two are independent by construction — the property #356 restored.
 
-    Under the old adapter this was not expressible at all: there was one number and it meant
-    both things. Here a tilt linkage is clamped to 30–120° while the servo it is bolted to still
-    sweeps its full 180° between 500 and 2500 µs, which is the physical truth of every servo
-    mounted in a bracket."""
+    Under the old schema this was not expressible at all: there was one number and it meant
+    both things. Here a tilt linkage is clamped to 30–120° while the servo it is bolted to
+    still sweeps its full 180° between 500 and 2500 µs, which is the physical truth of every
+    servo mounted in a bracket."""
     servo = Config.model_validate(
-        {"servo": {"name": "tilt", "channel": 13, "min_deg": 30.0, "max_deg": 120.0}}
+        {
+            "servo": {
+                "axes": [
+                    {"name": "tilt", "channel": 13, "min_deg": 30.0, "max_deg": 120.0}
+                ]
+            }
+        }
     ).servo
-    assert servo.max_deg == 120.0
+    assert servo.axes[0].max_deg == 120.0
     assert servo.actuation_deg == 180.0
 
 
@@ -565,3 +576,155 @@ def test_a_non_positive_actuation_span_is_rejected_at_load() -> None:
     gesture."""
     with pytest.raises(ValidationError):
         Config.model_validate({"servo": {"actuation_deg": 0.0}})
+
+
+# --- [servo] grows to N axes; [motion] becomes tuning (#200, ADR-009/§3.9.4) -
+
+
+def test_both_profiles_declare_the_pan_and_tilt_rig() -> None:
+    """ADR-009's rig, in the file the machine is provisioned from.
+
+    Asserted on both profiles rather than on the schema default. ``config/sim.toml`` mirrors
+    the pi's two axes on purpose: a simulator that was quietly 1 DoF would make #201's
+    *fallback* the tested path and the real rig the untested one, which is the wrong way round
+    for a property the gate is graded on.
+
+    Channels are spelled out because they are the one thing no test can infer and the rig can
+    contradict: ch0 and ch13 are where the two servos are physically wired (verified
+    2026-07-21), and a wrong channel produces a perfect trace and a motionless robot."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        axes = load_config(profile).servo.axes
+        assert [(a.name, a.channel) for a in axes] == [("pan", 0), ("tilt", 13)], (
+            profile
+        )
+
+
+def test_the_electrical_settings_stay_flat_and_shared() -> None:
+    """One board, one servo model: the pulse mapping is not a per-axis fact.
+
+    The split is the reason this section could grow without becoming a list of near-duplicate
+    tables — and it is what keeps #356's calibration a single number rather than one per axis
+    waiting to disagree."""
+    servo = load_config(_PI_TOML).servo
+    assert (servo.i2c_address, servo.min_pulse_us, servo.max_pulse_us) == (
+        0x40,
+        500,
+        2500,
+    )
+    assert servo.freq_hz == 50
+
+
+def test_an_empty_axes_list_is_rejected_at_load() -> None:
+    """A robot with zero declared axes is a misconfiguration, not a headless mode.
+
+    It has to fail here rather than at the first gesture, because downstream an empty rig is
+    **indistinguishable from a legitimate answer**: #201's ``plan()`` returns an empty tuple
+    for a gesture the rig cannot express, and #203 treats that as a no-op. A robot that
+    silently never moves is exactly the failure this milestone's gate exists to catch."""
+    with pytest.raises(ValidationError, match="not a valid headless mode"):
+        Config.model_validate({"servo": {"axes": []}})
+
+
+def test_two_axes_on_one_channel_are_rejected_at_load() -> None:
+    """A wiring error the schema can catch for free.
+
+    The adapters key position and energised state *by channel*, so a duplicate makes one axis
+    silently drive the other — and both would report success."""
+    with pytest.raises(ValidationError, match="same PCA9685 channel twice"):
+        Config.model_validate(
+            {
+                "servo": {
+                    "axes": [
+                        {"name": "pan", "channel": 0},
+                        {"name": "tilt", "channel": 0},
+                    ]
+                }
+            }
+        )
+
+
+def test_two_axes_with_one_name_are_rejected_at_load() -> None:
+    """The domain addresses an axis by NAME (SDS §3.9.4), so names must be unique too.
+
+    Channels are the adapter's business; a ``Keyframe`` only ever says "tilt". Two axes called
+    "tilt" make the planner's output ambiguous in a way no later layer can resolve."""
+    with pytest.raises(ValidationError, match="same axis name twice"):
+        Config.model_validate(
+            {
+                "servo": {
+                    "axes": [
+                        {"name": "tilt", "channel": 1},
+                        {"name": "tilt", "channel": 2},
+                    ]
+                }
+            }
+        )
+
+
+def test_an_axis_with_no_reach_is_rejected_at_load() -> None:
+    """``min_deg >= max_deg`` is an axis that cannot express anything.
+
+    Left to the adapter it does not raise — ``_clamp`` pins every command to one angle and the
+    robot holds still, energised, forever. That is the silent-failure shape this section's
+    validators exist to convert into a boot-time error."""
+    with pytest.raises(ValidationError, match="an axis with no reach"):
+        Config.model_validate(
+            {
+                "servo": {
+                    "axes": [
+                        {"name": "pan", "channel": 0, "min_deg": 90.0, "max_deg": 90.0}
+                    ]
+                }
+            }
+        )
+
+
+def test_a_channel_outside_the_pca9685s_range_is_rejected() -> None:
+    """The board has 16 channels; ch16 is not a channel, it is a typo for ch1 or ch6."""
+    with pytest.raises(ValidationError):
+        Config.model_validate({"servo": {"axes": [{"name": "pan", "channel": 16}]}})
+
+
+def test_motion_no_longer_carries_a_copy_of_the_inventory() -> None:
+    """#200's reconciliation was a **deletion**, and this is what keeps it deleted.
+
+    ``[motion] axes`` listed the axes a service should expect while ``[servo]`` listed what was
+    wired, and nothing tied them together. §3.9.3 makes ``Servo.axes`` the authority, so the
+    duplicate is gone rather than validated against — and because sections are ``extra="forbid"``,
+    a config still carrying the old key now fails loudly instead of being ignored.
+
+    That loudness is the feature. Config drift yields *silently wrong results, not errors*
+    (``deploy/PI_OPERATIONS.md`` §3): a machine left with ``axes = ["pan"]`` after the tilt servo
+    is wired would simply never nod."""
+    assert "axes" not in MotionConfig.model_fields
+    with pytest.raises(ValidationError):
+        Config.model_validate({"motion": {"axes": ["pan"]}})
+
+
+def test_both_profiles_ship_the_motion_tuning_the_service_issues_need() -> None:
+    """#203/#204/#205 are wiring, not schema changes — asserted on the shipped files.
+
+    Named against what each key is *for*, because a tuning number with no stated purpose is the
+    first thing a later reader "simplifies"."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        motion = load_config(profile).motion
+        assert motion.idle_relax_ms == 3000, profile  # #203, the no-buzz clause
+        assert motion.look_at_cooldown_ms == 4000, profile  # #204, a safety property
+        assert motion.micro_motion_amplitude_frac == 0.03, profile  # #205
+        assert (
+            motion.micro_motion_interval_min_s < motion.micro_motion_interval_max_s
+        ), profile
+
+
+def test_a_collapsed_micro_motion_band_is_rejected_at_load() -> None:
+    """The irregularity is the design (#205). A band of zero width is a metronome, and a
+    perfectly periodic twitch reads as a mechanism — which is worse than stillness."""
+    with pytest.raises(ValidationError, match="collapsed band is a metronome"):
+        Config.model_validate(
+            {
+                "motion": {
+                    "micro_motion_interval_min_s": 30.0,
+                    "micro_motion_interval_max_s": 30.0,
+                }
+            }
+        )

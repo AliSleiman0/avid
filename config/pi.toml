@@ -172,27 +172,61 @@ lose_window_s = 75.0            # ⚠️ 62x the gain window ON PURPOSE. Someone
                                 # 1.63x the measured 46.1 s worst gap at threshold 0.35.
 nap_after_s = 600.0             # §3.10.1's "+10 min" sustained absence -> SLEEPING (#224)
 
-[motion]
-axes = ["pan"]                  # ADR-009 — 1 or 2. Capability-negotiated (§3.9.3).
+[motion]                        # MotionService's tuning (M9, §3.9.4). NOT the inventory —
+# the axes live in [[servo.axes]] and are reported by Servo.axes (§3.9.3). The `axes` key
+# that used to sit here was a second copy of that fact and was deleted by #200, not
+# validated against: two copies of one fact is drift, and drift in config is silent.
+idle_relax_ms       = 3000      # no buzz when idle (#203). A held SG90 hums and heats.
+look_at_cooldown_ms = 4000      # min spacing between accepted look_at calls (#204). A
+                                # safety property: it is what stops a model that finds
+                                # gesturing delightful from driving the rail continuously.
+# Idle micro-motion (#205) — the drift that makes a stationary object read as alive. The
+# interval is a BAND, sampled irregularly: a perfectly periodic twitch reads as a
+# mechanism, which is worse than stillness. Amplitude is a fraction of each axis's
+# declared reach, so it means the same thing on a wide pan and a narrow tilt.
+micro_motion_interval_min_s = 12.0
+micro_motion_interval_max_s = 40.0
+micro_motion_amplitude_frac = 0.03   # smaller than instinct suggests — a noticeable drift
+                                     # is a tic; the goal is noticeable only by its absence.
 
-[servo]                         # physical channel for the servo adapter (AVID-52)
-# ⚠️ R-04 (§9.2, SPK-4): the servo runs on a SEPARATE 5 V rail, common ground only —
-# never the Pi 5 V pin. A stall can brown out the Pi and corrupt the SD card. The real
-# pca9685 adapter lands with this milestone; servo stays "fake" above until the on-Pi
-# contract run flips it (AVID-57), exactly as camera did.
-channel      = 0                # PCA9685 channel
-name         = "pan"            # axis name (reconciled with [motion] by M9)
-min_deg      = 0.0              # safe reach — the adapter clamps to it (§3.9.1)
-max_deg      = 180.0
+[servo]                         # the servo rig for the servo adapter (AVID-52, ADR-009)
+# ⚠️ R-04 (§9.2, SPK-4): the servos run on a SEPARATE 5-6 V rail, common ground only —
+# never the Pi 5 V pin. A stall can brown out the Pi and corrupt the SD card, and the rig
+# is now TWO servos whose worst case is both stalled at once (#206 measures it).
+# servo stays "fake" above until /etc/robot/config.toml flips it on the machine.
+#
+# Shared electrical settings first — properties of the board and the servo model, identical
+# on every channel. What is bolted where lives in the [[servo.axes]] tables below.
 i2c_address  = 0x40             # PCA9685 default
 min_pulse_us = 500              # SG90/MG90S pulse range (§4.7)
 max_pulse_us = 2500
 freq_hz      = 50
 # ⚠️ The SG90/MG90S's own sweep across that pulse range — the SERVO's electrical span,
-# NOT the linkage's safe reach above. It calibrates degree→pulse, so a value taken from
-# max_deg makes every commanded angle wrong the moment a reach is narrowed — silently,
-# because the fake ignores pulse widths and keeps reporting a perfect trace (#356).
+# NOT a linkage's safe reach below. It calibrates degree→pulse, so a value taken from an
+# axis's max_deg makes every commanded angle wrong the moment a reach is narrowed —
+# silently, because the fake ignores pulse widths and reports a perfect trace (#356).
 actuation_deg = 180.0           # SG90/MG90S, §4.7
+
+# The rig's inventory, and the ONLY copy of it (#200). Whatever is declared here is what
+# Servo.axes reports and what the gesture planner negotiates against (§3.9.3) — [motion]
+# used to carry a second list and nothing reconciled them, which is drift with a delay
+# fuse: a stale one-axis copy means the robot never nods and nothing raises.
+#
+# ⚠️ min_deg/max_deg here are PROVISIONAL — conservative on purpose, pinned to each
+# linkage's measured safe reach at #207's bring-up. 0-180 is the servo's electrical range,
+# not the bracket's; committing it as if it were verified is how a servo drives the head
+# into its own chassis.
+[[servo.axes]]
+name    = "pan"                 # body turn
+channel = 0                     # verified on the rig 2026-07-21
+min_deg = 30.0                  # provisional — #207
+max_deg = 150.0                 # provisional — #207
+
+[[servo.axes]]
+name    = "tilt"                # head up/down — ADR-009's second axis; nod is a real nod
+channel = 13                    # not a typo: where the second servo is already wired
+min_deg = 60.0                  # provisional — #207. Tilt binds sooner than pan; a head
+max_deg = 120.0                 # driven past its bracket is the failure this guards.
 
 [microphone]                    # audio capture params for the microphone adapter (AVID-53)
 # The real alsa adapter flips on with the mic HAL at the M4 gate (AVID-91); microphone stays

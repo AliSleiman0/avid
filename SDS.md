@@ -3120,8 +3120,34 @@ stale_grace_s    = 600          # §10.3. How late a booking may be and still be
 
 [vision]
 fps        = 5                  # §2.7.1: ≤1 core
-[motion]
-axes       = ["pan"]            # ADR-009 — 1 or 2. Capability-negotiated (§3.9.3).
+[servo]                         # shared electrical settings — the board and the part
+i2c_address  = 0x40
+min_pulse_us = 500              # SG90/MG90S pulse range (§4.7)
+max_pulse_us = 2500
+freq_hz      = 50
+actuation_deg = 180.0           # the SERVO's span, NOT a linkage's reach (#356)
+
+# The rig's inventory, and its only copy (§3.9.3): whatever is declared here is what
+# `Servo.axes` reports and what `plan()` negotiates against. Reaches are provisional
+# until pinned to the measured linkage at bring-up.
+[[servo.axes]]
+name = "pan"                    # body turn
+channel = 0
+min_deg = 30.0
+max_deg = 150.0
+
+[[servo.axes]]
+name = "tilt"                   # head up/down — ADR-009's second axis
+channel = 13
+min_deg = 60.0
+max_deg = 120.0
+
+[motion]                        # MotionService's TUNING, never the inventory (§3.9.4)
+idle_relax_ms       = 3000      # no buzz when idle
+look_at_cooldown_ms = 4000      # min spacing between accepted look_at calls (§6.6)
+micro_motion_interval_min_s = 12.0
+micro_motion_interval_max_s = 40.0
+micro_motion_amplitude_frac = 0.03   # of each axis's declared reach
 
 [api]
 bind = "127.0.0.1"              # asserted at startup. §9.5.
