@@ -153,6 +153,16 @@ class ServoConfig(_Section):
     ``[motion] axes`` is the *gesture* vocabulary (ADR-009), reconciled with this physical
     channel by MotionService (M9); ``[servo]`` is the hardware. The adapter never reaches
     for these itself — the composition root injects them.
+
+    ⚠️ **``actuation_deg`` and ``max_deg`` are different quantities and the difference is
+    not cosmetic** (#356). ``actuation_deg`` is the **servo's electrical span** — the angle
+    the full ``min_pulse_us``–``max_pulse_us`` range sweeps, ~180° for an SG90/MG90S — and it
+    is what the degree→pulse mapping is calibrated against. ``max_deg`` is the **linkage's
+    safe reach**, the limit the adapter clamps commands to (SDS §3.9.1). They coincide at
+    ``180`` on the M2 rig, which is why deriving one from the other went unnoticed; the
+    moment a reach is narrowed to keep the head out of its own chassis they diverge, and
+    every commanded angle on the real adapter is then wrong by ``180 / max_deg`` while the
+    fake — which ignores pulse widths entirely — reports a perfect trace.
     """
 
     channel: int = 0
@@ -163,6 +173,9 @@ class ServoConfig(_Section):
     min_pulse_us: int = 500
     max_pulse_us: int = 2500
     freq_hz: int = 50
+    # The servo model's own sweep across the pulse range above (SDS §4.7). A property of the
+    # part, not of the linkage — see the ⚠️ in the docstring.
+    actuation_deg: float = Field(default=180.0, gt=0.0)
 
 
 class MicrophoneConfig(_Section):

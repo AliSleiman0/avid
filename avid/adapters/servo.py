@@ -158,6 +158,18 @@ class Pca9685Servo:
     Latent until M9 and filed rather than observed: through M2–M8 the only caller was the
     bring-up demo, which awaited one move at a time. #203 wires preemption, which *is* a
     second ``move_to`` arriving while the first is still on a worker thread.
+
+    ⚠️ **``actuation_deg`` is the servo's electrical span; an axis's ``max_deg`` is the
+    linkage's safe reach** (#356). ``ServoKit``'s ``actuation_range`` calibrates the
+    degree→pulse mapping: it says what angle the full ``min_pulse_us``–``max_pulse_us``
+    range sweeps, which is a property of the **part** (~180° for an SG90/MG90S). This
+    adapter used to set it from ``axis.max_deg``, which is a property of the **mounting**
+    — true only while the two happen to be equal, as they were at ``180`` on the M2 rig.
+    Narrow a reach to keep the head out of its own chassis and every commanded angle on
+    this adapter is then off by ``actuation_deg / max_deg``, while :meth:`position`, the
+    contract suite and ``FakeServo`` all keep agreeing that nothing is wrong — because
+    none of them can see a pulse width. Only the horn can. Two names, two meanings, and
+    the clamp keeps using ``max_deg`` exactly as SDS §3.9.1 says it should.
     """
 
     def __init__(
@@ -168,6 +180,7 @@ class Pca9685Servo:
         min_pulse_us: int,
         max_pulse_us: int,
         freq_hz: int,
+        actuation_deg: float = 180.0,
     ) -> None:
         self._axes = axes
         self._by_channel = {axis.channel: axis for axis in axes}
@@ -175,6 +188,7 @@ class Pca9685Servo:
         self._min_pulse_us = min_pulse_us
         self._max_pulse_us = max_pulse_us
         self._freq_hz = freq_hz
+        self._actuation_deg = actuation_deg
         # The ServoKit handle, built on first use. Untyped (Any) because the library ships
         # no stubs (mypy resolves it via ignore_missing_imports).
         self._kit: Any | None = None
@@ -230,7 +244,9 @@ class Pca9685Servo:
             for axis in self._axes:
                 servo = kit.servo[axis.channel]
                 servo.set_pulse_width_range(self._min_pulse_us, self._max_pulse_us)
-                servo.actuation_range = axis.max_deg
+                # The part's span, never the axis's reach — see the ⚠️ in the class
+                # docstring (#356). Clamping to the reach is _clamp's job, and stays so.
+                servo.actuation_range = self._actuation_deg
             self._kit = kit
         return self._kit
 

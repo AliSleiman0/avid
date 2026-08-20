@@ -1,9 +1,10 @@
-"""Adapter tests for :class:`~avid.adapters.servo.Pca9685Servo`'s concurrency (#289).
+"""Adapter tests for :class:`~avid.adapters.servo.Pca9685Servo` (#289, #356).
 
 The port's *behaviour* — clamp, cancel, relax — is proven for both adapters by the contract
-suite (``tests/contract/test_servo.py``). What cannot live there is this: a defect that only
-appears when two operations are in flight against the same device at once, and that the fake
-cannot have because it touches no device.
+suite (``tests/contract/test_servo.py``). What cannot live there is what this file holds: two
+defects the **fake cannot have**, because one needs two operations in flight against a real
+device and the other needs a pulse width. Both are therefore invisible to every test that
+treats the adapters as interchangeable, which is most of them, and rightly so.
 
 The shape is AVID-266's, found by auditing every adapter for it after the framebuffer paid for
 it once. ``Pca9685Servo`` offloads every hardware touch to ``asyncio.to_thread``, and both the
@@ -136,13 +137,14 @@ def _install(monkeypatch: pytest.MonkeyPatch, kit: _StubKit) -> None:
     monkeypatch.setitem(sys.modules, "adafruit_servokit", module)
 
 
-def _servo(*axes: Axis) -> Pca9685Servo:
+def _servo(*axes: Axis, actuation_deg: float = 180.0) -> Pca9685Servo:
     return Pca9685Servo(
         axes=axes,
         i2c_address=0x40,
         min_pulse_us=500,
         max_pulse_us=2500,
         freq_hz=50,
+        actuation_deg=actuation_deg,
     )
 
 
@@ -267,3 +269,39 @@ def test_the_caller_invariant_is_recorded_on_the_class() -> None:
     doc = Pca9685Servo.__doc__ or ""
     assert "one operation per channel in flight at a time" in doc
     assert "#289" in doc
+
+
+# --- the degree→pulse calibration (#356) --------------------------------------
+
+
+async def test_actuation_range_is_the_servos_span_not_the_axiss_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#356: the two quantities are different and were conflated.
+
+    ``ServoKit.actuation_range`` says what angle the full ``min_pulse_us``–``max_pulse_us``
+    range sweeps — a property of the **part**. ``Axis.max_deg`` is the reach of the **mounting**,
+    the limit ``_clamp`` enforces (SDS §3.9.1). This adapter derived the first from the second,
+    which is true only while they happen to be equal — as they were at ``180`` on the whole M2
+    rig, which is why it survived a hardware bring-up.
+
+    The axis here is deliberately narrower than the servo, the way #200's provisional reaches
+    will be: a tilt linkage that must not drive the head into its own chassis. Under the old
+    code ``actuation_range`` becomes ``120``, and the pulse for a commanded 60° then means 90°
+    of real travel — off by half — while ``position()`` reports 60, the trace looks perfect and
+    ``FakeServo`` (which ignores pulse widths entirely) agrees. The only instrument that
+    disagrees is the horn, which is the M4 lesson wearing a servo."""
+    narrow = Axis(name="tilt", channel=13, min_deg=30.0, max_deg=120.0)
+    kit = _StubKit(13)
+    _install(monkeypatch, kit)
+    servo = _servo(narrow, actuation_deg=180.0)
+
+    await servo.move_to(13, 60.0, duration_ms=1)
+
+    assert kit.servo[13].actuation_range == 180.0, (
+        "actuation_range was calibrated from the linkage's reach, not the servo's span"
+    )
+    # And the reach still governs what may be commanded — the clamp is untouched.
+    assert kit.servo[13].pulse_range == (500, 2500)
+    await servo.move_to(13, 400.0, duration_ms=1)
+    assert servo.position(13) == 120.0

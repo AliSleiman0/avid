@@ -526,3 +526,42 @@ def test_a_non_wrapping_quiet_window_is_still_handled() -> None:
     assert quiet.covers(12 * 60)
     assert not quiet.covers(8 * 60)
     assert not quiet.covers(23 * 60)
+
+
+# --- [servo]: the servo's span vs the linkage's reach (#356) ----------------
+
+
+def test_both_profiles_ship_the_servos_electrical_span_explicitly() -> None:
+    """``actuation_deg`` is what calibrates degree→pulse, and it is not ``max_deg``.
+
+    Asserted on the *loaded* profiles rather than on the schema default, because a key missing
+    from ``/etc/robot/config.toml`` falls back to that default silently (``deploy/PI_OPERATIONS.md``
+    §3) — so "the default is right" and "the machine will use it" are different claims. Both
+    values are 180 today and that coincidence is exactly what hid #356; the test names them
+    separately so a future narrowed reach cannot quietly drag the calibration with it."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        servo = load_config(profile).servo
+        assert servo.actuation_deg == 180.0, profile
+        assert servo.min_deg == 0.0 and servo.max_deg == 180.0, profile
+
+
+def test_a_narrowed_reach_does_not_change_the_calibration() -> None:
+    """The two are independent by construction — the property #356 restored.
+
+    Under the old adapter this was not expressible at all: there was one number and it meant
+    both things. Here a tilt linkage is clamped to 30–120° while the servo it is bolted to still
+    sweeps its full 180° between 500 and 2500 µs, which is the physical truth of every servo
+    mounted in a bracket."""
+    servo = Config.model_validate(
+        {"servo": {"name": "tilt", "channel": 13, "min_deg": 30.0, "max_deg": 120.0}}
+    ).servo
+    assert servo.max_deg == 120.0
+    assert servo.actuation_deg == 180.0
+
+
+def test_a_non_positive_actuation_span_is_rejected_at_load() -> None:
+    """A zero span divides the pulse range by nothing and a negative one inverts it. Neither is
+    a servo, so it fails while the composition root is still wiring rather than at the first
+    gesture."""
+    with pytest.raises(ValidationError):
+        Config.model_validate({"servo": {"actuation_deg": 0.0}})
