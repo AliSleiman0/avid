@@ -6,13 +6,19 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = de8a7bb` · `v0.M10.0` tagged · gh `AliSleiman0`.
+**As of:** 2026-08-20 · `main = 242f884` · `v0.M10.0` tagged · gh `AliSleiman0`.
 
 ## ⭐ Next session — M9 is CODE-COMPLETE. What is left needs the Pi and a person.
 
 **Seven of nine M9 issues are closed and merged. Zero open PRs.** #199 #200 #201 #202 #203 #204
 #205 are done, plus #289 and a new #356. What remains is **#206** (the SPK-4 brown-out spike) and
 **#207** (the live gate), and neither can be advanced from a laptop.
+
+**Since that was written, one laptop session happened** (the Pi never came back): **#310 AC-1 is
+answered and merged** (#370, `242f884`). The short version is that `set_affect` works fine and the
+issue's premise does not reproduce off the rig — which turns a prompt problem into a *deployment*
+question. It is folded into the fallback list below, and it added a new **item 0** that outranks
+everything else the moment the Pi answers.
 
 ⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
 `git rev-parse --short origin/main`. See BATON-CAN-BE-WRONG below.
@@ -87,6 +93,34 @@ The bench evening is the plan, but the Pi dropped off the hotspot at ~02:05 on 2
 nothing has been run on it since. **None of the following needs the rig**, and the first is nearly
 free.
 
+⚠️ **Re-confirmed unreachable later on 2026-08-20, from a different network.** The laptop was on
+`172.18.21.x`; the Pi's last-known hotspot subnet `172.20.10.x` was not present at all, `AVID` and
+`avid.local` did not resolve, and no Raspberry Pi MAC prefix appeared in `arp -a`. That is a
+*different-network* result, not a dead Pi — the address moves with the network
+(`deploy/PI_OPERATIONS.md` §0), so the check to run first is whether the laptop and the Pi are on
+the same one, before concluding anything about the machine.
+
+**0. ⚠️ NEW — the first command to run when the Pi answers, ahead of everything else. What is
+actually deployed at `/opt/avid`?**
+
+```sh
+ssh alisleiman0@<pi> 'cd /opt/avid && git log -1 --format="%h %ad %s" --date=short'
+```
+
+#310's whole premise is six rig runs in which `set_affect` fired zero times. Off the rig it fires
+4 of 4, on both models, with a **byte-identical** capability clause (`git log -S` confirms nothing
+has touched it since #309). The clause fix is `bc05261`, **2026-08-16 — the same day #310 was
+filed.** So the leading explanation is no longer a prompt at all: *the machine is not the repo*,
+and if `/opt/avid` had not been redeployed, the gate measured the **pre-#309** clause and #310's
+"after #309" rows are mislabelled through no fault of the record.
+
+**If that SHA predates `bc05261`, #310 closes as already fixed by #309** — and, more importantly,
+every other live-run conclusion drawn in that window is suspect for the same reason. It is one
+command and it should be run before any measurement, not after one disagrees. (The runner-up
+explanations, in order: **#283** — 50 Hz mains hum defeats the voice gate and cost M8's AC-7 nine
+dropped turns, so the rig's audio is materially worse than a synthesized stimulus; then session
+shape — the gate's ~30 turns with a §6.7 memory block against the probe's cold 12.)
+
 **1. 🎁 Collect M10's AC-0 evidence. One command, and it costs nothing.** M10 was sealed **one
 criterion short, on the record**: AC-0 (the robot initiates on multiple unattended mornings) was
 never run. The trigger is *still armed* — 23:55 EEST daily, `ignore_streak 0`, nothing staged — so
@@ -104,11 +138,20 @@ to `docs/journal.md` even though `v0.M10.0` has shipped** — a milestone sealed
 honest; leaving the gap unfilled once the evidence is lying there is not. (This requires only SSH,
 not the servo rig.)
 
-**2. #310 — `set_affect` is unreliable, and it now caps M9.** §6.8's own contingency is triggered.
-#202 maps affect → gesture, so a robot that cannot infer affect from what it just said will only
-ever nod on the Tier-1 state baseline. #198 says explicitly this does not block M9 — but it is the
-difference between the milestone *working* and the milestone *reading as alive*, and it is the
-highest-value non-hardware issue open.
+**2. ~~#310 — `set_affect` is unreliable~~ — DONE 2026-08-20, and the answer inverts the issue.**
+AC-1 is ticked (#370, `242f884`). `tools/probe_tool_call_rate.py` ran the comparison AC-1 asked
+for — one live session, both tools, real speech — and **`set_affect` fired on 4 of the 4 turns
+written to invite it and 0 of the 8 that were not**, alongside `remember_fact` at 4 of 4,
+*identically on the flagship and the mini*. So it is **not** the modality, **not** the description
+and **not** the enum, and **AC-2 is deliberately not authorised**: §6.8's local inference was the
+contingency for a tool that does not work, and this tool works. Evidence and the full reasoning are
+in `docs/demos/m310_evidence/`.
+
+⚠️ **What this means for M9:** the cap described here is *lifted on the evidence available* —
+`HAPPY → nod` (#202) has something to fire on. But six rig runs really did give zero, so something
+about **the rig** differs, and until that is known the M9 bench evening should not assume affect
+will drive gesture. See the new item 0 below — it is now the first thing to run when the Pi
+answers, ahead of even AC-0.
 
 **3. M11 is the critical path and M9 is not.** PMP §5.4 runs M6 → M10 → M11; §7.3 names M9 as the
 first cut. M11's 30-day soak is also what would retire M10's unrun AC-0 as a side effect. If the
@@ -261,10 +304,39 @@ so it is gross and corroborated many times over.
   stdout. Output now folds to ASCII at the print boundary so the typography degrades instead of the
   run. Anything that prints `⚠️`, `—` or `°` and might be read over SSH from Windows has this bug.
 
+  **This prediction came true within one session.** `tools/probe_tool_call_rate.py` (#370) shipped
+  with the identical defect and it stayed invisible through a full green live run, because the only
+  lines carrying `⚠️` are *warning* paths — model override, server VAD on, response timeout, session
+  closed early — and a clean run takes none of them. It surfaced the moment the first arm tripped
+  one, i.e. exactly when the tool had something to say. Fixed there by reconfiguring `sys.stdout`
+  to UTF-8 with `errors="replace"` at entry rather than folding to ASCII; either is fine, but
+  **new tools must do one of them**, and note that a passing run does not prove it was done.
+
 - ⚠️ **"Did it move" is not the 2 DoF claim.** A pan-only robot still nods — `plan()` degrades it
   to a sway — so a criterion asserting motion passes on the hardware ADR-009 replaced. The claim is
   that nod and turn land on **different axes**. Generalises: when a milestone's headline is a
   *capability*, find the assertion the previous generation would fail.
+
+### `uv sync --extra X` on the LAPTOP silently uninstalls every extra you did not name
+
+The Pi trap below has a quieter sibling here. `uv sync --frozen --extra openai`, run to get
+`websockets` for a probe, **removed `numpy`** — because `--extra` is a full specification of the
+environment, not an addition to it. Nothing announced it beyond one `- numpy==2.5.2` line in the
+install summary. The suite then went **77 red** in `tests/services/` and `tests/adapters/`, all of
+them `ModuleNotFoundError: No module named 'numpy'` from `retrieval.py`'s lazy import — a wall of
+failures in code the branch had not touched, which is a genuinely alarming thing to see just before
+committing.
+
+**Name every extra you need, every time:**
+
+```sh
+uv sync --frozen --extra memory --extra openai      # laptop: numpy for the retriever, ws for Realtime
+```
+
+`memory` is the one CI installs and the one the test suite needs. The general rule is the same one
+`PI_OPERATIONS.md` teaches about config: **verify, do not assume** — if a suite goes red in files
+you did not touch, suspect the environment before the code, and check what the last `uv` command
+removed rather than what it added.
 
 ### `uv sync` on the Pi is the same mistake as `uv run` — and it destroys the venv
 
