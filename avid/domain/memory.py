@@ -183,7 +183,7 @@ class MemoryRecallCompleted(Event):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ScoreWeights:
-    """The three §7.7 weights (α, β, γ). Defaults are Park et al.'s **equal-weight baseline**
+    """The four §7.7 weights (α, β, γ, δ). Defaults are Park et al.'s **equal-weight baseline**
     (α=β=γ=1) — *"deviating from a published baseline before measuring is how you end up
     tuning noise."* The service overrides these from ``WeightsConfig`` (P7); the defaults keep
     the domain function callable and testable without config."""
@@ -191,6 +191,13 @@ class ScoreWeights:
     recency: float = 1.0
     importance: float = 1.0
     relevance: float = 1.0
+    # δ, the keyword term (#264). Park et al. have no keyword component, so unlike the three
+    # above this default is NOT a published baseline — it is the same equal weight applied for
+    # consistency, and it is **unmeasured**. `tools/eval_recall.py` is the instrument that would
+    # settle it; until it has been run against a real-MiniLM store, treat 1.0 as a starting point
+    # rather than a result. Said plainly here because an invented number that looks like the
+    # three beside it is how a guess becomes a fact.
+    keyword: float = 1.0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -204,6 +211,14 @@ class RetrievalCandidate:
     importance: int  # the fact's stored 1–10 importance (§7.6)
     age_days: float  # Δt since last_accessed, in days — passed in, never read (AC-4)
     relevance: float  # cosine similarity, query embedding vs fact embedding (§7.7)
+    # Did FTS5 match the query text against this fact (§7.7's proper-noun branch)? #264.
+    # ⚠️ **Deliberately has no default.** Before #264 the keyword branch only widened the
+    # candidate set, and at any store smaller than the vector pool (50) that union was a no-op —
+    # so the branch §7.7 rests its proper-noun argument on could not change a single result. A
+    # default here would let a future caller silently reintroduce exactly that: scoring that
+    # compiles, runs, and quietly ignores the keyword evidence. Making it required forces the
+    # decision to be visible at every construction site.
+    keyword_hit: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -294,10 +309,25 @@ def rank_candidates(
 ) -> tuple[ScoredCandidate, ...]:
     """Score and rank retrieval candidates by the §7.7 model, returning the top ``k`` best-first.
 
-    ``score = α·recency + β·importance + γ·relevance``, each of the three components min-max
+    ``score = α·recency + β·importance + γ·relevance + δ·keyword``, each component min-max
     normalised across *this candidate set* to [0,1] (:func:`_min_max`) before the weighted sum.
     Pure — ``weights``, ``half_life_days`` and ``k`` are all injected (from config; §7.7, P7),
     so the domain hard-codes none of them (AC-5).
+
+    **δ·keyword is #264's fix, and it is what makes §7.7's hybrid claim true.** §7.7 argues that
+    vector search alone fails on proper nouns — *"Maya embeds to mush"* — and answers it by
+    unioning the vector pool with an FTS5 keyword search. That fixed **candidate generation**,
+    but candidate generation was never the binding constraint: with fewer live facts than the
+    retriever's vector pool (50), every fact is already a candidate and the union changes
+    nothing. Ranking was the constraint, and it had no keyword term — so a proper-noun fact with
+    a mushy embedding lost on recency/importance exactly as if FTS5 did not exist. Proven by
+    removing the keyword branch entirely and observing byte-identical results at 3 and 18 facts.
+
+    Normalising a 0/1 indicator is the identity whenever the set contains both hits and misses —
+    the only case where the term carries information. When every candidate is a hit (or none is),
+    :func:`_min_max`'s degenerate rule gives them all ``1.0``, adding a constant that cannot
+    reorder anything. So the component is well behaved without being special-cased, and the
+    "every component is normalised" rule stays true without exception.
 
     Determinism (AC-5): candidates are ordered by ``(-score, fact_id)`` — highest score first,
     ascending ``fact_id`` breaking ties, so the result never depends on input or dict ordering.
@@ -308,6 +338,7 @@ def rank_candidates(
     recency = _min_max([recency_decay(c.age_days, half_life_days) for c in candidates])
     importance = _min_max([float(c.importance) for c in candidates])
     relevance = _min_max([c.relevance for c in candidates])
+    keyword = _min_max([1.0 if c.keyword_hit else 0.0 for c in candidates])
     scored = [
         ScoredCandidate(
             fact_id=c.fact_id,
@@ -315,6 +346,7 @@ def rank_candidates(
                 weights.recency * recency[i]
                 + weights.importance * importance[i]
                 + weights.relevance * relevance[i]
+                + weights.keyword * keyword[i]
             ),
         )
         for i, c in enumerate(candidates)

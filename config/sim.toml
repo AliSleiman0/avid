@@ -76,7 +76,12 @@ embedder               = "local_minilm"
 dimensions             = 384
 top_k                  = 5
 recency_half_life_days = 14.0                    # §7.7
-weights = { recency = 1.0, importance = 1.0, relevance = 1.0 }   # Park et al.
+# alpha/beta/gamma are Park et al.'s equal-weight baseline. delta (keyword) is #264's
+# addition -- FTS5's proper-noun branch could not affect ranking at all before it, because
+# with fewer live facts than the retriever's vector pool the candidate union is a no-op.
+# UNMEASURED: there is no published baseline for delta; run tools/eval_recall.py before
+# treating 1.0 as anything but a starting point.
+weights = { recency = 1.0, importance = 1.0, relevance = 1.0, keyword = 1.0 }
 
 [behavior]                      # §10.4
 quiet_hours                = { start = "22:00", end = "07:30" }

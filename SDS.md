@@ -1885,7 +1885,7 @@ questions, or anything you inferred rather than were told.
 **Adopted: the Generative Agents scoring model** (Park et al., UIST 2023, arXiv:2304.03442), which remains the reference design.
 
 ```
-score = α·recency + β·importance + γ·relevance
+score = α·recency + β·importance + γ·relevance + δ·keyword
 ```
 
 Each component min-max normalised to [0,1]; the paper uses **equal weights (α=β=γ=1)**. We start there — deviating from a published baseline before measuring is how you end up tuning noise.
@@ -1895,12 +1895,22 @@ Each component min-max normalised to [0,1]; the paper uses **equal weights (α=�
 | **Recency** | Exponential decay on `last_accessed_at`. Park used 0.995/sandbox-hour; that's simulation time. We use a **14-day half-life**: `0.5 ** (Δdays / 14)`. |
 | **Importance** | LLM-rated 1–10 at write time (§7.6). Stored, never recomputed. |
 | **Relevance** | Cosine similarity, query embedding vs. fact embedding. |
+| **Keyword** | 1 if FTS5 matched the query text against this fact, else 0 (#264). |
+
+> ⚠️ **δ is ours, not Park et al.'s, and it is unmeasured.** The Generative Agents model has three
+> components; the fourth exists because our hybrid retrieval (below) is otherwise unable to affect a
+> result. **δ=1 is applied for consistency with the equal-weight baseline, not because anything
+> measured it** — `tools/eval_recall.py` is the instrument that would, and it has not been run against
+> a real-MiniLM store since δ landed. Treat it as a starting point. Stated here rather than left to
+> look like the three beside it.
 
 **Top-k = 5.** Both the Generative Agents implementer guidance and Mem0's results point at small k. More retrieved facts is not better — it dilutes the instruction block and costs cached tokens every turn.
 
 ### Hybrid retrieval
 
-Vector search alone fails on proper nouns — "Maya" embeds to something generic and won't reliably retrieve the sister fact. So: **SQLite FTS5 keyword search ∪ vector search**, merged, then scored. Mem0's stack fuses semantic + keyword + entity matching in parallel passes and reports **92.5 on LoCoMo / 94.4 on LongMemEval at <7,000 tokens per retrieval** — an order of magnitude under full-context stuffing. The lesson we take is not their numbers; it's that *hybrid beats pure-vector, and small retrieval beats large*.
+Vector search alone fails on proper nouns — "Maya" embeds to something generic and won't reliably retrieve the sister fact. So: **SQLite FTS5 keyword search ∪ vector search**, merged, then scored **with the keyword hit carried into the score as δ**.
+
+> ⚠️ **The union alone is not enough, and believing it was cost us #264.** Taking the ∪ fixes *candidate generation* — but candidate generation is not the binding constraint at the scale this robot runs at. `HybridRetriever` draws a vector pool of **50**, so any store with fewer than 50 live facts has **every fact already in the candidate set**, and the keyword branch contributes nothing. Ranking was the constraint, and until #264 it had no keyword term: a proper-noun fact with a mushy embedding lost on recency and importance exactly as if FTS5 did not exist. Demonstrated by deleting the keyword branch outright and observing byte-identical results at 3 and at 18 facts. **A hybrid retriever whose two halves do not both reach the score is a vector retriever.** Mem0's stack fuses semantic + keyword + entity matching in parallel passes and reports **92.5 on LoCoMo / 94.4 on LongMemEval at <7,000 tokens per retrieval** — an order of magnitude under full-context stuffing. The lesson we take is not their numbers; it's that *hybrid beats pure-vector, and small retrieval beats large*.
 
 > **As built (#120).** `HybridRetriever` (`avid/adapters/retrieval.py`) is exactly this: it embeds the query, does one matmul over the pre-normalised §8.5 matrix, unions those ids with `FactRepository.keyword_search`'s FTS5/bm25 hits, ranks the union with §7.7's `rank_candidates`, and publishes `memory.recall_completed` (§9.1.3). The retrieval eval set (#115) scored the wired retriever at **recall@5 = 0.54** — strong on proper-noun (0.80) and direct (0.80) queries, weak on paraphrase (0.10) and negatives (0.00). That split is honest: the CI-side `FakeEmbedder` is bag-of-words (real semantic recall is `LocalMiniLmEmbedder`'s job, #119, proven on the Pi), and the **relevance floor is deliberately deferred** — `n_returned` currently returns the top-k without a hard cosine cutoff, so a negative query still returns its best-but-irrelevant matches. Setting that floor is a tuning decision left for a measured pass, not guessed now.
 

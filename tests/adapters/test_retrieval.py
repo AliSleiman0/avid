@@ -396,3 +396,56 @@ async def test_scan_stays_cheap_at_a_few_thousand_facts() -> None:
         # slow-callback gate (the matmul runs inline); this only catches a gross O(N²)
         # regression without flaking on CI load.
         assert elapsed < 0.5
+
+
+# --- #264: the FTS5 proper-noun branch must be able to change a result ------------------------
+
+
+async def test_the_keyword_branch_can_change_a_result(rig: Rig) -> None:
+    """#264 — removing FTS5 entirely must now change something. Before the fix it never did.
+
+    This is the regression the issue is about, expressed the way the bug was found: run the real
+    retriever, then neuter the keyword branch and diff. `_VECTOR_POOL` is 50, so at any store this
+    robot realistically reaches every fact is *already* a vector candidate — which meant the
+    keyword union added no ids, and ranking had no keyword term to consult. §7.7's proper-noun
+    rescue was architecturally present and operationally dead.
+
+    ``_CheapEmbedder`` is the point: it is one-hot on ``hash(text)``, so a query shares **no**
+    vector similarity with any fact — the "proper nouns embed to mush" premise, made total. FTS5
+    is then the only thing that can possibly distinguish the right fact, which is precisely the
+    situation §7.7 built it for.
+    """
+    async for r in _make_rig(embedder=_CheapEmbedder()):
+        # ⚠️ The target is seeded LAST, so it carries the highest fact_id. Every other component
+        # is uniform across this store, so `rank_candidates` falls through to its ascending
+        # fact_id tie-break and the target sorts DEAD LAST on everything except the keyword term.
+        # Seeded first, it would rank first for a reason that has nothing to do with the fix —
+        # the first draft of this test did exactly that and passed while proving nothing.
+        for text in (
+            "Ali takes his coffee black.",
+            "Ali's sister is called Rana.",
+            "Ali works as a mechanical engineer.",
+        ):
+            await _seed(r, text)
+        target = await _seed(r, "Ali's neighbor's dog is called Biscuit.")
+        await r.retriever.rebuild()
+
+        with_fts = await r.retriever.retrieve("tell me about Biscuit")
+
+        original = r.repo.keyword_search
+
+        async def _no_keywords(query: str, *, limit: int) -> list[int]:
+            return []
+
+        r.repo.keyword_search = _no_keywords  # type: ignore[method-assign]
+        try:
+            without_fts = await r.retriever.retrieve("tell me about Biscuit")
+        finally:
+            r.repo.keyword_search = original  # type: ignore[method-assign]
+
+        # The load-bearing assertion. It fails if δ is zeroed, if `keyword_hit` stops being
+        # threaded through `_candidates`, or if the keyword branch is removed — i.e. it fails
+        # for every way of reintroducing #264, and for no other reason.
+        assert with_fts[0] == target  # FTS5's evidence lifts it from last to first
+        assert without_fts[-1] == target  # ...and without that evidence it is last
+        assert with_fts != without_fts

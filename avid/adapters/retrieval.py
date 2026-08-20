@@ -283,6 +283,9 @@ class HybridRetriever:
         candidate_ids.update(fid for fid in keyword_ids if fid in self._meta)
 
         now = self._clock.now()
+        # The FTS5 hits, restricted to facts the index can score — computed once so the scoring
+        # candidates and the returned set cannot disagree about what "keyword hit" means.
+        keyword_hits = frozenset(fid for fid in keyword_ids if fid in self._meta)
         candidates = [
             RetrievalCandidate(
                 fact_id=fid,
@@ -293,7 +296,13 @@ class HybridRetriever:
                     if scores is not None and fid in self._row_of
                     else 0.0
                 ),
+                # #264: this is the whole fix. Until now the keyword branch only added ids to
+                # `candidate_ids`, and with fewer live facts than `_VECTOR_POOL` they were
+                # already there — so §7.7's proper-noun rescue was inert at every store size
+                # this robot reaches. The evidence has always been available here; nothing
+                # downstream was being told about it.
+                keyword_hit=fid in keyword_hits,
             )
             for fid in candidate_ids
         ]
-        return candidates, frozenset(fid for fid in keyword_ids if fid in self._meta)
+        return candidates, keyword_hits
