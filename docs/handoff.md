@@ -191,11 +191,39 @@ multi-fact conversation its AC-2 wants). What is genuinely left off the rig, bes
 - **#265** — see above; a live session costs cents and the harness exists.
 - **#21** — SDS §13. Pure authoring, large, M11-targeted.
 
-**4. M11 is the critical path and M9 is not.** PMP §5.4 runs M6 → M10 → M11; §7.3 names M9 as the
-first cut. M11's 30-day soak is also what would retire M10's unrun AC-0 as a side effect. ⚠️ **M11
-has no epic at all** — the milestone holds only doc-debt #21, against PMP's budget of 11 issues /
-13 IED. If the rig stays out of reach for a while, **decomposing M11 is more defensible than
-waiting** — M9 stays code-complete and seals whenever the bench is free.
+**4. M11 is the critical path and M9 is not — and M11 is now DECOMPOSED (#377).** PMP §5.4 runs
+M6 → M10 → M11; §7.3 names M9 as the first cut.
+
+⚠️ **The constraint is the calendar, not the effort.** O5 is a **30-day unattended soak**: wall
+clock that cannot be compressed, parallelised or bought down. It has not started, and every day it
+does not is a day added to `v1.0.0`. So #377 is decomposed into **Group A — blocks the clock** and
+**Group B — written while it runs**, and putting a package in the wrong group costs calendar days.
+
+- **Group A (~6.25 IED):** #373 (startup banner) · #378 (SDS §12) · #379 (uptime + restart
+  accounting) · #380 (`GET /metrics`) · #381 (journald `Storage=volatile`) · #382 (**boot from USB
+  SSD**) · #383 (the soak harness + O5 gate).
+- **Group B (~6.5 IED):** #384 (SDS §11) · #21 (SDS §13) · #385 (`/state` + `/events/stream`) ·
+  #386 (`/facts`) · #387 (runbook) · #388 (v1.0.0 release path).
+- **Gate:** #389 — 30 days, O5 met, `v1.0.0` tagged.
+
+**Two decisions taken at decomposition, both recorded on #377:**
+
+1. **Boot from USB SSD, retiring SPK-2.** PMP's own R-05 entry says *"~$25, removes the risk class
+   entirely — arguably just do this."* A card that corrupts on day 20 costs twenty days of the only
+   resource this milestone cannot recover.
+2. **SDS §11 and §12 are authored as full chapters**, not as-built notes and not deferred as debt.
+   §12 sits in Group A because it defines what the soak grades.
+
+⚠️ **Why the milestone stayed thin for so long: it was undesigned.** SDS **§11, §12 and §13 are all
+table-of-contents stubs with no body text**, and WBS 8.0 implements exactly those chapters. Sizing
+is **~13.75 IED over 14 issues against PMP's 13 over 11** — stated, not shrunk; the overage is
+almost entirely the two chapters PMP's estimate assumed were already written.
+
+🎁 **#389 retires M10's unrun AC-0 for free** — thirty unattended days settles O3's 7/7 mornings,
+which M10 sealed without.
+
+M9 stays code-complete and seals whenever the bench is free — **as a bench evening that must not
+delay the clock.**
 
 ⚠️ **Do not seal M9 from a laptop.** Every remaining AC is written to require the physical head to
 move, and `docs/demos/motion_pi.py` exits non-zero while any of them is unrecorded precisely so
