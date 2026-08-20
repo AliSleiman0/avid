@@ -37,6 +37,7 @@ import os
 import socket
 import ssl
 import statistics
+import sys
 import time
 import tomllib
 from pathlib import Path
@@ -46,10 +47,19 @@ _HOST = "api.openai.com"
 _PORT = 443
 _NS_PER_MS = 1_000_000
 
-# Matches avid/adapters/realtime.py's endpoint and a cheap model, so the upgrade this probe times
-# is the same one the adapter performs. Kept in sync by hand — this is a diagnostic, not the app.
+# Matches avid/adapters/realtime.py's endpoint, so the upgrade this probe times is the same one
+# the adapter performs.
 _REALTIME_URL = "wss://api.openai.com/v1/realtime"
-_MODEL = "gpt-realtime-mini-2025-12-15"
+# ⚠️ The model used to be a hand-synced literal here (`gpt-realtime-mini-2025-12-15`, "a cheap
+# model"), which is the drift CLAUDE.md §7.1 exists to stop: `config/pi.toml` has pinned the
+# FLAGSHIP since d1302fc (2026-08-01), so from that date every run of this probe silently measured
+# a model the robot does not use. It now reads `[ai] model` from the same config the M6-prefix arm
+# already loads, `--model` overrides it for a single-variable arm, and the value is printed in the
+# header — because a diagnostic that cannot say what it measured is the instrument bug this
+# project keeps paying for (see #373).
+#
+# ⚠️ Numbers recorded on #106 predate this change and were taken on the MINI. They are not
+# comparable to a default run today without saying so.
 
 
 def _ms(ns: int) -> float:
@@ -91,7 +101,7 @@ def _time_transport() -> dict[str, int]:
 
 
 async def _time_upgrade(
-    api_key: str, context: ssl.SSLContext, *, instructions: str = ""
+    api_key: str, context: ssl.SSLContext, *, model: str, instructions: str = ""
 ) -> dict[str, int]:
     """One authenticated pass, split four ways (AVID-157's spike).
 
@@ -119,7 +129,7 @@ async def _time_upgrade(
 
     started = time.monotonic_ns()
     connection = await websockets.connect(
-        f"{_REALTIME_URL}?model={_MODEL}", additional_headers=headers, ssl=context
+        f"{_REALTIME_URL}?model={model}", additional_headers=headers, ssl=context
     )
     phases["upgrade"] = time.monotonic_ns() - started
 
@@ -177,6 +187,12 @@ def _report(label: str, samples: list[dict[str, int]]) -> None:
 
 
 async def _main() -> int:
+    # The cp1252 console mangles this script's em dashes into "?" today and would CRASH on a "⚠️".
+    # Same fix as tools/probe_tool_call_rate.py; see docs/handoff.md's standing gotcha.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument(
@@ -188,6 +204,11 @@ async def _main() -> int:
         "--live",
         action="store_true",
         help="also time the WebSocket upgrade (needs OPENAI_API_KEY + the openai extra)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="model to open against (default: the --config file's [ai] model)",
     )
     args = parser.parse_args()
 
@@ -219,6 +240,12 @@ async def _main() -> int:
     from avid.services.tools import CAPABILITY_INSTRUCTIONS
 
     config = load_config(args.config)
+    model = args.model or config.ai.model
+    print(
+        f"model {model} (from {args.config})"
+        if not args.model
+        else f"model {model} (--model override; {args.config} says {config.ai.model})"
+    )
     personality_path = _REPO_ROOT / "config" / "personality" / "default.toml"
     with personality_path.open("rb") as handle:
         personality = PersonalityConfig.model_validate(tomllib.load(handle))
@@ -236,7 +263,9 @@ async def _main() -> int:
         for _ in range(args.iterations):
             try:
                 upgrades.append(
-                    await _time_upgrade(api_key, context, instructions=instructions)
+                    await _time_upgrade(
+                        api_key, context, model=model, instructions=instructions
+                    )
                 )
             except Exception as exc:  # noqa: BLE001 - a diagnostic reports, never raises
                 print(f"\nupgrade failed: {type(exc).__name__}: {exc}")
