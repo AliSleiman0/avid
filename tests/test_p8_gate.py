@@ -316,3 +316,99 @@ def test_a_gross_stall_still_fails_the_session(tmp_path: Path) -> None:
     assert "P8 async-debug gate FAILED" in output
     assert "asyncio's own default bar" in output
     assert "1 passed" in output, "the test itself passes; it is the SESSION that fails"
+
+
+# --- the harness-load carve-out (#328) ---------------------------------------
+#
+# "A stimulus the harness induces is not a measurement of the robot" (CLAUDE.md §7.1). A test
+# whose own body generates the load has a coroutine that legitimately runs long; grading it as
+# a robot stall is the mistake #328 is named after. The marker is narrow on purpose — these
+# cases exist to keep it narrow.
+
+_LOAD_TEST = "test_a_few_thousand_rows_stay_off_the_loop"
+_LOAD_FRAME = "/avid/tests/contract/test_fact_repository.py:241"
+
+
+def _load_warning(seconds: float, *, coro: str, where: str) -> str:
+    return (
+        f"Executing <Task pending name='Task-781' coro=<{coro}() "
+        f"running at {where}> wait_for=<Future pending>> took {seconds:.3f} seconds"
+    )
+
+
+def test_a_marked_tests_own_coroutine_is_exempt_and_still_printed() -> None:
+    """The case that unblocked M9: corroborated, real, and not about the robot.
+
+    Two 60 ms slices at the same frame — genuine corroboration under the #328 rule, and
+    correctly so, because the loop really did stall twice. It is the *attribution* that was
+    wrong: the frame is the test's own 3,000-await insert loop."""
+    catcher = _SlowCallbackCatcher(on_hardware=False, load_coroutines={_LOAD_TEST})
+    for _ in range(2):
+        catcher.emit(_record(_load_warning(0.060, coro=_LOAD_TEST, where=_LOAD_FRAME)))
+    assert catcher.hits == []
+    assert catcher.grazed == []
+    assert len(catcher.harness) == 2  # reported, never silent
+
+
+def test_the_exemption_covers_only_the_marked_coroutine() -> None:
+    """⚠️ The property that stops the marker becoming a blanket amnesty.
+
+    A load test drives real code, and that code must stay gated — otherwise marking one test
+    would silence every service and bus worker running underneath it, which is the opposite of
+    what the marker means. Here the repository's own coroutine grazes twice inside the same
+    marked test and is convicted."""
+    catcher = _SlowCallbackCatcher(on_hardware=False, load_coroutines={_LOAD_TEST})
+    catcher.emit(_record(_load_warning(0.060, coro=_LOAD_TEST, where=_LOAD_FRAME)))
+    for _ in range(2):
+        catcher.emit(
+            _record(
+                _load_warning(
+                    0.060, coro="_add_blocking", where="/avid/adapters/sqlite.py:88"
+                )
+            )
+        )
+    assert len(catcher.harness) == 1
+    assert len(catcher.hits) == 2, (
+        "an offload regression under a load test must still fail"
+    )
+
+
+def test_an_unmarked_test_gets_no_exemption() -> None:
+    """The marker is the whole permission. Remove it and the gate returns to full strength —
+    which is what makes it reviewable: the exemption lives in the test, in one visible line."""
+    catcher = _SlowCallbackCatcher(on_hardware=False, load_coroutines=set())
+    for _ in range(2):
+        catcher.emit(_record(_load_warning(0.060, coro=_LOAD_TEST, where=_LOAD_FRAME)))
+    assert catcher.harness == []
+    assert len(catcher.hits) == 2
+
+
+def test_a_gross_stall_in_a_marked_test_is_still_exempt_and_that_is_deliberate() -> (
+    None
+):
+    """Stated rather than left implicit, because it is the marker's sharpest edge.
+
+    A declared load generator running long is what it was declared to do, so gross-ness adds
+    no information about it. The claim being protected is narrow — *this coroutine's own
+    frame* — and it is why the marker must be applied deliberately and never to quiet a red."""
+    catcher = _SlowCallbackCatcher(on_hardware=False, load_coroutines={_LOAD_TEST})
+    catcher.emit(_record(_load_warning(0.500, coro=_LOAD_TEST, where=_LOAD_FRAME)))
+    assert catcher.hits == []
+    assert len(catcher.harness) == 1
+
+
+def test_the_marked_test_in_this_repo_is_the_one_we_think_it_is() -> None:
+    """A guard against the marker drifting onto something else.
+
+    An allowlist that grows quietly is the failure mode of every allowlist. If a second test
+    needs ``p8_load``, this assertion is where the decision gets made rather than noticed."""
+    root = Path(__file__).resolve().parent
+    marked = {
+        path.name
+        for path in root.rglob("test_*.py")
+        if any(
+            line.strip() == "@pytest.mark.p8_load"
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    }
+    assert marked == {"test_fact_repository.py"}

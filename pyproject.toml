@@ -117,6 +117,7 @@ asyncio_mode = "auto"
 # mark raises no unknown-marker warning.
 markers = [
     "hardware: the real-adapter half of a port contract; runs only on the Pi (SDS §14.4), skipped off-hardware via on_pi().",
+    "p8_load: this test's own body IS the load — its coroutine is the stimulus, not the robot (#328). The P8 gate exempts slow callbacks attributed to a marked test's frame and prints them; everything the test then asserts stays fully gated. Apply deliberately, never to quiet a red.",
 ]
 
 [tool.ruff]
