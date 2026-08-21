@@ -3272,7 +3272,7 @@ of dressing the worst turn in a percentile's name.
 > or may not still be there; nobody knows, because the histogram has not been re-run.
 >
 > This chapter will not guess the post-fix number, and it will not delete the pre-fix one. Both
-> stay, dated, until the run happens. §11.4 carries it.
+> stay, dated, until the run happens. Tracked as **AVID-406**; §11.4 carries it.
 
 ### The first turn, and where its second is spent
 
@@ -3525,7 +3525,7 @@ entry leaves this table by being measured or by being decided, not by being forg
 | What | Cost | Where | Why it stays open |
 |---|---|---|---|
 | **Session open** | ~1.08 s, first turn only | AVID-157 | The dominant term is a vendor handshake. The only remaining lever is a pre-warmed or pooled connection, which **reopens ADR-007** — the gate exists precisely to avoid holding a socket while nobody speaks. A decision with an ADR-shaped edge, not a fix. |
-| **O1 unmeasured post-AVID-194** | unknown | §11.1 | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
+| **O1 unmeasured post-AVID-194** | unknown | **AVID-406** | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
 | **No memory metric** | unknown | **AVID-404** | `/metrics` has no RSS or available-memory provider, so the soak has no memory column. **Blocks the soak answering §11.2's open question**, and must land before the window opens. |
 | **FTS5 at 10k facts** | 55.5 of 62.3 ms | §7.7, SPK-3 | Not reachable at this robot's scale, and the obvious optimisation (int8 vectors) targets the half that is already free. |
 | **Acoustic echo cancellation** | half-duplex uplink | AVID-163 | Would remove the AVID-159 energy margin and un-mute the uplink during playback. Real work, not a tuning pass. |
