@@ -189,6 +189,7 @@
 12.4 Crash recovery
 12.5 Data durability guarantees
 12.6 O5, defined precisely enough to grade
+12.6.1 Memory growth is the thing this window is uniquely able to catch — and it is not yet instrumented
 12.7 Operations
 
 ## 13. Security and Privacy
@@ -387,9 +388,16 @@ Home Wi-Fi. Assume 20–80 ms RTT to OpenAI, occasional 100% loss for tens of se
 
 This budget is normative. Any module that exceeds its allocation is a defect, not a tuning opportunity.
 
+⚠️ **This table is the design-time *allocation*. The measured budget is §11.1**, and the two are
+deliberately kept apart: the allocation is the intent, the measurement is the fact, and neither is
+quietly edited to match the other. Two things to carry across before quoting the total below.
+**It has no session-open row**, so ~610 ms describes a *steady-state* turn — the first utterance of
+a conversation also pays the §6.3 open, measured at ~1.08 s. And the ~400 ms first-token row is now
+measured per model snapshot (§6.10.5): the shipped flagship medians **328 ms**.
+
 | Stage | Budget (P50) | Notes |
 |---|---|---|
-| Mic capture → frame available | 20 ms | ReSpeaker buffer |
+| Mic capture → frame available | 20 ms | capture buffer — a **USB PnP mic** on the built rig (`plughw:CARD=Device,DEV=0`), not the ReSpeaker this row named until 2026-08-22 |
 | Local buffering + upload chunk | 30 ms | 20 ms Opus frames |
 | Network → OpenAI | 60 ms | Uncontrollable |
 | Model turn detection + first token | 400 ms | Uncontrollable |
@@ -3055,7 +3063,7 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
-| `GET` | `/metrics` | §3.12.2. Latency histogram, **cost/day** (§6.10.6), queue depths, frame rate, SD writes. |
+| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered, and **memory is absent too** — see §11.2 and §12.6.1. |
 | `GET` | `/state` | Current `RobotState`, `Affect`, session status |
 | `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" |
 | `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8 |
@@ -3197,6 +3205,337 @@ Secrets are **not here**. `OPENAI_API_KEY` is read from the environment exactly 
 The `[adapters]` block is the whole of §3.11.1's development story. `uv run robot --config config/sim.toml` is a running robot on a laptop, no hardware, no network. Same binary, same code path, different six lines of TOML. That is what G6 means and it is why the HAL exists.
 
 ---
+
+# 11. Performance Engineering
+
+This chapter collates. Almost every number below was taken weeks ago by an instrument that still
+exists and can be re-run; what did not exist until now is **one place that states the budget, the
+measurement, and the distance between them.** PMP §4.3's rule is that a work package with no SDS
+section is undesigned work, and WBS 8.2 is this one.
+
+Three rules govern the whole chapter, and they are the reason it reads the way it does:
+
+1. **A figure without a date, a host, an *n* and an instrument is folklore.** Every number here
+   carries all four inline. Where a number could not be traced to a run, it is not here — see
+   §11.1's note on the session-open table.
+2. **The target stays visible.** Where a budget has been missed, the *original* target is printed
+   beside the measurement and the gap is named. Widening a budget to fit a measurement is a last
+   resort taken only with the diagnosis attached — otherwise the target quietly becomes whatever
+   was last achieved.
+3. **A floor is not a result.** Several figures below were taken under conditions that understate
+   the real cost — an empty room, an idle process, a warm cache. Each says so where it appears.
+
+## 11.1 End-to-end latency budget
+
+### The three quantities this project keeps conflating
+
+§2.8.1 allocates a turn at design time and totals **~610 ms P50** against G1's 800 ms. That total
+is correct for what it describes and wrong for what it is often quoted as, because **it has no
+session-open row at all.** Separating the three makes both the budget and the gap legible:
+
+| | What it covers | Governed by |
+|---|---|---|
+| **Controllable subtotal** | the ~150 ms this project actually writes code inside of | §2.8.1 |
+| **Steady-state turn** | speech-end → first audio, second utterance onward, socket already open | O1 |
+| **First turn** | the above **plus** the session open, paid once per conversation | O1 + §6.3 |
+
+§2.8.1 is the **design allocation** and is not superseded. §11.1 is the **measured** budget. Where
+they disagree, the measurement is the fact and the allocation is the intent; neither is quietly
+edited to match the other.
+
+### O1, as measured
+
+G1/O1: **P50 ≤ 800 ms, P95 ≤ 1500 ms**, speech-end → first audio out. That target has never moved
+and is not moved here.
+
+| | P50 | P95 | Provenance |
+|---|---|---|---|
+| **Target** (G1, §2.8.1) | **800 ms** | **1500 ms** | the design goal |
+| Interim ceiling | 1600 ms | 2700 ms | provisional, pinned to the row below |
+| **Measured** | **1530 ms** | **not met** | Pi, 2026-08-01, n=10 pooled over two flagship runs, `docs/demos/conversation_pi.py` |
+
+P50 sits inside the interim ceiling. **P95 does not**: 1 turn in 10 exceeded 2700 ms, where a P95
+tolerates 1 in 20. The harness refuses to print that as a percentile at all — below n=20,
+nearest-rank P95 *is* the maximum (§11.3), so `_MIN_P95_SAMPLES = 20` makes the run say so instead
+of dressing the worst turn in a percentile's name.
+
+> ⚠️ **This headline is one architectural fix stale, and that is the most important sentence in
+> §11.1.** The measured row is dated **2026-08-01**. Its diagnosed cause was AVID-194 — two VADs,
+> ours at 900 ms and the server's at 500 ms, disagreeing about where an utterance ends, so the
+> server answered fragments of sentences still being spoken. **AVID-194 landed 2026-08-16**
+> (`[ai.turn_detection] type = "none"`; §6.3, `docs/enhancement-single-turn-authority.md`) and
+> **O1 has not been re-measured since.** The projection at the time was ~990 ms.
+>
+> Two consequences, both live. The interim ceiling of 1600/2700 was pinned to a *pre-fix*
+> measurement, and `docs/demos/conversation_pi.py`'s own comment says to tighten it to ~1100 ms
+> once AVID-194 lands — which has not been done. And the tail AVID-194 was diagnosed to cause may
+> or may not still be there; nobody knows, because the histogram has not been re-run.
+>
+> This chapter will not guess the post-fix number, and it will not delete the pre-fix one. Both
+> stay, dated, until the run happens. Tracked as **AVID-406**; §11.4 carries it.
+
+### The first turn, and where its second is spent
+
+The session open is paid once per conversation, on the first utterance. §6.3 originally budgeted
+**~200 ms** for it and built O1's argument on that figure. The measurement is roughly **5×** the
+budget.
+
+**Pi, 2026-08-16, `tools/probe_realtime_open.py --live --iterations 5`, warm medians (ms):**
+
+| phase | empty instructions | with the M6 prefix (1326 chars) | what it is |
+|---|---|---|---|
+| **WebSocket upgrade** | **881.2** | **848.9** | OpenAI's HTTP upgrade handshake |
+| `session.created` | 1.5 | 2.2 | the server's own session bootstrap |
+| `session.update` send | 0.6 | 1.0 | a local socket write |
+| `session.updated` ack | 199.3 | 219.3 | one round trip |
+| **total** | **1081.5** | **1103.0** | |
+
+Transport to the host on the same run — DNS + `ssl_ctx` + TCP + TLS — is **188.0 ms** warm on the
+Pi against 172 ms on the laptop. So of the ~850–880 ms upgrade, roughly **660–700 ms is the
+vendor's handshake**: not our code, not our payload, not our hardware.
+
+Three candidates were ruled out **by measurement**, and recording that is the point of the table —
+each was a plausible thing to optimise and each would have been wasted work:
+
+- **The server's session bootstrap** — 1.5 ms. Free.
+- **Payload size** — a full four-layer §6.4 prefix of 1326 characters costs **~20 ms** on the ack,
+  about 2% of the open. This is why M6's personality layer did not make a `prio:must` latency
+  defect worse while shipping, and the probe was run *before* M6's gate specifically to find out.
+- **Pi-specific cost** — 188 ms against the laptop's 172 ms. The Pi is not the problem.
+
+> ⚠️ **A note on provenance, since this is the section that most invites folklore.** AVID-384
+> quotes a different table for this measurement — transport 22 / `created` 6 / `updated` 172 /
+> upgrade 648, with a *"flagship 648 / mini 663"* model comparison. **Those figures do not appear
+> in any run this repository holds**: not in AVID-157's measurement comments, not under
+> `docs/demos/`, not in this document's history. They are not used here. If that run exists its
+> numbers belong in this table with a date, a host and an *n*, and the reconciliation is welcome;
+> until then §11.1 reports what was recorded.
+
+**Composed:** with the socket already open, a steady-state turn is what O1 grades. With it closed,
+add ~1.08 s — the first utterance of a conversation cannot beat that floor **before a word is
+spoken.** §6.9's thinking cue is the mitigation that makes it tolerable, and R-01 always intended
+it to be carrying this.
+
+### Model time-to-first-token
+
+**Pi, 2026-08-01, `tools/probe_first_token.py`, 6 trials each** — `response.created` → first
+`output_audio.delta` (§6.10.5):
+
+| model | min | median | max |
+|---|---|---|---|
+| `gpt-realtime-mini-2025-12-15` | 430 ms | 530 ms | 710 ms |
+| **`gpt-realtime-2025-08-28`** (ships) | **214 ms** | **328 ms** | **424 ms** |
+| `gpt-realtime-2.1` | 306 ms | 416 ms | 572 ms |
+| `gpt-realtime-2.1-mini` | 292 ms | 464 ms | 2039 ms |
+
+Re-observed at the M8 seal (Pi, 2026-08-16, live conversation): **347 ms median**, consistent with
+the 328 ms above.
+
+**This table is the chapter's best argument for its own existence.** M5 was about to amend a
+normative latency budget on the assumption that the flagship would be slower. The probe took two
+minutes, needed no hardware, and found it **200 ms faster** — so the budget was never amended
+around an avoidable 200 ms, and the model swap cost one config line because the vendor lives behind
+one adapter (CLAUDE.md §3). *Measure the model before you tune around it.*
+
+### What the budget says to do
+
+~75% of a turn's latency is not ours. The engineering surface is the ~150 ms controllable subtotal,
+and the instruction that follows is **not** to micro-optimise it — it is to avoid adding to it: no
+synchronous DB calls in the audio path, no blocking the loop (P8), no per-turn embedding round
+trips (§7.7). Every latency defect this project has actually shipped was an *addition*, not a
+failure to shave: a whole utterance buffered before upload (#153 — P50 1350 / P95 11278 measured on
+the Pi at the #106 bench), a Realtime socket read at playback speed, a session opened inside the
+turn.
+
+## 11.2 Resource budget (CPU, RAM, thermal)
+
+Against §2.7.1 — **as corrected by AVID-401.** That correction changes how this section reads, not
+just its numbers: the budgets below were written for a Raspberry Pi 5 and are being met on a
+**Pi 4 Model B, 2 GB**, whose cores are roughly 2–3× slower. Every measurement was always taken on
+the real board; only the label was wrong. So M8's vision result is a **stronger** result than it
+was recorded as being, and the headroom it implies is smaller than the spec used to suggest.
+
+### CPU — vision, the only sustained consumer
+
+§2.7.1 budgets **≤ 1 core** for vision and **≤ 5 fps** for detection.
+
+| | empty room | **person in frame** |
+|---|---|---|
+| **cores** | 0.261 | **0.524** |
+| busiest thread | 0.212 | 0.482 |
+| next busiest | ≤ 0.009 | ≤ 0.013 |
+| fps | 4.98 | 2.99 |
+| thermal | 44.3 → 48.2 °C, peak 49.6 | +0.0 °C over 15 min |
+| `vcgencmd get_throttled` | `0x0` | `0x0` |
+
+*Empty room: Pi, 2026-08-15, 15 min, 4499 frames, 0 failures, `docs/demos/vision_pi.py`, evidence
+`docs/demos/m8_evidence/resources_15min.json`. A 5-minute run agreed (0.248 cores, 4.98 fps), so it
+is a steady state rather than a warm-up artifact. Person in frame: Pi, 2026-08-16, the M8 seal.*
+
+⚠️ **The empty-room column is a floor, not a result, and the difference is exactly 2×.** An empty
+frame gives NMS and the box decode almost nothing to do. `vision_pi.py` detects this itself and
+downgrades that criterion from PASS to *recorded* rather than letting an empty room seal a
+milestone — which it had to, because the room the first number was taken in was one the detector
+never saw a face in. **CPU, fps, thermals and event counts are all satisfiable by a robot that
+detects nobody**, and for one milestone they were.
+
+**The per-thread breakdown is the load-bearing part**, not the total. One thread at 0.482 and
+nothing else above 0.013 is what a correct ONNX `SessionOptions` looks like. ONNX Runtime defaults
+to one intra-op thread **per core** and spin-waits between inferences; this project has failed that
+default twice — Silero at 306% CPU made the robot deaf mid-bench, and `LocalMiniLmEmbedder` shipped
+with the same default for a whole milestone (AVID-168). A spinning pool would put four threads at
+~0.9 each, so the *shape* of this column is the evidence, not its sum. Guarded by
+`tests/adapters/test_onnx_session_options.py`.
+
+⚠️ **The thread count does not generalise between adapters.** Silero wants 1; MiniLM wants 2, and
+copying Silero's 1 costs it **340 ms per embed**. A third ONNX adapter must sweep the counts on the
+Pi rather than copy either number.
+
+**The fps figure is a consequence, not a setting.** Detection at `detector_scale = 1` costs
+157.3 ms against a 26.8 ms capture — **184 ms median / 247 ms worst case** serialised on the one
+thread (`deploy/PI_OPERATIONS.md` §5a, Pi, re-measured 2026-08-15). 247 ms does not fit a 200 ms
+period, which is why `[vision] fps` is **3**, not 5. `detector_scale = 2` is roughly twice as fast
+and found a seated person in **0** of ~75 frames; §2.7.1's "≤ 5 fps" turned out to be a ceiling
+worth having.
+
+### RAM
+
+§2.7.1's row is now a real budget rather than a formality: **2 GB, 1.8 GiB usable** after the
+GPU/firmware reservation.
+
+**Pi, 2026-08-21, `free -h`, `robot.service` active with every adapter real** (`picamera2`,
+`framebuffer`, `alsa`, `silero`, `yunet`, `local_minilm`, `sqlite`, `openai`):
+
+| | |
+|---|---|
+| used | **279 MiB** |
+| available | **1.5 GiB** |
+| resident concurrently | two ONNX runtimes (Silero ~1 MB, MiniLM ~86 MB + tokenizer), YuNet, the §8.5 vector matrix, SQLite, CPython + asyncio |
+
+⚠️ **A floor, not a ceiling.** Models here load lazily and the reading was taken at a quiet moment
+— no conversation, no proactive turn. It establishes that the working set *fits*; it says nothing
+about the working set *under load*, and nothing at all about growth.
+
+⚠️ **And growth is not instrumented.** `GET /metrics` exposes no resident-set or available-memory
+provider, so `docs/demos/soak_pi.py` has no memory column — see **§12.6.1**. A thirty-day window is
+the only instrument this project has that could find a slow leak, and as things stand it would
+finish without an answer. Tracked as AVID-404, and it must land **before** the window opens: §12.6
+makes a mid-flight build change a split window.
+
+### Thermal
+
+No heatsink, no enclosure. **Pi, 2026-08-21: 56 °C at 1800 MHz, `throttled=0x0`** — about 24 °C of
+headroom to the throttle point. Under a 15-minute vision run with a person in frame the delta was
+**+0.0 °C**. Thermal is not currently a binding constraint, and the sentence that qualifies it is:
+**the robot is not yet enclosed.** An enclosure changes this measurement and nothing else in this
+section predicts by how much.
+
+### The event loop
+
+P8's bar is **50 ms**, run under `PYTHONASYNCIODEBUG=1` in CI. AVID-328 separated *detection* from
+*conviction*: the bar detects at 50 ms, but a warning fails the run only when it is **gross**
+(≥ 100 ms, asyncio's own default) or **corroborated** (the same frame grazes twice in one session).
+Anything else prints as a graze. The reasoning is empirical — blocking I/O recurs; runner jitter
+does not pick the same victim twice. One-time real-hardware device init/teardown is exempt
+(AVID-130, §14.9).
+
+Measured loop lag with the real mic loop and Silero running (Pi, 2026-08-01): **median 0.99 ms,
+p95 2.93 ms** — and `open()` took the same time on that loop as on an idle one, which is how
+event-loop starvation was ruled out as the cause of AVID-157. The M8 seal's live conversation with
+vision running produced **zero** slow-callback warnings.
+
+⚠️ **P8 is violated by CPU monopoly as well as by blocking**, and that variant is invisible to code
+review and unhelped by `asyncio.to_thread`. Only a run on this hardware finds it.
+
+### Retrieval
+
+§7.7's scan budget is **< 50 ms on the Pi**. Measured on the Pi, 2026-08-02, SPK-3 / AVID-127,
+`tools/spk3_retrieval_scan.py`, **50 queries per size**, real `LocalMiniLmEmbedder`:
+
+| facts | scan p50 / P95 | of it, **inline on the loop** | FTS5 |
+|---|---|---|---|
+| 1k | 9.9 / 27.8 ms | **0.6 / 4.1 ms** | 7.8 ms |
+| 5k | 33.1 / 41.8 ms | **2.8 / 4.0 ms** | 28.8 ms |
+| 10k | 62.3 / 71.8 ms | **5.7 / 5.8 ms** | 55.5 ms |
+
+**The 10k breach is FTS5, not the vectors** — 55.5 of 62.3 ms. ADR-005's numpy brute-force cosine,
+the thing ADR-005 exists to defend, is the inline column: 5.7 ms at 10k, roughly 2% of a recall.
+*int8-quantising the embeddings would optimise the component that is already free.* If retrieval
+ever needs work at scale, the FTS5 side is where it needs it.
+
+**The scan budget and P8's bar are different claims sharing a number.** Only the matmul and top-k
+run inline; `keyword_search` goes through the repository's executor. So the 10k breach is
+**latency, not a loop stall**, and P8 is met with an order of magnitude to spare at every measured
+size.
+
+## 11.3 Profiling methodology
+
+### The instruments that exist
+
+Nothing here is new. A performance question in this project is answered by re-running one of these,
+on the machine, and quoting the date:
+
+| Instrument | Answers |
+|---|---|
+| `tools/probe_realtime_open.py` | session-open phase breakdown (§11.1) |
+| `tools/probe_first_token.py` | model time-to-first-token, per snapshot (§6.10.5) |
+| `tools/probe_face_detector.py` | detector cost and score at a given scale |
+| `tools/probe_overlap.py`, `probe_barge_in_frames.py`, `probe_ambient_gate.py` | turn-taking and gate edges — no mic, no speaker |
+| `tools/probe_tool_call_rate.py` | tool-call reliability off the rig |
+| `tools/spk3_retrieval_scan.py` | retrieval scan cost vs store size (§11.2) |
+| `docs/demos/*_pi.py` | the milestone gates — the O1 histogram, the resource run, the motion arc |
+| `docs/demos/soak_pi.py` | the thirty-day window, from **outside** the robot (§12.6) |
+| the P8 gate (§14.9) | loop stalls, at the commit that introduces them |
+| `GET /metrics` (§3.12.2) | the eleven live counters the registry actually holds, and what the soak sampler reads. ⚠️ **Not** a latency histogram, a frame rate, or SD writes — §9.5's row promised those and they were never registered. |
+
+### The rules a number here has to survive
+
+Each of these was bought. They are listed with what they cost, because the rule without the story
+is forgettable and this project has re-learned several of them twice.
+
+- **Wall for humans, monotonic for arithmetic.** Never subtract `timestamp_ms` (§9.1.1). An NTP
+  step mid-turn yields a negative latency and silently poisons the metric G1 is graded by — and
+  the Pi has no RTC, so it corrects its clock seconds after boot.
+- **Nearest-rank P95 below n=20 *is* the maximum.** Printing it as a percentile misleads in both
+  directions. `_MIN_P95_SAMPLES` exists to make the harness say so.
+- **Report the quantity you grade.** A summary line describing something the check does not test is
+  a bug report filed against nothing — including printing `abs()` of a quantity graded one-sided.
+- **Every criterion reports before any verdict is decided.** A reporter that returned on its first
+  failure hid a criterion that had *passed*. That is the sibling of passing on silence.
+- **A stimulus the harness induces is not a measurement of the robot.** A run that cuts the network
+  cannot also claim a latency result.
+- **Read config, never restate it.** A literal in a banner or a docstring is drift with a delay
+  fuse — one gate quoted a margin the config had not used since that morning.
+- **Absent is not zero.** A `0` from an instrument that never ran reads exactly like a real zero.
+- **Measure against a person.** An empty room satisfies every automated criterion a vision
+  milestone has. §11.2's floor column is what that looks like when it is caught.
+- **Prove the gate bites.** Commit, then neuter the specific guard and confirm an *assertion*
+  fails. A red for the wrong reason is not a proof.
+
+⚠️ **The measuring is where the defects are.** At M5's bench, of the defects the runs surfaced,
+**most were in the harness rather than the robot**. That is not a criticism of the harnesses; it is
+the reason §14.9's standard exists and the reason this subsection is normative rather than
+advisory. A gate is held to the same standard as the robot.
+
+## 11.4 Optimization backlog
+
+Known-slow, **deliberately not fixed**. Each entry names its issue and the reason it is parked; an
+entry leaves this table by being measured or by being decided, not by being forgotten.
+
+| What | Cost | Where | Why it stays open |
+|---|---|---|---|
+| **Session open** | ~1.08 s, first turn only | AVID-157 | The dominant term is a vendor handshake. The only remaining lever is a pre-warmed or pooled connection, which **reopens ADR-007** — the gate exists precisely to avoid holding a socket while nobody speaks. A decision with an ADR-shaped edge, not a fix. |
+| **O1 unmeasured post-AVID-194** | unknown | **AVID-406** | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
+| **No memory metric** | unknown | **AVID-404** | `/metrics` has no RSS or available-memory provider, so the soak has no memory column. **Blocks the soak answering §11.2's open question**, and must land before the window opens. |
+| **FTS5 at 10k facts** | 55.5 of 62.3 ms | §7.7, SPK-3 | Not reachable at this robot's scale, and the obvious optimisation (int8 vectors) targets the half that is already free. |
+| **Acoustic echo cancellation** | half-duplex uplink | AVID-163 | Would remove the AVID-159 energy margin and un-mute the uplink during playback. Real work, not a tuning pass. |
+| **Cold DNS** | ~5.1 s, once per process | AVID-157 | `systemd-resolved` is inactive on this Pi, so nothing caches locally and every process pays a fresh lookup. Non-fatal while the router's cache is warm; it sits in front of the first conversation after a boot. |
+| **MiniLM at 2 threads** | unmeasured | §7.4 | Only the 1-thread figure (340 ms/embed) exists. The **shipped** setting has never been timed, and this document declines to invent a number for it. |
+| **§7.7's δ weight** | unmeasured | §7.7 | Applied at 1 for consistency with the equal-weight baseline, not because anything measured it. `tools/eval_recall.py` is the instrument. |
+
+⚠️ **Nothing in this table is scheduled by being in it.** It exists so that a slow path is a
+*known* slow path with a reason attached, rather than a surprise rediscovered at the next bench.
+The entries that block something say so; the rest are load-bearing only as documentation.
 
 ---
 
