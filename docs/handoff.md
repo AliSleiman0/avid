@@ -6,41 +6,78 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-20 · `main = 2777b1a` + this commit · `v0.M10.0` tagged · gh `AliSleiman0`.
+**As of:** 2026-08-22 · `main = 9e8b05a` + this commit · `v0.M10.0` tagged · gh `AliSleiman0`.
 
-## ⭐ Next session — M9 is CODE-COMPLETE. What is left needs the Pi and a person.
+## ⭐ Next session — the Pi is REACHABLE, Group A is DEPLOYED, and the clock can start
 
-**Seven of nine M9 issues are closed and merged. Zero open PRs.** #199 #200 #201 #202 #203 #204
-#205 are done, plus #289 and a new #356. What remains is **#206** (the SPK-4 brown-out spike) and
-**#207** (the live gate), and neither can be advanced from a laptop.
+⚠️ **This section replaces the previous one entirely. Two things changed that invalidate the old
+plan: the Pi is no longer hard to reach, and Group A is no longer waiting to be written.**
 
-**Since that was written, one long laptop session happened** (the Pi never came back). Five PRs
-merged — #370, #371, #372, #374, #375. In order of what a reader needs:
+### The one-line state
 
-1. **#310 AC-1 answered** (#370). `set_affect` works fine off the rig and the issue's premise does
-   not reproduce — which turns a prompt problem into a **deployment** question. This is what added
-   **item 0** below, and item 0 outranks everything else the moment the Pi answers.
-2. **#373 filed — nothing records which model/adapters a run used.** No startup banner exists
-   anywhere; `config.ai.model` is read into the adapter and the cost meter and logged in neither.
-   ⚠️ And `AiConfig.model`'s schema default is the **mini**, so a deployed
-   `/etc/robot/config.toml` missing its `[ai] model` key silently runs a different model than
-   `pi.toml` pins. That single fact would explain #310 *and* #265 together. **Cheapest thing that
-   makes a bench evening interpretable — do it before the rig work if there is any doubt.**
-3. **#157 measured from the laptop** (#374), which was that issue's own last open bullet. Two of
-   its three candidates are dead: the server's session bootstrap is **4–10 ms**, and
-   `session.update`'s payload size does **not** matter (171.8 ms empty vs 170.1 ms with the real
-   1901-char M6 prefix). It is the **WebSocket upgrade**, ~575–660 ms warm, host-independent —
-   so **§6.3's ~200 ms budget is wrong, not merely missed**, and pre-warming is the indicated
-   remedy rather than one of three. Still open: the design decision, and the Pi's 6.6 s tail.
-4. **#264 root-caused and fixed** (#375). §7.7's hybrid retrieval had a half that could not reach
-   the score — see the standing gotcha below, it generalises well beyond memory.
-5. **#372** corrected two claims made earlier the same session. Both were caught by checking the
-   tracker instead of the prose around them.
+**M11's Group A is built, merged, deployed to the rig and verified on real hardware.** The only
+thing between here and starting the 30-day soak is a decision about the SD card. `v1.0.0` is that
+soak plus Group B, which is designed to be written *while it runs*.
 
-⚠️ **Verify this file before planning from it.** `gh pr list`, `gh issue list --state open`,
-`git rev-parse --short origin/main`. See BATON-CAN-BE-WRONG below.
+### 🔑 The Pi now has a permanent address
 
-### The bench evening, in order
+```sh
+ssh alisleiman0@avid-pico            # Tailscale — works from anywhere, survives network changes
+curl http://avid-pico:8787/metrics
+```
+
+Tailscale was installed 2026-08-21 (`avid-pico`, tailnet `alisleiman0.github`, `100.127.197.112`)
+**because the address moved three times in one evening.** Verified end-to-end from the laptop.
+`deploy/PI_OPERATIONS.md` §0 has the details, including the trap that `ssh AVID` can fail while
+`ping AVID` succeeds — use `AVID.local` if the tunnel is ever down.
+
+### What shipped this session (11 PRs)
+
+**Group A — all merged, closed, and verified ON THE RIG:**
+
+| | | verified on hardware |
+|---|---|---|
+| **#378** | SDS §12 authored — and it defines O5 gradeably | n/a (docs) |
+| **#373** | startup banner | first line of the journal, all 12 adapters |
+| **#379** | uptime + restart accounting, migration `0002` | migration applied; **heartbeat fires** (+62 s) |
+| **#380** | `GET /metrics` | 35 subscribers, 0 dropped, `absent: []` |
+| **#381** | journald `Storage=volatile` | `/run/log/journal` exists — journal is in RAM |
+| **#383** | soak harness + O5 gate | dry-run proven; sampler unit not yet installed |
+
+Plus **#395** and **#396** — two flaky tests CI caught, both merged the same day, both green
+locally (see `avid-flaky-test-families`), and **#162**, which had been fixed since 2026-07-29 and
+never closed by hand.
+
+### ⚠️ #382 (USB SSD) is the only Group A item left — and it is now optional
+
+#381 moved the logs into RAM, which was the dominant write source, so R-05 is materially smaller
+than when the SSD was proposed. **Starting the soak tonight on the SD card is defensible**;
+waiting on shipping costs days of the only resource that cannot be recovered. Either way,
+**image the card first** — that turns a re-image into a twenty-minute restore.
+
+### Measured on the rig, 2026-08-21
+
+- **`Raspberry Pi 4 Model B Rev 1.5, 2 GB`** — ⚠️ the SDS says Pi 5 / 8 GB throughout. See **#401**.
+- **279 MiB used, 1.5 GiB available** with every adapter real. The RAM worry was overstated.
+- **56 °C, `throttled=0x0`, 1800 MHz, no heatsink.** 24 °C of headroom. A heatsink is $2 at
+  electroslab (search "heat sink", two words) and only becomes necessary once the robot is enclosed.
+- Deployed HEAD was `cc89217`, which **did** contain #309's clause fix, and `[ai] model` resolves to
+  the **flagship** — so #310's "silently running the mini" hypothesis is dead. See #310.
+- `proactive_log` id=16 is `suppressed / stale` — **M10's AC-0 is still unmet**, and the reason is
+  visible: the robot is not up when the trigger is due. Always-on fixes it as a side effect.
+
+### Tonight's order — the M11 soak
+
+1. **Decide the SD card**: image it and start, or wait for #382. *(Recommendation: image and start.)*
+2. **Install the sampler** — `deploy/soak-sampler.service`, then start the clock and record the
+   window-start epoch somewhere durable.
+3. **Flip `servo = "pca9685"`** when the motion work is next touched — it is still `"fake"` on the
+   machine, so #207 cannot be graded until it is flipped.
+4. Then Group B (#384, #21, #385, #386, #387, #388) **while the soak runs**.
+
+⚠️ **Do not seal M9 from a laptop.** Unchanged, and still true.
+
+### The M9 bench evening (#206 → #207) — a SEPARATE evening from the soak above
 
 **1. #206 first, and it is time-boxed to 0.5 IED.** *Does the servo brown out the Pi under stall
 on a shared rail?* Answer it and stop. R-04's failure mode is not "the robot glitches" — it is
@@ -50,7 +87,11 @@ once. Photograph the wiring *before* power-on; if it is not a separate 5–6 V r
 ground, fix the wiring rather than "just trying it". Bounded holds only — a held stall cooks the
 gearset — and afterwards confirm both servos still traverse their full declared reach.
 
-**2. Reprovision the Pi. This is not optional and it now fails loudly.**
+**2. ~~Reprovision the Pi~~ — ✅ DONE 2026-08-21.** The Pi is synced to `9e8b05a`, the config was
+repaired (the #200 one-axis failure fired exactly as predicted below, and the splice recipe is now
+in `PI_OPERATIONS.md` §3), and `load_config` validates. ⚠️ **The one step still outstanding is the
+flip: `servo` is still `"fake"` on the machine**, so #207 cannot be graded until it is `"pca9685"`.
+The original instructions are kept below because they are the recipe for the *next* reprovision.
 
 ```sh
 sudo systemctl stop robot
@@ -104,137 +145,34 @@ while both were 180.
 AC-1 ("affect drives gesture") probably cannot be watched on the face and the head at once.
 **Decide which half is read from the log before starting**, not mid-run.
 
-### ⚠️ If the Pi is not reachable, do these instead — in this order
+### ⚠️ The old "if the Pi is not reachable" ladder is RETIRED
 
-The bench evening is the plan, but the Pi dropped off the hotspot at ~02:05 on 2026-08-20 and
-nothing has been run on it since. **None of the following needs the rig**, and the first is nearly
-free.
+It ran for two sessions and is now obsolete: **Tailscale removed the premise.** `avid-pico`
+resolves from anywhere and survives a network change, so "the Pi is out of reach" stops being a
+planning branch and becomes a fault to fix.
 
-⚠️ **Re-confirmed unreachable later on 2026-08-20, from a different network.** The laptop was on
-`172.18.21.x`; the Pi's last-known hotspot subnet `172.20.10.x` was not present at all, `AVID` and
-`avid.local` did not resolve, and no Raspberry Pi MAC prefix appeared in `arp -a`. That is a
-*different-network* result, not a dead Pi — the address moves with the network
-(`deploy/PI_OPERATIONS.md` §0), so the check to run first is whether the laptop and the Pi are on
-the same one, before concluding anything about the machine.
+Its three items all resolved:
 
-**0. ⚠️ The first command to run when the Pi answers, ahead of everything else. What is
-actually deployed at `/opt/avid`?**
+- **Item 0 — what is deployed at `/opt/avid`** — ✅ ran 2026-08-21. `cc89217`, which contained
+  #309's fix; and the banner now answers it for every future run in one journal line.
+- **M10's AC-0** — ✅ read. **Still unmet**: id=16 is `suppressed / stale`. The 30-day soak is what
+  produces it.
+- **#310** — ✅ AC-1 answered off-rig (4/4 both models), and the "wrong model" hypothesis died on
+  the rig. Only AC-4 remains, and it needs a person.
 
-> 🎁 **And it is now cheap to answer for every future run.** #373 shipped the startup banner: the
-> first line of the journal names the config path, the resolved models and every `[adapters]`
-> selection. `journalctl -u robot | head -1` answers "which build, which model, which adapters"
-> without archaeology. The command below is still what settles #310 *retrospectively*, because no
-> run before today left that line.
+### Newly open, all correctly parked behind `v1.0.0`
 
-```sh
-ssh alisleiman0@<pi> 'cd /opt/avid && git log -1 --format="%h %ad %s" --date=short'
-```
-
-#310's whole premise is six rig runs in which `set_affect` fired zero times. Off the rig it fires
-4 of 4, on both models, with a **byte-identical** capability clause (`git log -S` confirms nothing
-has touched it since #309). And the clock is tighter than "the same day": PR #309 merged
-**13:35:54 UTC** on 2026-08-16 and **#310 was filed 13:36:34 UTC — forty seconds later.** So the
-issue's runs, including the two rows it describes as *"after #309"*, cannot have been made against
-a `main` build. *The machine is not the repo*: if `/opt/avid` was not redeployed, the gate measured
-the **pre-#309** clause, and the "after #309" rows are mislabelled through no fault of the record.
-
-**If that SHA predates `bc05261`, #310 closes as already fixed by #309** — and, more importantly,
-every other live-run conclusion drawn in that window is suspect for the same reason. It is one
-command and it should be run before any measurement, not after one disagrees.
-
-⚠️ **Correction to the first version of this item:** it named **#283** (mains hum) as runner-up and
-called it *"`prio:must` and open"*. It is **closed** — 2026-08-16 11:02 UTC — and the cause was not
-hum but ALSA **Auto Gain Control** (`23d7e9e` 10:45 UTC, `5d86e94` 11:02 UTC; see `journal.md`).
-Both audio fixes predate #310's filing by ~2.5 h, so degraded capture is a *weaker* explanation
-than first ranked — and it only survives at all in the branch where the Pi was not carrying those
-fixes either, which is the same deployment question. The genuine runner-up is now **session
-shape**: the gate's ~30 turns with a §6.7 memory block against the probe's cold 12.
-
-**1. 🎁 Collect M10's AC-0 evidence. One command, and it costs nothing.** M10 was sealed **one
-criterion short, on the record**: AC-0 (the robot initiates on multiple unattended mornings) was
-never run. The trigger is *still armed* — 23:55 EEST daily, `ignore_streak 0`, nothing staged — so
-every morning the robot is powered produces evidence for free:
-
-```sh
-ssh alisleiman0@<pi> 'sudo python3 -c "
-import sqlite3
-c=sqlite3.connect(\"/var/lib/robot/robot.db\")
-for r in c.execute(\"select id,considered_at,outcome,reason,utterance,user_reaction from proactive_log order by id desc limit 5\"): print(r)"'
-```
-
-An **id ≥ 16** marked `delivered` on an untouched night is AC-0's first real morning. **Append it
-to `docs/journal.md` even though `v0.M10.0` has shipped** — a milestone sealed with a named gap is
-honest; leaving the gap unfilled once the evidence is lying there is not. (This requires only SSH,
-not the servo rig.)
-
-**2. ~~#310 — `set_affect` is unreliable~~ — DONE 2026-08-20, and the answer inverts the issue.**
-AC-1 is ticked (#370, `242f884`). `tools/probe_tool_call_rate.py` ran the comparison AC-1 asked
-for — one live session, both tools, real speech — and **`set_affect` fired on 4 of the 4 turns
-written to invite it and 0 of the 8 that were not**, alongside `remember_fact` at 4 of 4,
-*identically on the flagship and the mini*. So it is **not** the modality, **not** the description
-and **not** the enum, and **AC-2 is deliberately not authorised**: §6.8's local inference was the
-contingency for a tool that does not work, and this tool works. Evidence and the full reasoning are
-in `docs/demos/m310_evidence/`.
-
-⚠️ **What this means for M9:** the cap described here is *lifted on the evidence available* —
-`HAPPY → nod` (#202) has something to fire on. But six rig runs really did give zero, so something
-about **the rig** differs, and until that is known the M9 bench evening should not assume affect
-will drive gesture. See the new item 0 below — it is now the first thing to run when the Pi
-answers, ahead of even AC-0.
-
-**3. The laptop-work menu, re-triaged 2026-08-20 by reading all 20 open issues rather than their
-labels.** ⚠️ **Two were mislabelled `hardware-required` and are not** — #264 is now corrected to
-`no-hardware` and was root-caused and fixed from this laptop; #265 is very likely the same (its
-AC-1 is a prompt-path question and `tools/probe_tool_call_rate.py` can now drive the live
-multi-fact conversation its AC-2 wants). What is genuinely left off the rig, best first:
-
-- **#373** — the startup banner. Smallest, and it is what makes every later rig result attributable.
-- **#264 AC-2** — the two gate probes against a real-MiniLM store. Needs the model blobs;
-  ⚠️ `--extra pi` will **not install on Windows** (`pyalsaaudio` has no wheel), so use an ephemeral
-  `uv run --with onnxruntime --with tokenizers` rather than syncing the extra.
-- **#162** — the DEGRADED recovery turn drives no legal transitions. Pure domain + a §3.10.3
-  decision + a test; no hardware, no key.
-- **#265** — see above; a live session costs cents and the harness exists.
-- **#21** — SDS §13. Pure authoring, large, M11-targeted.
-
-**4. M11 is the critical path and M9 is not — and M11 is now DECOMPOSED (#377).** PMP §5.4 runs
-M6 → M10 → M11; §7.3 names M9 as the first cut.
-
-⚠️ **The constraint is the calendar, not the effort.** O5 is a **30-day unattended soak**: wall
-clock that cannot be compressed, parallelised or bought down. It has not started, and every day it
-does not is a day added to `v1.0.0`. So #377 is decomposed into **Group A — blocks the clock** and
-**Group B — written while it runs**, and putting a package in the wrong group costs calendar days.
-
-- **Group A — ✅ SOFTWARE COMPLETE.** #378 · #373 · #379 · #380 · #381 · #383 are all **merged
-  and closed**. ⚠️ **Only #382 (boot from USB SSD) is left, and it is the one item that needs the
-  Pi.** So the path from "Pi answers" to "clock starts" is now: migrate to the SSD, deploy, run
-  each item's verification tail, dry-run `soak_pi.py`, start sampling. An evening, not a week.
-- **Group B (~6.5 IED):** #384 (SDS §11) · #21 (SDS §13) · #385 (`/state` + `/events/stream`) ·
-  #386 (`/facts`) · #387 (runbook) · #388 (v1.0.0 release path).
-- **Gate:** #389 — 30 days, O5 met, `v1.0.0` tagged.
-
-**Two decisions taken at decomposition, both recorded on #377:**
-
-1. **Boot from USB SSD, retiring SPK-2.** PMP's own R-05 entry says *"~$25, removes the risk class
-   entirely — arguably just do this."* A card that corrupts on day 20 costs twenty days of the only
-   resource this milestone cannot recover.
-2. **SDS §11 and §12 are authored as full chapters**, not as-built notes and not deferred as debt.
-   §12 sits in Group A because it defines what the soak grades.
-
-⚠️ **Why the milestone stayed thin for so long: it was undesigned.** SDS **§11, §12 and §13 are all
-table-of-contents stubs with no body text**, and WBS 8.0 implements exactly those chapters. Sizing
-is **~13.75 IED over 14 issues against PMP's 13 over 11** — stated, not shrunk; the overage is
-almost entirely the two chapters PMP's estimate assumed were already written.
-
-🎁 **#389 retires M10's unrun AC-0 for free** — thirty unattended days settles O3's 7/7 mornings,
-which M10 sealed without.
-
-M9 stays code-complete and seals whenever the bench is free — **as a bench evening that must not
-delay the clock.**
-
-⚠️ **Do not seal M9 from a laptop.** Every remaining AC is written to require the physical head to
-move, and `docs/demos/motion_pi.py` exits non-zero while any of them is unrecorded precisely so
-that a green run cannot be mistaken for a sealed milestone.
+- **#400** — two driven wheels, bounded net-zero steps on the desk. **Committed work, not Icebox.**
+  $17.50 of parts priced at electroslab; N20 micro gear motors + L9110S beat the CR servo on size
+  *and* on stall current, which matters more now (see #401's power row). ⚠️ Blocked on a bench
+  check: the cliff sensors need 2 free GPIO inputs and the PCA9685 cannot read.
+- **#401** — the SDS names the wrong computer. `prio:must`, and **#384 should not be written until
+  it lands** or §11's resource budget describes a machine that does not exist.
+- **#402 / milestone M12 — "It has a fleet."** OTA, telemetry, entitlement, and ephemeral
+  API-token minting. The finding worth keeping: **ADR-010's premise — *"the Pi is a trusted device
+  we fully control"* — dies the moment the robot is sold**, and the naive fix (an API proxy) would
+  route customer audio through us and destroy the on-device privacy claim that is currently a
+  genuine differentiator against EMO and Loona.
 
 ### What M9 changed that a later reader will trip over
 
