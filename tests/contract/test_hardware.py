@@ -31,7 +31,7 @@ def test_on_pi_true_when_model_node_says_raspberry_pi(
     monkeypatch.delenv("AVID_HARDWARE", raising=False)
     node = tmp_path / "model"
     node.write_text(
-        "Raspberry Pi 5 Model B Rev 1.0\x00"
+        "Raspberry Pi 4 Model B Rev 1.5\x00"
     )  # trailing NUL, as the kernel writes
     monkeypatch.setattr(_hardware, "_MODEL_NODE", node)
     assert on_pi() is True
@@ -64,7 +64,7 @@ def test_avid_hardware_override_wins_over_the_node(
     """The env override decides regardless of what the device-tree node says — here a
     node that *would* read as a Pi, so we prove the override takes precedence."""
     pi_node = tmp_path / "model"
-    pi_node.write_text("Raspberry Pi 5")
+    pi_node.write_text("Raspberry Pi 4 Model B Rev 1.5")
     monkeypatch.setattr(_hardware, "_MODEL_NODE", pi_node)
     monkeypatch.setenv("AVID_HARDWARE", value)
     assert on_pi() is expected

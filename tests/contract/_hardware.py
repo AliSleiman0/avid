@@ -29,7 +29,8 @@ from pathlib import Path
 
 import pytest
 
-# The device-tree node the kernel exposes on a Pi, e.g. "Raspberry Pi 5 Model B Rev 1.0".
+# The device-tree node the kernel exposes on a Pi, e.g. "Raspberry Pi 4 Model B Rev 1.5"
+# — the rig's actual string (#401).
 # Absent on CI runners and dev laptops, which is exactly how those hosts read as not-a-Pi.
 _MODEL_NODE = Path("/proc/device-tree/model")
 

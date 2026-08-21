@@ -423,7 +423,10 @@ filter scored 0.054 against subsampling's 0.053 on the same frames, so #221's op
 exonerated. The old "quality is flat down to a 120 px face" claim was in *model-input* pixels,
 i.e. ~240 px at full res, ~2.5× closer than anyone sits.
 
-**Measured costs on this rig** (Pi 5, ov5647 at 640×480, one intra-op thread), re-measured 2026-08-15:
+**Measured costs on this rig** (**Pi 4B 2 GB**, ov5647 at 640×480, one intra-op thread), re-measured
+2026-08-15. ⚠️ *This line said "Pi 5" until 2026-08-21 (#401). **The figures below are unchanged** —
+they were taken on this machine, which has always been a Pi 4B; only the label was wrong. Nothing
+here was re-measured for the correction.*
 
 | | `detector_scale = 1` (**ships**) | `detector_scale = 2` (blind) |
 |---|---|---|
