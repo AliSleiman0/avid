@@ -57,8 +57,13 @@ waiting on shipping costs days of the only resource that cannot be recovered. Ei
 
 ### Measured on the rig, 2026-08-21
 
-- **`Raspberry Pi 4 Model B Rev 1.5, 2 GB`** — ⚠️ the SDS says Pi 5 / 8 GB throughout. See **#401**.
-- **279 MiB used, 1.5 GiB available** with every adapter real. The RAM worry was overstated.
+- **`Raspberry Pi 4 Model B Rev 1.5, 2 GB`** — the SDS said Pi 5 / 8 GB / 27 W from M0 until
+  2026-08-22; §2.7.1 now names this board and carries a dated correction note (#401). The sealed
+  measurements were always taken here, so none of them moved.
+- **279 MiB used, 1.5 GiB available** with every adapter real. The RAM worry was overstated —
+  but that is one idle reading, and ⚠️ **`GET /metrics` has no memory provider at all**, so the
+  soak has no memory column and thirty days would end with no answer on growth (new SDS §12.6.1).
+  The instrument has to land **before** the window opens: a mid-flight build change splits it.
 - **56 °C, `throttled=0x0`, 1800 MHz, no heatsink.** 24 °C of headroom. A heatsink is $2 at
   electroslab (search "heat sink", two words) and only becomes necessary once the robot is enclosed.
 - Deployed HEAD was `cc89217`, which **did** contain #309's clause fix, and `[ai] model` resolves to
