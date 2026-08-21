@@ -112,6 +112,29 @@ CREATE TABLE IF NOT EXISTS samples (
 CREATE INDEX IF NOT EXISTS idx_samples_at ON samples(at);
 """
 
+# Columns added after the table shipped (#404). ``CREATE TABLE IF NOT EXISTS`` is a no-op against
+# an existing table, so a schema change made only up there is invisible on any database that
+# already exists — and the first INSERT then dies with "no such column" days into a window.
+_ADDED_COLUMNS = {
+    # The robot's own resident set, and the machine's headroom. Both NULL when the robot did not
+    # report them, which is a different fact from zero (#380) and stays distinguishable here.
+    "rss_bytes": "INTEGER",
+    "mem_available_bytes": "INTEGER",
+}
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring an existing ``samples`` table up to the current schema. Idempotent.
+
+    SQLite has no ``ADD COLUMN IF NOT EXISTS``, so the presence check is ``PRAGMA table_info``.
+    Adding a nullable column is a metadata-only change — no rewrite, no risk to a database that
+    already holds a window's worth of rows.
+    """
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(samples)")}
+    for column, kind in _ADDED_COLUMNS.items():
+        if column not in have:
+            conn.execute(f"ALTER TABLE samples ADD COLUMN {column} {kind}")
+
 
 def _open_samples(path: Path) -> sqlite3.Connection:
     """Open (and create) the sampler's own database.
@@ -124,6 +147,8 @@ def _open_samples(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript("PRAGMA journal_mode = WAL;" + _SCHEMA)
+    with conn:
+        _add_missing_columns(conn)
     return conn
 
 
@@ -138,6 +163,8 @@ def _probe(base: str, timeout: float) -> dict[str, Any]:
             "build": None,
             "uptime_s": None,
             "dropped": None,
+            "rss_bytes": None,
+            "mem_available_bytes": None,
             "payload": None,
         }
 
@@ -158,6 +185,11 @@ def _probe(base: str, timeout: float) -> dict[str, Any]:
         "dropped": sum(q.get("dropped", 0) for q in queues.values())
         if queues
         else None,
+        # #404. `.get` returning None is exactly right: a robot too old to report memory, or one
+        # whose provider landed in `absent`, records NULL rather than 0. The whole body is kept in
+        # `payload` regardless, so the shape over time survives even for questions not asked yet.
+        "rss_bytes": metrics.get("rss_bytes"),
+        "mem_available_bytes": metrics.get("mem_available_bytes"),
         "payload": json.dumps(payload) if payload is not None else None,
     }
 
@@ -166,14 +198,17 @@ def _sample_once(conn: sqlite3.Connection, base: str, timeout: float) -> dict[st
     observation = _probe(base, timeout)
     with conn:
         conn.execute(
-            "INSERT INTO samples (at, reachable, build, uptime_s, dropped, payload) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO samples "
+            "(at, reachable, build, uptime_s, dropped, rss_bytes, mem_available_bytes, payload) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (
                 int(time.time()),
                 1 if observation["reachable"] else 0,
                 observation["build"],
                 observation["uptime_s"],
                 observation["dropped"],
+                observation["rss_bytes"],
+                observation["mem_available_bytes"],
                 observation["payload"],
             ),
         )
@@ -233,6 +268,63 @@ def _boot_records(db_path: str, since: int, until: int) -> list[BootRecord]:
         )
         for r in rows
     ]
+
+
+def _memory_criterion(samples: list[sqlite3.Row]) -> _Criterion:
+    """What the window saw of memory. Always ``recorded`` — a report, not a verdict (#404).
+
+    ⚠️ **A positive delta is not a leak**, and the detail line says so. Models here load lazily, the
+    page cache grows into whatever is going spare, and glibc does not always return freed arenas to
+    the kernel. What a reader is looking for is a *trend that does not flatten*, which is why the
+    first/last pair and the extremes are printed rather than a single summary number — and why the
+    full per-sample series stays in the `payload` column for anyone who wants to plot it.
+
+    ⚠️ **Absent is not zero.** A window where the robot never reported memory says exactly that; it
+    does not report 0 bytes resident, which is what a `sum() or 0` would have produced.
+    """
+    rss = [int(r["rss_bytes"]) for r in samples if r["rss_bytes"] is not None]
+    available = [
+        int(r["mem_available_bytes"])
+        for r in samples
+        if r["mem_available_bytes"] is not None
+    ]
+    if not rss and not available:
+        return _Criterion(
+            "MEM",
+            "memory over the window (reported, not graded)",
+            "recorded",
+            f"no memory readings in {len(samples)} sample(s) — the robot did not report "
+            f"rss_bytes or mem_available_bytes. Absent, NOT zero: check that the build under "
+            f"test carries #404 and that /metrics does not list them in `absent`.",
+        )
+
+    mib = 1024 * 1024
+    rows: list[str] = []
+    if rss:
+        delta = rss[-1] - rss[0]
+        rows.append(
+            f"robot RSS       n={len(rss)}  first {rss[0] / mib:.1f} MiB  "
+            f"last {rss[-1] / mib:.1f} MiB  delta {delta / mib:+.1f} MiB  "
+            f"min {min(rss) / mib:.1f}  max {max(rss) / mib:.1f}"
+        )
+    else:
+        rows.append("robot RSS       absent from every sample")
+    if available:
+        rows.append(
+            f"machine avail   n={len(available)}  first {available[0] / mib:.1f} MiB  "
+            f"last {available[-1] / mib:.1f} MiB  "
+            f"min {min(available) / mib:.1f}  max {max(available) / mib:.1f}"
+        )
+    else:
+        rows.append("machine avail   absent from every sample")
+    return _Criterion(
+        "MEM",
+        "memory over the window (reported, not graded)",
+        "recorded",
+        "a rising delta is not by itself a leak - lazy model loads, page cache and glibc "
+        "arenas all move it. Look for a trend that never flattens.",
+        rows=rows,
+    )
 
 
 def _grade(args: argparse.Namespace) -> list[_Criterion]:
@@ -306,6 +398,18 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
             f"builds seen: {builds or ['(none reported)']}",
         )
     )
+
+    # ── MEM: memory over the window (#404) — REPORTED, NEVER GRADED ───────────────────────────
+    #
+    # Placed here deliberately: it depends only on `samples`, so it must report BEFORE the
+    # boot_log early-return below. Hiding it behind an unrelated inconclusive would be the same
+    # defect as a reporter that returns on its first failure (§7.1).
+    #
+    # O5's criteria are uptime and restarts (SDS §12.6) and #404 does not amend them, so the
+    # verdict is always `recorded` — it renders as `····` and cannot move the exit code. A leak is
+    # still the one failure class thirty days can find and fifteen minutes cannot, so the number
+    # gets printed either way.
+    criteria.append(_memory_criterion(samples))
 
     records = _boot_records(args.robot_db, since, until)
     if not records:
