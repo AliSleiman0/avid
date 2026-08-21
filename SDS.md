@@ -189,7 +189,7 @@
 12.4 Crash recovery
 12.5 Data durability guarantees
 12.6 O5, defined precisely enough to grade
-12.6.1 Memory growth is the thing this window is uniquely able to catch — and it is not yet instrumented
+12.6.1 Memory growth is the thing this window is uniquely able to catch
 12.7 Operations
 
 ## 13. Security and Privacy
@@ -3063,7 +3063,7 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
-| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered, and **memory is absent too** — see §11.2 and §12.6.1. |
+| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
 | `GET` | `/state` | Current `RobotState`, `Affect`, session status |
 | `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" |
 | `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8 |
@@ -3416,11 +3416,15 @@ GPU/firmware reservation.
 — no conversation, no proactive turn. It establishes that the working set *fits*; it says nothing
 about the working set *under load*, and nothing at all about growth.
 
-⚠️ **And growth is not instrumented.** `GET /metrics` exposes no resident-set or available-memory
-provider, so `docs/demos/soak_pi.py` has no memory column — see **§12.6.1**. A thirty-day window is
-the only instrument this project has that could find a slow leak, and as things stand it would
-finish without an answer. Tracked as AVID-404, and it must land **before** the window opens: §12.6
-makes a mid-flight build change a split window.
+**Growth is now instrumented (AVID-404), and was not until 2026-08-22.** `GET /metrics` reports
+`rss_bytes` — this process's resident set — and `mem_available_bytes`, the machine's headroom.
+The second is machine-wide on purpose: a leak in a *sibling* process ends the soak just as
+effectively and would never appear in the robot's own RSS. `docs/demos/soak_pi.py` promotes both
+into columns and reports them per window; §12.6.1 has the terms.
+
+⚠️ **Instrumented is not graded, and the numbers above stay a floor.** The soak *reports* growth;
+O5's criteria remain uptime and restarts (§12.6). And 279 MiB is still one idle reading — what the
+window adds is the shape over thirty days, which is the thing no other gate here can produce.
 
 ### Thermal
 
@@ -3526,7 +3530,7 @@ entry leaves this table by being measured or by being decided, not by being forg
 |---|---|---|---|
 | **Session open** | ~1.08 s, first turn only | AVID-157 | The dominant term is a vendor handshake. The only remaining lever is a pre-warmed or pooled connection, which **reopens ADR-007** — the gate exists precisely to avoid holding a socket while nobody speaks. A decision with an ADR-shaped edge, not a fix. |
 | **O1 unmeasured post-AVID-194** | unknown | **AVID-406** | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
-| **No memory metric** | unknown | **AVID-404** | `/metrics` has no RSS or available-memory provider, so the soak has no memory column. **Blocks the soak answering §11.2's open question**, and must land before the window opens. |
+| ~~No memory metric~~ | — | AVID-404 | **Closed 2026-08-22.** `rss_bytes` and `mem_available_bytes` ship, and the soak records both. Kept as a row rather than deleted: it was the one entry here that *blocked* something, and a backlog that silently loses its resolved entries teaches nothing about what it cost to notice. |
 | **FTS5 at 10k facts** | 55.5 of 62.3 ms | §7.7, SPK-3 | Not reachable at this robot's scale, and the obvious optimisation (int8 vectors) targets the half that is already free. |
 | **Acoustic echo cancellation** | half-duplex uplink | AVID-163 | Would remove the AVID-159 energy margin and un-mute the uplink during playback. Real work, not a tuning pass. |
 | **Cold DNS** | ~5.1 s, once per process | AVID-157 | `systemd-resolved` is inactive on this Pi, so nothing caches locally and every process pays a fresh lookup. Non-fatal while the router's cache is warm; it sits in front of the first conversation after a boot. |
@@ -3687,7 +3691,7 @@ For M11's gate (AVID-389) they mean:
 taken only with the diagnosis attached, and the original target stays visible in the report — or it
 quietly becomes whatever was last achieved.
 
-### 12.6.1 Memory growth is the thing this window is uniquely able to catch — and it is not yet instrumented
+### 12.6.1 Memory growth is the thing this window is uniquely able to catch
 
 §2.7.1's RAM figure (279 MiB used, 1.5 GiB available on a 2 GB board) is a **single idle reading**.
 Models here load lazily, so a quiet moment understates the working set, and thirty days of
@@ -3695,17 +3699,33 @@ continuous operation is exactly the window in which a slow leak — an unbounded
 SQLite page cache, an ONNX arena that never returns — becomes visible and nothing shorter would
 show it. On 8 GB that is a curiosity. On 2 GB it is the failure mode.
 
-⚠️ **`GET /metrics` cannot currently answer this.** The registry (§3.12.2) exposes `transitions`,
-`triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd`, `projected_monthly_usd`,
-`cached_ratio`, `build`, `uptime_s` and `bus_queues` — **no resident-set or available-memory
-provider**, so `docs/demos/soak_pi.py` has no memory column to record and the soak would end with
-no answer to the question §2.7.1 raises. Stating that plainly is CLAUDE.md §7.1's rule applied to
-this document: *a summary line describing something the check does not test is a bug report filed
-against nothing.*
+**Instrumented at AVID-404, and it was not until 2026-08-22.** `GET /metrics` reports two numbers,
+both read from procfs by `ProcResources` (`avid/adapters/resources.py`):
 
-**The instrument must land before the window opens, not during it** — the first bullet above makes
-a mid-flight build change a split window, so adding the provider on day nine costs the nine days.
-Tracked separately from #401, which is a correction to this spec and changes no code.
+| metric | what it is | why it is here |
+|---|---|---|
+| `rss_bytes` | this process's resident set, from `/proc/self/statm` | the robot's own footprint |
+| `mem_available_bytes` | the machine's headroom, from `/proc/meminfo` | ⚠️ a leak in a **sibling** process ends the soak just as effectively, and would never appear in the robot's own RSS |
+
+`docs/demos/soak_pi.py` promotes both out of the `/metrics` body into their own columns — the same
+treatment `build`, `uptime_s` and `dropped` already get — and its grade report prints **n, first,
+last, delta, min and max** for each.
+
+⚠️ **Reported, never graded.** O5's criteria are uptime and zero manual restarts, defined above;
+AVID-404 does not amend them and the memory line's verdict is always `recorded`, which cannot move
+the exit code. **A rising delta is not by itself a leak** — lazy model loads, the page cache and
+glibc's arenas all move it — so what a reader is looking for is a trend that never flattens. The
+full per-sample series stays in the `payload` column for anyone who wants to plot it.
+
+⚠️ **Absent is not zero, at both ends.** Off procfs the providers return `None` and the registry
+lists them in `absent`; a robot that never reported memory produces a report saying so, in those
+words, rather than a tidy `0.0 MiB` that looks like a measurement. That is CLAUDE.md §7.1 applied
+to an instrument rather than to prose: *a `0` from an instrument that never ran reads exactly like
+a real zero.*
+
+**It had to land before the window opened, not during it** — the first bullet above makes a
+mid-flight build change a split window, so adding the provider on day nine would have cost nine
+days.
 
 ## 12.7 Operations
 

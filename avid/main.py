@@ -49,6 +49,7 @@ from avid.adapters import (
     OpenAiTextModel,
     Pca9685Servo,
     Picamera2Camera,
+    ProcResources,
     ReplayRealtimeClient,
     SileroVad,
     SqliteBootLog,
@@ -987,6 +988,13 @@ async def _run(config: Config) -> int:
     # loud drops are a tuning signal — and until now "loud" meant one log line per drop, visible
     # while someone watched and invisible over thirty days.
     metrics.register("bus_queues", bus.queue_stats)
+    # The one failure class a thirty-day window can find and a fifteen-minute gate cannot: slow
+    # growth (#404, SDS §12.6.1). Two numbers, because a leak in a SIBLING process ends the soak
+    # just as surely and never appears in our own RSS. Off procfs both return None and land in
+    # the snapshot's `absent`, which is not the same statement as zero.
+    resources = ProcResources()
+    metrics.register("rss_bytes", resources.rss_bytes)
+    metrics.register("mem_available_bytes", resources.mem_available_bytes)
     services = _wire_services(
         bus=bus,
         clock=clock,

@@ -25,6 +25,7 @@ from avid.adapters.realtime import (
     OpenAIRealtimeClient,
     ReplayRealtimeClient,
 )
+from avid.adapters.resources import ProcResources
 from avid.adapters.retrieval import HybridRetriever
 from avid.adapters.servo import FakeServo, Pca9685Servo
 from avid.adapters.speaker import AlsaSpeaker, FakeSpeaker
@@ -74,6 +75,9 @@ __all__ = [
     "SystemdNotifier",
     # Local control API (AVID-40)
     "HealthServer",
+    # Memory readings behind GET /metrics (#404) — no port: the registry takes callables and
+    # MetricsSource is already the Protocol the control API depends on
+    "ProcResources",
     # Embedder (#118/#119) — stdlib fake + the real all-MiniLM-L6-v2 ONNX adapter (Pi-gated)
     "FakeEmbedder",
     "LocalMiniLmEmbedder",
