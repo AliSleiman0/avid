@@ -88,7 +88,7 @@
  3.10.3 State transition table
 3.11 Deployment view
  3.11.1 Development topology (PC)
- 3.11.2 Target topology (Raspberry Pi 5)
+ 3.11.2 Target topology (Raspberry Pi 4B)
  3.11.3 Process/systemd layout
 3.12 Cross-cutting concerns
  3.12.1 Configuration
@@ -264,7 +264,7 @@ Out of scope (for v1): companion mobile application, multi-robot coordination, c
 ## 1.5 References
 
 - OpenAI Realtime API documentation
-- Raspberry Pi 5 datasheet and power requirements
+- Raspberry Pi 4 Model B datasheet and power requirements
 - PCA9685 datasheet (NXP)
 - YuNet face-detection model card (OpenCV Zoo, `face_detection_yunet_2026may`) — ADR-013
 - *Clean Architecture*, Robert C. Martin — for the dependency rule
@@ -331,7 +331,7 @@ That last clause is a hard requirement and it lands in §10.4.
 ┌──────────┐   speech    ┌─────────┴──────────┐   frames    ┌──────────┐
 │          ├────────────►│                    ├────────────►│  3.5"    │
 │   User   │             │   Companion Robot  │             │ Display  │
-│          │◄────────────┤   (Raspberry Pi 5) ├────────────►│  Servo   │
+│          │◄────────────┤  (Raspberry Pi 4B) ├────────────►│  Servo   │
 └────┬─────┘   voice     │                    │   PWM       └──────────┘
      │                   └─────────┬──────────┘
      │  presence / face            │
@@ -345,14 +345,33 @@ Trust boundary: everything except the OpenAI box is local. Audio and, if enabled
 
 ### 2.7.1 Hardware
 
+The board is a **Raspberry Pi 4 Model B Rev 1.5, 2 GB**. See the correction note below this table.
+
 | Constraint | Value | Architectural consequence |
 |---|---|---|
-| CPU | Cortex-A76 ×4 @ 2.4 GHz | Vision must not exceed 1 core; run detection at ≤5 fps, not 30 |
-| RAM | 8 GB | Generous. Not a binding constraint. Do not optimize for it. |
+| CPU | Cortex-A72 ×4 @ 1.5 GHz (BCM2711) | Vision must not exceed 1 core; run detection at ≤5 fps, not 30. The one-core budget was set against a core ~2–3× faster than this one and is **still met** — M8 measured 0.524 cores at 2.99 fps with a person in frame. Read that as headroom already spent, not headroom available. |
+| RAM | 2 GB (1.8 GiB usable after the GPU/firmware reservation) | **Adequate and measured — not generous.** 279 MiB used with the service active and every adapter real (`picamera2`, `framebuffer`, `alsa`, `silero`, `yunet`, `local_minilm`, `sqlite`, `openai`), 1.5 GiB available. That is a floor, not a ceiling: models load lazily and the reading was taken idle. Do not add a second copy of a model without checking, and see §12.6 — growth across thirty days is the case this figure does not cover. |
 | Display | 480×320 | Sprite-based rendering, not vector. Design for pixel grid. |
 | Storage | microSD (A2) | **Binding.** Random write is slow and the card wears out. Batch DB writes, WAL mode, no chatty logging to card. |
 | Servo | 2× SG90/MG90S | **2 DoF** — pan (body turn) and tilt (head). Gesture vocabulary is nod **and** turn. ADR-009 / §3.9.4. See §4.7. |
-| Power | 27 W USB-C | Servo stall current can brown out the Pi. Separate servo rail. See §4.3. |
+| Power | 15 W (5 V / 3 A) | Servo stall current can brown out the Pi. Separate servo rail. See §4.3. **This is ~55% of the headroom the spec assumed**, and the actuator count is going from two to four (#400) — so R-04's brown-out path (severity 5, SD-card corruption) has less margin than any prior text implied. #206 measures it, and must measure it against 15 W with every actuator fitted. |
+
+> **⚠️ Correction, 2026-08-21 — this spec named the wrong computer from M0 until now.**
+> Every version of this table before today read *Cortex-A76 ×4 @ 2.4 GHz*, *8 GB — "generous, not a
+> binding constraint, do not optimize for it"*, and *27 W USB-C*: a Raspberry Pi 5. The rig has
+> always been a Pi 4B. Confirmed on the machine — `cat /proc/device-tree/model` →
+> `Raspberry Pi 4 Model B Rev 1.5`, `free -h` → `1.8Gi` total (#401).
+>
+> **The measurements were never wrong; the attribution was.** Every sealed number in this document
+> and in `docs/demos/` was taken on the real board, so nothing is invalidated and nothing is
+> re-measured. M8's result is *better* than it was recorded as being: a one-core budget set for a
+> Pi 5 was met on a Pi 4.
+>
+> Two of the three corrected rows were wrong **advice**, not wrong labels, which is why the
+> consequence column moved with the values. *"Do not optimize for RAM"* is 8 GB guidance. 27 W is a
+> safety input that was 80% too generous while the load is about to double.
+
+
 
 ### 2.7.2 Cost
 
@@ -1180,7 +1199,7 @@ The absorbing row covers only the user's **own** two edges, deliberately. Both `
 
 Python 3.13, UV-managed venv, all Fake adapters, no hardware, no network required (Realtime client also has a fake that replays recorded sessions). `uv run avid --config config/sim.toml` gives a running robot on your laptop, with `FakeDisplay` writing each frame as a PNG under `[display] frames_dir` in place of a panel (§3.9.2) — the face is a sequence of files you can flip through, not a window.
 
-### 3.11.2 Target topology (Pi 5) — ADR-008
+### 3.11.2 Target topology (Pi 4B) — ADR-008
 
 This is the sharp edge flagged at the top of this document.
 
@@ -1452,7 +1471,7 @@ The Realtime API answers a client event it dislikes with an `error` **frame**, o
 
 This was "Proposed" in §3.3. The numbers in §6.10 promote it to Accepted, and they are not close.
 
-**Mechanism:** Silero VAD, ~1 MB ONNX model, sub-millisecond per 30 ms frame on a Cortex-A76, running on every frame from the `Microphone` port. Zero API cost. Zero extra hardware. It discriminates *speech* from noise — which a loudness threshold cannot do, and which is the whole point: a door slam that opens a billable session is worse than useless.
+**Mechanism:** Silero VAD, ~1 MB ONNX model, sub-millisecond per 30 ms frame on a Cortex-A72, running on every frame from the `Microphone` port. Zero API cost. Zero extra hardware. It discriminates *speech* from noise — which a loudness threshold cannot do, and which is the whole point: a door slam that opens a billable session is worse than useless.
 
 ```
 IDLE:  mic streaming → Silero → not speech → drop frame. Cost: $0.
@@ -1849,7 +1868,7 @@ Reasoning:
 4. **Quality is sufficient.** MTEB ~56 vs ~62 matters for web-scale retrieval over millions of documents. We are retrieving from a few thousand facts about one person, where the discriminative signal is enormous.
 5. **It's ~80–90 MB and 22M params.** Fits the §2.7.1 budget with room to spare.
 
-**Honest caveat:** no published Pi 5 benchmark for MiniLM exists. Extrapolating from Pi 5 ONNX vision workloads, tens of ms per sentence is plausible — *plausible*, not measured. Since embedding happens on fact-write (rare) and session-open (concurrent with connection setup, §6.7), even 200 ms would be acceptable. Low risk, but it is an estimate and is labelled as one.
+**Honest caveat — and the estimate was wrong twice over.** This paragraph originally read *"no published Pi 5 benchmark for MiniLM exists; extrapolating from Pi 5 ONNX vision workloads, tens of ms per sentence is plausible."* It was extrapolated from the wrong board (§2.7.1, #401) **and it was optimistic**. The one hard figure this rig has produced is **340 ms per embed at one intra-op thread** — an order of magnitude past "tens of ms", and the reason `LocalMiniLmEmbedder` ships with `intra_op_num_threads = 2` while `SileroVad` ships with 1 (the thread count does not generalise between ONNX adapters; a third one must sweep it on the Pi rather than copy either). The shipped 2-thread figure is **not recorded here on purpose**: no measurement of it exists in this repo, and inventing one is the failure mode §14.9 and CLAUDE.md §7.1 exist to prevent. The adapter logs its own per-embed latency (see the implementation note below), so the number arrives from a run rather than from this paragraph. The tolerance argument is unchanged and survives the correction: embedding happens on fact-write (rare) and session-open (concurrent with connection setup, §6.7), so even the 340 ms worst case is absorbed.
 
 Both OpenAI v3 models support Matryoshka truncation — a 256-dim 3-large vector still beats a full 1536-dim ada-002. If we fall back to the API, truncate to 512 and keep §7.7 fast.
 
@@ -3329,6 +3348,26 @@ For M11's gate (AVID-389) they mean:
 taken only with the diagnosis attached, and the original target stays visible in the report — or it
 quietly becomes whatever was last achieved.
 
+### 12.6.1 Memory growth is the thing this window is uniquely able to catch — and it is not yet instrumented
+
+§2.7.1's RAM figure (279 MiB used, 1.5 GiB available on a 2 GB board) is a **single idle reading**.
+Models here load lazily, so a quiet moment understates the working set, and thirty days of
+continuous operation is exactly the window in which a slow leak — an unbounded deque, a growing
+SQLite page cache, an ONNX arena that never returns — becomes visible and nothing shorter would
+show it. On 8 GB that is a curiosity. On 2 GB it is the failure mode.
+
+⚠️ **`GET /metrics` cannot currently answer this.** The registry (§3.12.2) exposes `transitions`,
+`triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd`, `projected_monthly_usd`,
+`cached_ratio`, `build`, `uptime_s` and `bus_queues` — **no resident-set or available-memory
+provider**, so `docs/demos/soak_pi.py` has no memory column to record and the soak would end with
+no answer to the question §2.7.1 raises. Stating that plainly is CLAUDE.md §7.1's rule applied to
+this document: *a summary line describing something the check does not test is a bug report filed
+against nothing.*
+
+**The instrument must land before the window opens, not during it** — the first bullet above makes
+a mid-flight build change a split window, so adding the provider on day nine costs the nine days.
+Tracked separately from #401, which is a correction to this spec and changes no code.
+
 ## 12.7 Operations
 
 The design document stops at the boundary of *what the system is*. **What to do when it
@@ -3609,4 +3648,4 @@ Step 10 is not ceremony. PMP §9.3 puts R-03 — motivation decay — at the top
 
 ---
 
-*Sections 4, 5, 11–13, 15, 16 to follow. Next drafting priority: §4 (Hardware Design) once the board arrives — the BOM has moved (Pi 5 4GB, USB mic, MAX98357A) and §4.3's power budget is SPK-4's input; and §11 (Performance Engineering), which formalises the latency budget §2.8.1 currently carries alone.*
+*Sections 4, 5, 11–13, 15, 16 to follow. Next drafting priority: §4 (Hardware Design) once the board arrives — the BOM has moved (Pi 4B 2GB, USB mic, MAX98357A) and §4.3's power budget is SPK-4's input; and §11 (Performance Engineering), which formalises the latency budget §2.8.1 currently carries alone.*
