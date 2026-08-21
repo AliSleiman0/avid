@@ -12,9 +12,45 @@ succeed with a wrong answer.
 
 ## 0. The connection
 
+**Use Tailscale. The address moves; the tailnet name does not.**
+
 ```sh
-ssh alisleiman0@AVID          # passwordless sudo; /opt/avid owned by alisleiman0
+ssh alisleiman0@avid-pico     # or 100.127.197.112 — passwordless sudo, /opt/avid owned by alisleiman0
+curl http://avid-pico:8787/metrics
 ```
+
+Installed 2026-08-21 (`avid-pico` on the `alisleiman0.github` tailnet). It is a private WireGuard
+mesh: the Pi gains **no public surface**, so §9.5's *"localhost binding is the authentication"*
+still holds — the control API stays on `127.0.0.1` and you reach it from inside the tunnel.
+
+⚠️ **This exists because the address moved three times in one evening.** The Pi was unreachable on
+one subnet, then answered on `172.20.10.x`, then on `192.168.10.172` mid-install. Every "where is
+the Pi" detour in this document's history is the same problem. Put Tailscale on the phone too —
+that is the one that matters when the robot is soaking for a month and you are not home.
+
+### ⚠️ `ssh AVID` can fail while `ping AVID` succeeds
+
+Observed 2026-08-21:
+
+```
+$ ping AVID          -> replies (resolved via mDNS to a link-local IPv6)
+$ ssh alisleiman0@AVID
+ssh: Could not resolve hostname avid: Name or service not known
+```
+
+`ssh` lower-cases the host and takes a different resolution path than `ping`. **`AVID.local`
+works** when bare `AVID` does not. Tailscale sidesteps the whole class — but when the tunnel is
+down, reach for `AVID.local` before concluding the Pi is dead.
+
+### ✅ CORRECTED 2026-08-21 — the Pi CAN fetch from GitHub now
+
+This section used to say *"the Pi cannot fetch from GitHub — push to it, don't pull from it."*
+That is **no longer true**: `credential.helper = store` is configured, and a plain
+`git pull --ff-only` in `/opt/avid` fetched 35 commits cleanly. Pulling is now the simpler deploy.
+
+⚠️ **The trade-off, stated because it matters for a product:** `credential.helper = store` keeps a
+GitHub token in **plaintext** on the device. Acceptable on the owner's own bench machine; it must
+never ship on a sold unit (see M12/#402).
 
 `uv` is at `~/.local/bin/uv` — **not** on a non-login `PATH`. Same for `i2cdetect` (`/usr/sbin`).
 Call them by full path or prepend the PATH; do not conclude a tool "isn't installed" because a
@@ -164,6 +200,62 @@ is a **provisioning-time** act, not a repo default — `tests/e2e/test_supervisi
 app from that file on Linux CI, where `/dev/fb0` doesn't exist.
 
 ---
+
+### ⚠️ Syncing the Pi to `main` will REFUSE TO START on the #200 schema — and that is correct
+
+Done for real 2026-08-21 (`cc89217` → `9e8b05a`). The live `/etc/robot/config.toml` still carried
+the pre-#200 flat one-axis servo, so the app failed loudly instead of silently running one axis:
+
+```
+servo.channel   Extra inputs are not permitted
+servo.name      Extra inputs are not permitted
+motion.axes     Extra inputs are not permitted
+```
+
+**Do not fix this by copying `config/pi.toml` over the live file.** The live file also carries the
+provisioning flips that exist nowhere else — `realtime=openai`, `alsa`, `silero`, `yunet`,
+`local_minilm`, `sqlite` — and the repo template ships `realtime = "replay"`. A wholesale copy
+gives you a robot that starts and does nothing real, which is the M4 failure.
+
+**Splice the two stale sections from the freshly-pulled template instead**, so there is no
+retyping and nothing else is touched:
+
+```python
+# /tmp/fix_config.py — run with sudo. Idempotent: no-ops if [[servo.axes]] already present.
+tmpl = open("/opt/avid/config/pi.toml").read()
+live = open("/etc/robot/config.toml").read()
+def span(t, a, b):
+    i = t.index(a); return i, t.index(b, i)
+ti, tj = span(tmpl, "
+[motion]", "
+[microphone]")
+li, lj = span(live, "
+[motion]", "
+[microphone]")
+new = live[:li] + tmpl[ti:tj] + live[lj:]
+assert 'realtime   = "openai"' in new          # assert the flips survived; do not hope
+open("/etc/robot/config.toml", "w").write(new)
+```
+
+Then **validate with the loader, never by eye** — this is the rule this whole document exists for:
+
+```sh
+sudo /opt/avid/.venv/bin/python -c "
+from avid.core.config import load_config
+c = load_config('/etc/robot/config.toml')
+print(c.adapters.realtime, [(a.name, a.channel) for a in c.servo.axes])"
+```
+
+**Back up first**, both of them — the DB because a new migration will run against it, the config
+because it is the only copy of the flips:
+
+```sh
+sudo python3 -c "import sqlite3;s=sqlite3.connect('file:/var/lib/robot/robot.db?mode=ro',uri=True);d=sqlite3.connect('/var/backups/robot/pre.db');s.backup(d)"
+sudo cp /etc/robot/config.toml /var/backups/robot/
+```
+
+⚠️ There is **no `sqlite3` CLI** on this machine. Use Python's `sqlite3` — its `.backup()` is the
+correct online-backup path anyway, consistent even with the service running.
 
 ## 4. Watching the panel live from the laptop
 
