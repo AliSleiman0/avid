@@ -3530,7 +3530,8 @@ entry leaves this table by being measured or by being decided, not by being forg
 |---|---|---|---|
 | **Session open** | ~1.08 s, first turn only | AVID-157 | The dominant term is a vendor handshake. The only remaining lever is a pre-warmed or pooled connection, which **reopens ADR-007** — the gate exists precisely to avoid holding a socket while nobody speaks. A decision with an ADR-shaped edge, not a fix. |
 | **O1 unmeasured post-AVID-194** | unknown | **AVID-406** | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
-| ~~No memory metric~~ | — | AVID-404 | **Closed 2026-08-22.** `rss_bytes` and `mem_available_bytes` ship, and the soak records both. Kept as a row rather than deleted: it was the one entry here that *blocked* something, and a backlog that silently loses its resolved entries teaches nothing about what it cost to notice. |
+| ~~No memory metric~~ | — | AVID-404 | **Closed 2026-08-22**, verified on the Pi. `rss_bytes` and `mem_available_bytes` ship and the soak records both. Kept rather than deleted: a backlog that silently loses its resolved entries teaches nothing about what it cost to notice. |
+| **`build` cannot distinguish two commits** | blocks #389 | **AVID-388** | ⚠️ `version = "0.0.0"` for every commit, so §12.6's build-change guard **can never fail**. Not a slow path — an *inert check* in the gate that decides `v1.0.0`, and the only entry here that blocks the clock. |
 | **FTS5 at 10k facts** | 55.5 of 62.3 ms | §7.7, SPK-3 | Not reachable at this robot's scale, and the obvious optimisation (int8 vectors) targets the half that is already free. |
 | **Acoustic echo cancellation** | half-duplex uplink | AVID-163 | Would remove the AVID-159 energy margin and un-mute the uplink during playback. Real work, not a tuning pass. |
 | **Cold DNS** | ~5.1 s, once per process | AVID-157 | `systemd-resolved` is inactive on this Pi, so nothing caches locally and every process pays a fresh lookup. Non-fatal while the router's cache is warm; it sits in front of the first conversation after a boot. |
@@ -3670,6 +3671,17 @@ For M11's gate (AVID-389) they mean:
   the window opens to the window's close. A window whose build identifier changes mid-flight
   (AVID-373) is **not graded as one window**; it is reported as two, or as a failure to hold the
   variable still.
+
+  > ⚠️ **This rule is normative and its mechanism is currently inert. Do not open a window until
+  > AVID-388 lands.** `build` comes from `avid.__version__`, which is `version = "0.0.0"` in
+  > `pyproject.toml` — **the same string for every commit** (§3.12.2, and `core/banner.py` says so
+  > in its own comment). Verified on the Pi, 2026-08-22: `GET /metrics` reported `0.0.0` before and
+  > after a deploy that moved HEAD five commits. `soak_pi.py`'s criterion is
+  > `pass if len({builds}) <= 1`, so with a constant string it **can never fail** — delete the
+  > check and no report changes, which is the test AVID-264 taught. Thirty days is long enough that
+  > somebody deploys mid-window, and the guard would wave it through while the figures describe two
+  > robots averaged together. **AVID-388 is what makes `build` a real identifier**, which is why it
+  > blocks the clock rather than being written alongside it.
 - **Numerator** — seconds in which the robot process was up. **A SLEEPING robot is UP.** SLEEPING
   is an operational state the design intends (§3.10, M8's nap), not an absence; grading it as
   downtime would penalise the feature.
@@ -3723,9 +3735,15 @@ words, rather than a tidy `0.0 MiB` that looks like a measurement. That is CLAUD
 to an instrument rather than to prose: *a `0` from an instrument that never ran reads exactly like
 a real zero.*
 
-**It had to land before the window opened, not during it** — the first bullet above makes a
-mid-flight build change a split window, so adding the provider on day nine would have cost nine
-days.
+**It had to land before the window opened, not during it** — a window whose first half holds no
+memory readings is not a window with memory data, and unlike most of what `/metrics` carries this
+cannot be recovered afterwards from the stored `payload`.
+
+⚠️ **A correction, 2026-08-22, to what this section said when it was written.** It originally
+argued the urgency differently: that §12.6's first bullet *"makes a mid-flight build change a split
+window, so adding the provider on day nine costs the nine days."* **That mechanism does not
+currently fire** — see the warning under §12.6's build bullet. The conclusion stands on the plainer
+reason above; the argument for it was wrong and is corrected rather than quietly restated.
 
 ## 12.7 Operations
 
