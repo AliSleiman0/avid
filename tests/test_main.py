@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -796,7 +797,9 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         await asyncio.wait_for(task, timeout=1.0)
 
 
-def test_the_build_metric_does_not_reshell_on_every_scrape() -> None:
+def test_the_build_metric_does_not_reshell_on_every_scrape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """⚠️ P8. The soak scrapes `/metrics` every 60 s for thirty days (#388).
 
     `build` used to be registered as ``lambda: describe_runtime(...)["build"]`` — a call, not a
@@ -804,18 +807,26 @@ def test_the_build_metric_does_not_reshell_on_every_scrape() -> None:
     bug into **43,200 subprocess spawns inline on the event loop**, which is the kind of
     self-inflicted P8 violation this project has shipped before.
 
-    The provider must close over the resolved *string*. Identity across scrapes is the cheapest
-    assertion that proves it: a re-deriving provider would return an equal-but-distinct object.
+    The provider must close over the resolved *string*.
+
+    ⚠️ **Identity across scrapes was the first assertion here and it did not bite.** CPython interns
+    short strings, so a deliberately re-deriving provider returned the same object and the test
+    stayed green — a test passing while the property it named was violated, which is the failure
+    this project keeps paying for. Replaced with one that cannot be fooled: resolve first, then
+    break ``subprocess.run``, then scrape. Anything that shells out now fails loudly.
     """
-    build = resolve_build_id(
-        package_dir=Path(avid_main.__file__).resolve().parent, fallback=__version__
-    )
+    package_dir = Path(avid_main.__file__).resolve().parent
+    build = resolve_build_id(package_dir=package_dir, fallback=__version__)
     registry = MetricsRegistry()
     registry.register("build", lambda: build)
 
-    first = registry.snapshot()["metrics"]["build"]
+    def _exploding_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the build provider shelled out on a /metrics scrape")
+
+    # monkeypatch, not unittest.mock — banned outside tests/adapters/ (SDS §14.3).
+    monkeypatch.setattr(subprocess, "run", _exploding_run)
     for _ in range(50):
-        assert registry.snapshot()["metrics"]["build"] is first, (
+        assert registry.snapshot()["metrics"]["build"] == build, (
             "the build provider re-derived its value — over a 30-day soak that is tens of "
             "thousands of subprocess spawns on the event loop"
         )
