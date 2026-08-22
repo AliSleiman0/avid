@@ -565,6 +565,10 @@ Yes, PRs, even solo. The PR is not a review gate — it's the CI gate and the wr
 
 SemVer. Tag at each milestone: `v0.M<n>.0`. `v1.0.0` at M11 gate. Release notes auto-generated from Conventional Commits. Each tag builds a Pi-deployable artifact — so every milestone is a thing that exists, permanently, that you can go back and run. See R-03.
 
+⚠️ **That last sentence was false for nine tags** (`v0.M0.0` … `v0.M10.0`): none of the automation existed, and R-03's stated mitigation was a trail with nothing on it. Built in AVID-388 — `.github/workflows/release.yml` (build → verify → publish, where publish *depends* on verify because an artifact nobody has installed is a tarball, not a release) and `docs/RELEASE.md`, which defines what "Pi-deployable" means here and why. **The trail starts at the first tag the workflow builds; earlier tags stay source-only**, because an artifact built today from an old tree and labelled as that milestone would be a fabrication of a build that never happened, and a trail you cannot trust entry-by-entry is worse than an honest gap.
+
+⚠️ And a smaller correction this turned up: §11.2 says Conventional Commits are *"enforced by `commitlint` in CI"*. **There is no such job** — `ci.yml` runs lint, test and async-debug. The convention is a habit, kept perfectly so far (0 non-conforming subjects in the 53 commits since `v0.M10.0`), and the notes generator therefore **reports what it cannot classify** rather than dropping it, so the day the habit slips the notes say so.
+
 ---
 
 # 12. Development Process

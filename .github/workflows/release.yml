@@ -1,0 +1,216 @@
+name: Release
+
+# AVID-388. PMP §11.4 has always said "each tag builds a Pi-deployable artifact — so every
+# milestone is a thing that exists, permanently, that you can go back and run", and nine tags
+# (v0.M0.0 … v0.M10.0) went by with nothing behind any of them. That clause was false, and it is
+# the stated mitigation for R-03 — motivation decay, the highest-scored risk in the register.
+#
+# The shape here is deliberate; each choice is a decision, not a default:
+#
+#   1. BUILD -> VERIFY -> PUBLISH, three jobs chained with `needs:`. Publish cannot run unless
+#      verify passed. An artifact nobody has installed is a tarball, not a release (AC-3), and a
+#      pipeline that published first and checked afterwards would be a gate that passes on
+#      silence — the failure mode this project names most often.
+#   2. Verification installs the wheel on **3.11**, ADR-008's floor and the interpreter the Pi
+#      actually runs. Proving it on 3.13 would prove the wrong thing.
+#   3. **No third-party actions at all.** Only `actions/*` and `astral-sh/setup-uv`, both already
+#      trusted by `ci.yml`, and `gh` (preinstalled) to cut the release — so there is no
+#      release-signing action to pin, review or trust. A release pipeline is the one place a
+#      supply-chain compromise reaches an artifact people trust (SDS §13.6).
+#   4. `permissions: contents: write` on the publish job ONLY, and no secret anywhere:
+#      `github.token` is the whole of the credential story (AC-4).
+#   5. The version is stamped at BUILD TIME and `pyproject.toml` keeps `version = "0.0.0"` in the
+#      tree. Not laziness — see `avid/adapters/build_id.py`: the Pi runs an editable checkout and
+#      updates with `git pull`, so a committed version would be frozen at install and would still
+#      have read `0.0.0` after the five-commit pull that exposed all this. The runtime identifier
+#      stays `git describe`; only the artifact carries the tag.
+#      `tests/deploy/test_release_workflow.py` asserts the stamp step still exists, because
+#      deleting it would silently ship every wheel called 0.0.0 again.
+#   6. The canonical version is read back off the **built wheel's filename**, not re-derived from
+#      the tag. PEP 440 normalises `v1.0.0-rc.1` to `1.0.0rc1`, and a check comparing against the
+#      un-normalised string would fail on exactly the pre-release tags AC-6 asks us to dry-run.
+#
+# CI runs under a billing ceiling (see `ci.yml`'s header). This fires on tags only — a handful of
+# runs a year — so it is the cheapest workflow here and still the one that matters most on the
+# day it is needed.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # AC-6: the whole path is dry-runnable without minting a tag, so it can be proven BEFORE the
+  # gate needs it rather than discovered on tag day. A dispatch run builds and verifies, then
+  # stops — `publish` is gated on the ref actually being a tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build as, for a dry run. Must be PEP 440-valid after the leading v."
+        required: true
+        default: "v0.0.0-rc.1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.built.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The notes generator and `git describe` both need history and tags. The default
+          # shallow fetch would leave the generator with nothing to generate from.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Resolve the tag being built
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "building $TAG"
+
+      - name: Stamp the version into the build
+        id: stamp
+        # Ephemeral: this edit is never committed. The tree keeps 0.0.0 on purpose (header, #5).
+        run: |
+          python3 - "${{ steps.resolve.outputs.tag }}" <<'PY'
+          import re, sys
+          version = sys.argv[1].lstrip("v")
+          text = open("pyproject.toml", encoding="utf-8").read()
+          stamped, count = re.subn(
+              r'^version = "0\.0\.0"$', f'version = "{version}"', text, count=1, flags=re.M
+          )
+          if count != 1:
+              raise SystemExit(
+                  'pyproject.toml no longer carries version = "0.0.0"; see this workflow header'
+              )
+          open("pyproject.toml", "w", encoding="utf-8", newline="\n").write(stamped)
+          print(f"stamped {version}")
+          PY
+
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Read the canonical version back off the wheel
+        id: built
+        run: |
+          WHEEL=$(ls dist/avid-*.whl)
+          VERSION=$(basename "$WHEEL" | cut -d- -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "built $WHEEL -> $VERSION"
+
+      - name: Assemble and verify the Pi bundle
+        run: |
+          python3 tools/build_release.py \
+            --tag "${{ steps.resolve.outputs.tag }}" \
+            --commit "${GITHUB_SHA}" \
+            --describe "$(git describe --always --dirty --tags)" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Generate the release notes
+        run: |
+          python3 tools/release_notes.py \
+            --tag "${{ steps.resolve.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --out dist/RELEASE_NOTES.md
+          cat dist/RELEASE_NOTES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+          retention-days: 7
+
+  # AC-3. The artifact is installed and imported on the interpreter the Pi runs, from the built
+  # wheel and nothing else — no checkout on the path, so an accidental dependency on the source
+  # tree fails here rather than on the robot.
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+      - uses: astral-sh/setup-uv@v8.3.2
+
+      - name: Install the wheel into a clean 3.11 environment
+        # `uv pip install --python <interpreter>` is the same install path PI_OPERATIONS.md §2
+        # prescribes on the Pi, for the same reason: it targets an interpreter rather than
+        # rebuilding an environment underneath you.
+        run: |
+          uv venv --python 3.11 /tmp/verify
+          uv pip install --python /tmp/verify/bin/python dist/avid-*.whl
+
+      - name: Import it, and check it knows which release it is
+        run: |
+          cd /tmp
+          /tmp/verify/bin/python - "${{ needs.build.outputs.version }}" <<'PY'
+          import sys
+
+          import avid
+          import avid.main  # noqa: F401  the composition root must import from the wheel alone
+
+          expected = sys.argv[1]
+          print(f"avid.__version__ = {avid.__version__}")
+          if avid.__version__ != expected:
+              raise SystemExit(
+                  f"the wheel reports {avid.__version__}, not {expected}; the stamp did not take"
+              )
+          PY
+
+      - name: The console script resolves
+        run: /tmp/verify/bin/avid --help > /dev/null
+
+      - name: The bundle is intact, re-checked from the downloaded artifact
+        run: |
+          BUNDLE="dist/avid-${{ needs.build.outputs.tag }}-pi.tar.gz"
+          tar -tzf "$BUNDLE"
+          for member in deploy/robot.service deploy/RUNBOOK.md config/pi.toml BUILD_INFO; do
+            tar -tzf "$BUNDLE" | grep -qx "avid-${{ needs.build.outputs.tag }}/$member" \
+              || { echo "::error::$member is missing from the bundle"; exit 1; }
+          done
+
+  publish:
+    needs: [build, verify]
+    # A dry run stops here: it has built and verified, which is the whole point of AC-6, and it
+    # must not create a release for a tag that does not exist.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          # A tag containing a hyphen is a pre-release by SemVer (v1.0.0-rc.1); a milestone tag
+          # is not. Derived, so nobody has to remember to tick a box.
+          case "$TAG" in
+            *-*) PRERELEASE=--prerelease ;;
+            *)   PRERELEASE= ;;
+          esac
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file dist/RELEASE_NOTES.md \
+            $PRERELEASE \
+            dist/avid-*.whl dist/avid-*.tar.gz
