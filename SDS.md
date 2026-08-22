@@ -3065,13 +3065,13 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 |---|---|---|
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
 | `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`. ⚠️ **`build` is the deployed commit, not the release line** (AVID-388): `git describe --always --dirty --tags`, falling back to `avid.__version__` off a checkout. `-dirty` means the machine has been edited. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
-| `GET` | `/state` | Current `RobotState`, `Affect`, session status. ⚠️ **Not built** — AVID-385. |
+| `GET` | `/state` | Current `RobotState`, `Affect`, session status — **three independent readings** (§3.10: the two are orthogonal, so neither is derived from the other), plus an `absent` list. Built at AVID-385. |
 | `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" ⚠️ **Not built** — AVID-386; the audit is currently a *spoken* query answered from memory, not an endpoint (§13.4). |
 | `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8. ⚠️ **Not built** — AVID-386. |
 | `POST` | `/quiet` | `{duration_s}` — §10.4's manual override, also reachable via `set_quiet` tool |
-| `GET` | `/events/stream` | **SSE tap. Live event feed.** ⚠️ **Not built** — AVID-385. |
+| `GET` | `/events/stream` | **SSE tap. Live event feed.** Built at AVID-385. ⚠️ One subscription **per concrete event type** — dispatch is by exact runtime type with no subclass fan-out (§9.1.5) and subscription is static (§3.5.2), so a wildcard tap is structurally impossible and "ten lines" below was wrong. Per-client bounded queue, `DROP_OLDEST`, and the client is **told** what it missed. |
 
-⚠️ **As built, this server answers exactly `/health`, `/metrics` and `POST /quiet`** (`avid/adapters/health.py`; unknown paths 404, a known path with the wrong method 405). The rows marked above describe the design, not the machine — the distinction this document has paid for elsewhere as F-9, and one `tests/docs/` now holds in place for the security documents (§13.7) and the runbook alike.
+⚠️ **As built, this server answers `/health`, `/metrics`, `/state`, `/events/stream` and `POST /quiet`** (`avid/adapters/health.py`; unknown paths 404, a known path with the wrong method 405). Only the two `/facts` rows remain design rather than machine (AVID-386) — the distinction this document has paid for elsewhere as F-9, and one `tests/docs/` now holds in place for the security documents (§13.7) and the runbook alike, in both directions.
 
 `/events/stream` deserves its place. §3.5.1 admits you can't read the code and know what happens. Correlation IDs let you reconstruct a turn *afterwards*, from logs. This lets you watch it happen, live, while you talk to the robot:
 
@@ -3910,10 +3910,16 @@ routable address would be a security bug, and it is not merely documented — `A
 validator rejects any non-loopback `bind` **at config load**, so the whole process refuses to
 start misconfigured, and `LocalHealthServer.__init__` asserts it again as defence in depth.
 
-⚠️ **As built the server answers `/health`, `/metrics` and `POST /quiet`.** §9.5's table also
-describes `/state`, `/facts` and `/events/stream`; those are **not implemented** (AVID-385,
-AVID-386). §7.10's audit — *"what do you know about me?"* — is therefore a **spoken query answered
-from memory**, not an endpoint anyone can curl.
+⚠️ **As built the server answers `/health`, `/metrics`, `/state`, `/events/stream` and
+`POST /quiet`** (AVID-385).
+
+⚠️ §9.5's table also describes `/facts`, and that one is **not implemented** (AVID-386) — so
+§7.10's audit, *"what do you know about me?"*, is still a **spoken query answered from memory**
+rather than an endpoint anyone can curl.
+
+`/events/stream` is a read-only tap on the internal bus and it carries **event names, sources and
+correlation ids, never payloads** — deliberately, because a tap that reproduced every event's
+contents would put transcripts and fact text down a socket in order to help debug something else.
 
 **What actually leaves this device**, exhaustively:
 

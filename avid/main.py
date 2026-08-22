@@ -60,6 +60,7 @@ from avid.adapters import (
     SystemdNotifier,
 )
 from avid.adapters.build_id import resolve_build_id
+from avid.adapters.event_tap import EventTap
 from avid.core import lifecycle
 from avid.core.banner import describe_runtime, format_banner
 from avid.core.config import Config, load_config
@@ -88,6 +89,7 @@ from avid.core.ports import (
     VoiceActivityDetector,
 )
 from avid.core.state_manager import StateManager
+from avid.core.state_report import StateReport
 from avid.domain import PolicyLimits, ScoreWeights
 from avid.domain.vision import PresenceParams
 from avid.services import (
@@ -683,6 +685,11 @@ def _wire_services(
     # arguments they already pass — a metrics registry is an observer of the wiring, not a part of
     # it, and a test asserting the subscriber graph should not have to know one exists.
     metrics: MetricsRegistry | None = None,
+    # §9.5's GET /state and GET /events/stream (#385). Optional for exactly the same reason as
+    # `metrics` above: both are observers of the wiring rather than parts of it, and a test
+    # asserting the subscriber graph should not have to know either exists.
+    tap: EventTap | None = None,
+    state_report: StateReport | None = None,
 ) -> Sequence[Service]:
     """Construct the services, register what they *declared*, return the ones with an owned task.
 
@@ -907,6 +914,27 @@ def _wire_services(
                 policy=sub.policy,
                 maxsize=sub.maxsize,
             )
+    # The SSE tap (#385) declares its subscriptions the same way a service does, and is registered
+    # in the same place and for the same reason — subscription is static (SDS §3.5.2), so a tap
+    # cannot subscribe when a `curl` arrives. It is not a service: it owns no task, hears
+    # everything rather than something, and the lifecycle has nothing to start or stop on it.
+    #
+    # ⚠️ One subscription per concrete event type, because dispatch is by EXACT runtime type with
+    # no subclass fan-out (§9.1.5). That is what makes §9.5's "ten lines of code" estimate wrong,
+    # and the decision it is wrong about is the right one: a subscriber graph you can enumerate.
+    if tap is not None:
+        for sub in tap.subscriptions():
+            bus.subscribe(
+                sub.event_type,
+                sub.handler,
+                name=sub.name,
+                policy=sub.policy,
+                maxsize=sub.maxsize,
+            )
+    # The other two /state fields, registered by the code that owns their sources (#385).
+    if state_report is not None:
+        state_report.register("affect", lambda: affect.affect)
+        state_report.register("session", lambda: conversation.session_open)
     # The services that own tasks need lifecycle management: MemoryService's boot rebuild + store close,
     # AudioService's mic loop, ConversationService's per-session pump/mic/idle, EpisodeRecorder's prune
     # loop + store close, MotionService's in-flight gesture. Memory is started first so the index is
@@ -1000,6 +1028,16 @@ async def _run(config: Config, *, build: str) -> int:
     resources = ProcResources()
     metrics.register("rss_bytes", resources.rss_bytes)
     metrics.register("mem_available_bytes", resources.mem_available_bytes)
+    # §9.5's GET /state (#385). `state` is registered HERE because the composition root is what
+    # holds the StateManager; `affect` and `session` are registered inside `_wire_services`, by
+    # the code that builds those services. Three fields, three registrars — which is what makes
+    # §3.10's orthogonality structural rather than a promise: no caller supplies two of them, so
+    # no caller can derive one from another.
+    state_report = StateReport()
+    state_report.register("state", lambda: state.state)
+    # The SSE tap. Subscribed to every event type inside `_wire_services`, below, because
+    # subscription is static and must happen before `bus.start()` (SDS §3.5.2).
+    tap = EventTap()
     services = _wire_services(
         bus=bus,
         clock=clock,
@@ -1023,6 +1061,8 @@ async def _run(config: Config, *, build: str) -> int:
         config=config,
         adapter_health=adapter_health,
         metrics=metrics,
+        tap=tap,
+        state_report=state_report,
     )
     # The control API is built *after* the services, and that ordering is #244's: §9.5's
     # POST /quiet sets the same state the `set_quiet` tool does, through the same
@@ -1037,11 +1077,17 @@ async def _run(config: Config, *, build: str) -> int:
     # ⚠️ Every provider is a cheap in-memory read (P8): a snapshot runs inline on the loop while
     # the robot may be mid-turn. HISTORICAL uptime is deliberately absent — that is the soak
     # grader's SQL over `boot_log` (#383), not a query behind an HTTP GET.
+    # §9.5's GET /state (#385). Three INDEPENDENT readings, assembled here because only the
+    # composition root holds all three sources (P3) — and independent because SDS §3.10 makes
+    # RobotState and Affect orthogonal. A provider that read both off one object would couple them
+    # at the reporting layer, where the error would look like a fact.
     health = HealthServer(
         bind=config.api.bind,
         port=config.api.port,
         behavior=next(s for s in services if isinstance(s, BehaviorService)),
         metrics=ProvidedMetrics(metrics),
+        state=state_report,
+        tap=tap,
     )
     return await lifecycle.run(
         bus=bus,

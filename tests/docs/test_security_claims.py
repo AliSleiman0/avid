@@ -113,6 +113,33 @@ def _served_routes() -> set[str]:
     return routes
 
 
+def _paragraphs(text: str) -> list[str]:
+    """The document split into *claim blocks*: paragraphs, then bullets and table rows.
+
+    ⚠️ Scoped, rather than document-wide, because of a defect this guard had until AVID-385
+    shipped: it asked whether "not implemented" appeared **anywhere** in the file. That was right
+    only while `/state`, `/facts` and `/events/stream` were all unbuilt *together*. The moment two
+    of them shipped and one did not, the surviving sentence about `/facts` made the check insist
+    the documents still called `/state` unbuilt. A guard that can only be right while nothing
+    changes is not a guard.
+
+    A bullet is the unit rather than a paragraph for the same reason one step further in: these
+    routes are described as adjacent bullets in one list, which is a single paragraph, so
+    paragraph scope re-created the bug at a smaller size. Continuation lines stay with their
+    bullet; a table row is its own claim.
+    """
+    blocks: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        if not paragraph.strip():
+            continue
+        blocks.extend(
+            block
+            for block in re.split(r"\n(?=\s*(?:[-*]\s|\|))", paragraph)
+            if block.strip()
+        )
+    return blocks
+
+
 def test_routes_are_described_as_they_are_actually_served() -> None:
     """In both directions, like the runbook's guard (`tests/docs/test_runbook.py`).
 
@@ -123,14 +150,16 @@ def test_routes_are_described_as_they_are_actually_served() -> None:
     served = _served_routes()
     for route in ("/state", "/facts", "/events/stream"):
         for name, text in _DOCS.items():
-            if route not in text:
+            blocks = [block for block in _paragraphs(text) if route in block]
+            if not blocks:
                 continue
+            says_unbuilt = any("not implemented" in block for block in blocks)
             if route in served:
-                assert "not implemented" not in text, (
+                assert not says_unbuilt, (
                     f"{route} is now served, but {name} still calls it not implemented"
                 )
             else:
-                assert "not implemented" in text, (
+                assert says_unbuilt, (
                     f"{name} mentions {route} without saying it is not implemented"
                 )
     for route in sorted(served):

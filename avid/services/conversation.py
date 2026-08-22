@@ -336,6 +336,18 @@ class ConversationService:
         # Best-effort cue tasks, swept on stop().
         self._cue_tasks: set[asyncio.Task[None]] = set()
 
+    @property
+    def session_open(self) -> bool:
+        """Whether a Realtime session is currently live — §9.5's "session status" (#385).
+
+        Read-only and read-freely: the flag is owned by this service and moved only by the
+        ensure/teardown paths below. Exposed because ``GET /state`` reports it and the alternative
+        was for the control API to infer a session from ``RobotState``, which would be false in
+        both directions — DEGRADED holds no session while still transitioning, and a session
+        outlives the turn that opened it by ``[gate] session_idle_close_s``.
+        """
+        return self._session_open
+
     # --- SDS §9.2 service shape ----------------------------------------------------------
 
     async def start(self) -> None:

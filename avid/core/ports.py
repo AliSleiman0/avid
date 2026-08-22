@@ -1279,3 +1279,27 @@ class MetricsSource(Protocol):
         ⚠️ The second half is the point: an instrument that is absent must not report ``0``,
         because a `0` from an unwired counter reads exactly like a real one."""
         ...
+
+
+@runtime_checkable
+class StateSource(Protocol):
+    """What ``GET /state`` needs, and nothing more (#385, SDS §9.5, §3.10).
+
+    A sibling of :class:`MetricsSource`, and for the same reason: the control API's job is to
+    serialise a reading, not to know what a robot state *is*. The composition root decides what is
+    in the mapping (P3); ``HealthServer`` depends only on this, never on ``StateManager`` or on a
+    service.
+
+    ⚠️ **Synchronous and cheap, like ``MetricsSource``** — read inline on the event loop while the
+    robot may be mid-turn (P8). Every value behind it is an attribute read.
+
+    ⚠️ **The operational state and the affect are separate readings, and this port cannot express
+    them any other way.** SDS §3.10 makes ``RobotState`` and ``Affect`` orthogonal — the robot can
+    be SLEEPING-and-content or LISTENING-and-confused — so nothing here may derive one from the
+    other. That is the most common design error in this class of project, and the shape of the
+    provider is what prevents it rather than a comment asking nicely.
+    """
+
+    def snapshot(self) -> Mapping[str, object]:
+        """The current reading. Absent values are named, never reported as a default."""
+        ...

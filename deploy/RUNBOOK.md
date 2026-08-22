@@ -80,11 +80,25 @@ curl -s 127.0.0.1:8787/metrics | python3 -m json.tool
 being reported as a number. *Absent is not zero* — a `0` from an instrument that is not running
 reads exactly like a real zero, and this project has already shipped that bug once.
 
-⚠️ **The routes that exist are `/health`, `/metrics` and `POST /quiet`.** `GET /state`,
-`GET /facts` and `GET /events/stream` are described in SDS §9.5 but **are not implemented yet**
-(#385, #386) — they answer 404. Do not spend a night curling them. This paragraph is checked by
-`tests/docs/test_runbook.py`, so the day those routes land, it fails CI rather than misleading
-someone quietly.
+### 1.3b Watch it happen, live
+
+```sh
+curl -s 127.0.0.1:8787/state | python3 -m json.tool
+curl -N 127.0.0.1:8787/events/stream
+```
+
+`/state` reports the operational `state`, the `affect` and whether a `session` is open — **three
+independent readings** (SDS §3.10 makes state and affect orthogonal, so do not infer one from the
+other), plus an `absent` list for anything it could not read.
+
+`/events/stream` is the live event feed (#385). It is the fastest way to answer *"is anything
+happening at all"* on a robot that looks stuck: talk to it and watch. A line beginning `: dropped`
+means **your client** fell behind, not the robot.
+
+⚠️ **`GET /facts` is described in SDS §9.5 but is not implemented yet** (#386) — it answers 404,
+and the "what do you know about me?" audit is currently a spoken query. Do not spend a night
+curling it. This paragraph is checked by `tests/docs/test_runbook.py`, so the day that route
+lands, it fails CI rather than misleading someone quietly.
 
 ### 1.4 The uptime record, which outlives the logs
 

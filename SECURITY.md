@@ -37,8 +37,14 @@ scoping buys.
   **Localhost binding *is* the authentication.**
 - `0.0.0.0` would be a security bug. `ApiConfig` rejects a non-loopback bind **at config load**, so
   the process refuses to start; the server asserts it again at construction.
-- ⚠️ **As built the API serves `/health`, `/metrics` and `POST /quiet`.** `/state`, `/facts` and
-  `/events/stream` appear in SDS §9.5 but are **not implemented** (#385, #386).
+- ⚠️ **As built the API serves `/health`, `/metrics`, `/state`, `/events/stream` and
+  `POST /quiet`** (#385).
+- ⚠️ `/facts` appears in SDS §9.5 but is **not implemented** (#386), so §7.10's audit is currently
+  a spoken query rather than an endpoint.
+- `/events/stream` is a **read-only tap** on the internal event bus (#385): event names, sources
+  and correlation ids, never payloads. Like every other route it is loopback-only, and that is
+  the whole of its access control — a live feed of what the robot is doing deserves the same
+  treatment as the rest.
 - Transport to OpenAI is **WSS with the server-side API key used directly** (ADR-010); no ephemeral
   client-secret exchange, because the Pi is the trusted server.
 
