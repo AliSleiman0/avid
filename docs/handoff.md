@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-22 · `main = 548316e` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
+**As of:** 2026-08-23 · `main = 1d74b7f` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
 
 ## ⭐ Next session — ⏱️ THE SOAK IS RUNNING. Do not deploy to the Pi.
 
@@ -70,17 +70,28 @@ nothing else will remember which was which.
 |---|---|---|
 | ~~**#387**~~ | ~~the runbook, symptom-first~~ | ✅ **`deploy/RUNBOOK.md`, #425** |
 | ~~**#21**~~ | ~~SDS §13, Security & Privacy~~ | ✅ **§13.1–§13.7 written, #427** |
-| **#385** | `GET /state` + the SSE tap | ⚠️ landing it **fails `tests/docs/test_runbook.py`** by design — §1.3 documents the route as unbuilt, so the change that makes that wrong must update it |
-| **#386** | `GET /facts` — §7.10's privacy audit | same guard, same reason |
+| ~~**#385**~~ | ~~`GET /state` + the SSE tap~~ | ✅ **#433** |
+| ~~**#386**~~ | ~~`GET /facts` — §7.10's privacy audit~~ | ✅ **#434** |
 | ~~**#388**~~ | ~~AC-1…AC-6, the release artifact~~ | ✅ **#430 + #431; the dry run is green** |
 
-⚠️ **CORRECTION to what this section said earlier today.** It claimed Group B had no `prio:must`
-left while **#388 was labelled `prio:must`** — it was one, and it is now done. Group B is *now*
-genuinely empty of `must`s: only #385 and #386 remain, both `prio:should`.
+✅ **GROUP B IS EMPTY.** All five shipped. Nothing in the laptop-only lane is left, so the next
+session's work is either the milestone gates that need the Pi (**⛔ blocked by the soak until 21
+September**) or something off this list entirely.
 
-**#385/#386 carry a deliberate tripwire in two places**: both `tests/docs/` guards assert those routes are unbuilt, so shipping either turns the
-runbook *and* the security documents red until they are updated. That is the intended cost, not an
-obstacle — but budget for it.
+**What is actually left, and what it needs:**
+
+| | |
+|---|---|
+| **#389** — the M11 gate | ⏱️ the soak. Run `soak_pi.py --mode grade` in a few days, not on day 29 |
+| **#207** — the M9 gate, 8/12 | ⛔ AC-10 needs the bench; AC-5 and AC-9 are wording + `PI_OPERATIONS.md` and could be done now |
+| **#428** — no capture indicator | filed out of §13.5; the mechanism is an open design question |
+| **#406**, **#414**, **#310**, **#415**, **#407** | bugs, most needing the rig |
+| **#402**, **#377**, **#400**, **#382** | epics and hardware |
+
+⚠️ The **tripwire is spent**: both `tests/docs/` guards asserted those routes were unbuilt, and
+both fired exactly as designed when they shipped. **No route in SDS §9.5 is unbuilt any more** — so
+if a curl 404s from now on, that is a routing bug, not a missing feature. That was the right first
+guess until yesterday and is now the wrong one.
 
 **New this session:** **#428** — no capture indicator. Filed out of §13.5 rather than fixed inside
 it. The robot polls the camera through `SLEEPING` and nothing on the device says so; the mechanism
@@ -209,18 +220,50 @@ would be a fabrication of a build that never happened.
 Sharpening the premise: `v0.M4.0` *does* have a GitHub Release. It has **0 assets**, so the issue's
 claim held exactly as written.
 
+### 🔌 The control API is finished (#385 → #433, #386 → #434)
+
+Every route SDS §9.5 has specified since M0 now exists. Two things from building them are worth
+more than the endpoints:
+
+⚠️ **"Ten lines of code" was wrong for a good reason.** §9.5 estimated the SSE tap at ten lines.
+Dispatch is by **exact runtime type with no subclass fan-out** (§9.1.5) and **subscription is
+static** (§3.5.2) — so a wildcard tap is impossible and the shape is forced: one tap, subscribed
+at composition time to every concrete event type, fanning out to clients that attach later. Both
+decisions should stay. The event set is **enumerated, never curated**, scoped to `avid.domain`.
+
+⚠️ **The same scoping defect appeared THREE times in the doc guards**, twice caught only by
+neutering:
+
+1. `"not implemented"` searched document-wide — correct only while every route was unbuilt
+   *together*; the surviving `/facts` sentence made the guard accuse `/state`.
+2. The same bug again in the runbook's guard, fixed at the same time on purpose — *a correction
+   that lands in one document and not its sibling* is the exact defect #21 found.
+3. "Is this route named in `SECURITY.md`" searched the whole file, so deleting `/facts` from the
+   as-built list stayed green because the word survived in another bullet.
+
+**The question is never whether a string exists in a document. It is whether the claim is right.**
+Worth remembering the next time one of these guards is written.
+
+⚠️ **Across #385 and #386 the neuter step found FOUR of my own guards that could not fail** (2 of
+15, then 2 of 10) — including an ordering test whose fixture made both orderings identical. Every
+one looked right. The step is not a formality.
+
 ### Closed and filed today
 
-**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21** · **#388**.
+**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21** · **#388** · **#385** · **#386**.
 **Filed:** **#428** (no capture indicator — out of §13.5) · #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
 pre-fix run) · #407 (five modules say "ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**, **#430**, **#431**.
+**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**, **#430**, **#431**, **#433**, **#434**.
 
 ---
 
 ## Current state
 
-- **`main = 548316e`**, zero open PRs. Suite **1826 passed / 67 skipped** on 3.11 and 3.13.
+- **`main = 1d74b7f`**, zero open PRs. Suite **1866 passed / 67 skipped** on 3.11 and 3.13.
+- 🔌 **The control API is complete** (#385, #386): `/health`, `/metrics`, `/state`,
+  `/facts`, `/events/stream`, `POST /quiet`. `curl -N 127.0.0.1:8787/events/stream` is the live
+  event feed — the fastest answer to *"is anything happening at all"* on a robot that looks stuck.
+  `GET /facts` is §7.10's audit; `?include_superseded=1` adds the history.
 - 📦 **A tag now builds a verified artifact** (#388 → #430/#431). `git push origin vX` runs
   build → verify → publish, and **publish `needs:` verify**. Dry-run it any time with
   `gh workflow run release.yml -f tag=v0.0.0-rc.1` — it builds and verifies and does **not**
