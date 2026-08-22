@@ -161,3 +161,82 @@ def test_empty_output_returns_the_fallback(
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Blank())
     assert resolve_build_id(package_dir=tmp_path, fallback=_FALLBACK) == _FALLBACK
+
+
+# ── the two things that shipped this adapter inert ───────────────────────────────────────────
+
+
+@_needs_git
+def test_a_repo_owned_by_another_user_is_still_described(tmp_path: Path) -> None:
+    """⚠️ The defect that made the first version of this adapter useless on the Pi.
+
+    ``/opt/avid`` is owned by ``alisleiman0``; the service runs as ``User=robot``. git refuses::
+
+        fatal: detected dubious ownership in repository at '/opt/avid'
+
+    so ``describe`` failed and the robot reported the fallback — the very ``0.0.0`` this issue
+    exists to remove. Fourth instance in one session of *"works as the login user, dead under the
+    service"*, after the `i2c` group, `LG_WD`, and the disconnected supply.
+
+    Ownership cannot be faked in a unit test, so this asserts the *mechanism*: the invocation
+    carries ``-c safe.directory=*``. Scoped to one read-only call — the alternative puts the fix in
+    machine state, which is what `PI_OPERATIONS.md` exists to prevent.
+    """
+    from avid.adapters.build_id import _DESCRIBE
+
+    assert "-c" in _DESCRIBE and "safe.directory=*" in _DESCRIBE, (
+        "without safe.directory this returns the fallback whenever the checkout is owned by "
+        "someone other than the service user — silently"
+    )
+    root = _repo(tmp_path)
+    _commit(root, "one")
+    assert resolve_build_id(package_dir=root, fallback=_FALLBACK) != _FALLBACK
+
+
+def test_falling_back_inside_a_checkout_is_reported_LOUDLY(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ The second half of the same defect: the fallback was invisible.
+
+    It logged at DEBUG, so the Pi reported ``0.0.0`` and said nothing about why. A quiet fallback
+    puts §12.6's guard back to inert with no signal at all — which is how the original ``0.0.0``
+    survived three milestones.
+
+    Inside a checkout, a fallback means something that should have worked did not, and that is a
+    WARNING. Off a checkout it is the expected answer and stays DEBUG (below).
+    """
+    (tmp_path / ".git").mkdir()
+    package = tmp_path / "pkg"
+    package.mkdir()
+
+    def _no_git(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", _no_git)
+    with caplog.at_level("DEBUG", logger="avid.adapters.build_id"):
+        assert resolve_build_id(package_dir=package, fallback=_FALLBACK) == _FALLBACK
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "a fallback inside a git checkout was not reported at WARNING"
+    assert "12.6" in warnings[0].getMessage(), (
+        "the warning should say what breaks, not just that something failed"
+    )
+
+
+def test_falling_back_outside_a_checkout_stays_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wheel install is not a defect and must not warn on every boot.
+
+    The other end of the pair. A reporter that shouted in both cases would train the reader to
+    ignore it, which is the same argument §14.1 makes about a red build.
+    """
+
+    def _no_git(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", _no_git)
+    with caplog.at_level("DEBUG", logger="avid.adapters.build_id"):
+        assert resolve_build_id(package_dir=tmp_path, fallback=_FALLBACK) == _FALLBACK
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
