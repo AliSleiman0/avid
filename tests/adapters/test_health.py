@@ -125,7 +125,7 @@ async def test_post_quiet_sets_the_same_state_the_tool_sets() -> None:
     reachable via set_quiet tool", and the only way to make that true rather than approximately
     true is for both doors to call one method on one port."""
     behavior = _RecordingBehavior(until=1_800_003_600)
-    server = HealthServer(bind="127.0.0.1", port=0, behavior=behavior)  # type: ignore[arg-type]
+    server = HealthServer(bind="127.0.0.1", port=0, behavior=behavior)
     await server.start()
     try:
         response = await _speak(server, _post('{"duration_s": 3600}'))
@@ -145,7 +145,7 @@ async def test_a_malformed_body_is_a_400_and_never_a_500(body: str) -> None:
     """§3.12.3: a crashing control endpoint must not take the robot down. Every one of these is a
     client error, so every one is a 4xx — and none of them reaches the event loop as an exception."""
     behavior = _RecordingBehavior()
-    server = HealthServer(bind="127.0.0.1", port=0, behavior=behavior)  # type: ignore[arg-type]
+    server = HealthServer(bind="127.0.0.1", port=0, behavior=behavior)
     await server.start()
     try:
         response = await _speak(server, _post(body))
@@ -162,7 +162,7 @@ async def test_a_rejected_duration_comes_back_as_the_ports_own_message() -> None
     server = HealthServer(
         bind="127.0.0.1",
         port=0,
-        behavior=_RecordingBehavior(boom=True),  # type: ignore[arg-type]
+        behavior=_RecordingBehavior(boom=True),
     )
     await server.start()
     try:
@@ -180,7 +180,7 @@ async def test_a_body_with_no_length_is_refused() -> None:
     server = HealthServer(
         bind="127.0.0.1",
         port=0,
-        behavior=_RecordingBehavior(),  # type: ignore[arg-type]
+        behavior=_RecordingBehavior(),
     )
     await server.start()
     try:
@@ -199,7 +199,7 @@ async def test_the_wrong_method_is_405_rather_than_404() -> None:
     server = HealthServer(
         bind="127.0.0.1",
         port=0,
-        behavior=_RecordingBehavior(),  # type: ignore[arg-type]
+        behavior=_RecordingBehavior(),
     )
     await server.start()
     try:

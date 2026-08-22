@@ -146,13 +146,19 @@ async def test_fetch_all_includes_superseded_and_orders_by_creation(
     # `old` also accessed first, `ORDER BY last_accessed_at DESC` and `ORDER BY created_at ASC`
     # produce the same list and the assertion below cannot fail — which is what an earlier version
     # of this test did, caught by neutering the ORDER BY and watching it stay green.
-    old = await repo.add(make_fact(text="drinks coffee", created_at=100, last_accessed_at=100))
-    new = await repo.add(make_fact(text="drinks tea now", created_at=200, last_accessed_at=900))
+    old = await repo.add(
+        make_fact(text="drinks coffee", created_at=100, last_accessed_at=100)
+    )
+    new = await repo.add(
+        make_fact(text="drinks tea now", created_at=200, last_accessed_at=900)
+    )
     await repo.mark_superseded(old, new, at=250)
 
     everything = await repo.fetch_all()
     ids = [fact.id for fact in everything]
-    assert ids == [old, new], "history is oldest-first; accessed-order would read as [new, old]"
+    assert ids == [old, new], (
+        "history is oldest-first; accessed-order would read as [new, old]"
+    )
     superseded = next(fact for fact in everything if fact.id == old)
     assert superseded.superseded_by == new
 
