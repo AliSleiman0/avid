@@ -141,7 +141,15 @@ def test_it_pulls_in_no_third_party_action() -> None:
     people trust. Everything here is `actions/*` or the same `astral-sh/setup-uv` `ci.yml`
     already trusts; the release itself is cut with the preinstalled `gh`."""
     trusted_prefixes = ("actions/", "astral-sh/setup-uv")
-    for action in re.findall(r"^\s+uses: (\S+)$", _WORKFLOW, re.M):
+    # ⚠️ `- uses:` and `uses:` both occur; the first draft matched only the second, found NOTHING,
+    # and passed over an empty list — a guard that had gone blind. Caught by neutering it (a
+    # third-party action was inserted and the test stayed green). Hence the count assertion
+    # below: this check can now fail, but it can no longer pass on silence.
+    actions = re.findall(r"^\s*(?:-\s+)?uses: (\S+)$", _WORKFLOW, re.M)
+    assert len(actions) >= 4, (
+        f"only {len(actions)} `uses:` found — the pattern has gone blind"
+    )
+    for action in actions:
         assert action.startswith(trusted_prefixes), (
             f"{action} is a third-party action; the release path deliberately uses none"
         )

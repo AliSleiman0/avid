@@ -103,15 +103,24 @@ def test_build_info_records_the_provenance_it_was_given(tmp_path: Path) -> None:
     assert "run=https://example.invalid/run/1" in info
 
 
-def test_a_missing_required_member_fails_loudly_and_names_itself(
+def test_a_missing_required_member_fails_loudly_and_names_every_one(
     tmp_path: Path,
 ) -> None:
-    """The failure this exists to prevent: an artifact that looks complete and is not."""
+    """The failure this exists to prevent: an artifact that looks complete and is not.
+
+    ⚠️ Asserting only that *something* raises would be satisfied by `tarfile.add` tripping over
+    the absent path a moment later — an earlier version of this test stayed green with the
+    pre-flight check deleted, which is how that was found. What `tarfile` cannot do is name
+    **all** the missing members in one message, so that is what is asserted here: the pre-flight
+    exists to tell you everything that is wrong before it starts work, not to be the first thing
+    that happens to break.
+    """
     root = tmp_path / "repo"
     root.mkdir()
     dist = _fake_tree(root)
     (root / "deploy" / "robot.service").unlink()
-    with pytest.raises(FileNotFoundError, match="robot.service"):
+    (root / "deploy" / "RUNBOOK.md").unlink()
+    with pytest.raises(FileNotFoundError) as caught:
         _h.build_bundle(
             root=root,
             dist=dist,
@@ -120,6 +129,8 @@ def test_a_missing_required_member_fails_loudly_and_names_itself(
             commit="deadbee",
             describe="x",
         )
+    message = str(caught.value)
+    assert "robot.service" in message and "RUNBOOK.md" in message, message
 
 
 def test_no_wheel_is_a_failure_not_an_empty_bundle(tmp_path: Path) -> None:
