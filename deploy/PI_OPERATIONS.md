@@ -579,6 +579,127 @@ behind, and a reconnect *during* an active cut works.
 cuts the network cannot also claim a latency result** — grade recovery on that run and O1 on
 another.
 
+## 5c. Servos and motion (M9)
+
+**The rig, and the only other place it is written down is `config/pi.toml`:**
+
+| | |
+|---|---|
+| Controller | PCA9685, I²C `0x40` (all-call `0x70`) on `/dev/i2c-1` |
+| `pan` | channel **0** — body turn. Verified on the rig 2026-07-21 |
+| `tilt` | channel **13** — head up/down. Not a typo; it is where the second servo is already wired |
+| Servos | SG90/MG90S, 500–2500 µs at 50 Hz, ~180° electrical span |
+| Power | a **separate 5–6 V rail**, common ground only — never the Pi's 5 V pin (R-04) |
+
+Drive it and find out what actually happened:
+
+```sh
+sudo /opt/avid/.venv/bin/python docs/demos/motion_pi.py --config /etc/robot/config.toml
+sudo /opt/avid/.venv/bin/python docs/demos/did_it_move_pi.py --config /etc/robot/config.toml
+```
+
+The second one is the camera answering *"did the head move"* against a still-camera baseline,
+because the operator's eye is the usual detector and **it has already missed two runs**.
+
+### ⚠️ 5c.1 Every failure here looks like success
+
+This is the section's whole reason to exist. **A trace is not a moved head**, and four different
+faults produce a *perfect* trace and a motionless robot:
+
+| Fault | What it looks like |
+|---|---|
+| **No V+ on the servo rail** | every command succeeds, the PCA9685 is programmed correctly, nothing moves |
+| `robot` not in the `i2c` group | dead under systemd, perfect on the bench |
+| `lgpio` and a read-only `WorkingDirectory` | `FileNotFoundError: '.lgd-nfy-N'` on every write |
+| A horn slipped on its spline | the head moves, to the wrong angles, consistently |
+
+**The V+ one is the one that cost a session** (#206). Both axes reported success and nothing
+moved. It was settled by reading the chip's own registers back:
+
+```sh
+sudo /opt/avid/.venv/bin/python - <<'PY'
+from smbus2 import SMBus
+with SMBus(1) as bus:
+    print(f"MODE1=0x{bus.read_byte_data(0x40, 0x00):02x}  PRESCALE=0x{bus.read_byte_data(0x40, 0xFE):02x}")
+PY
+```
+
+`MODE1=0x20` (awake, auto-increment) and `PRESCALE=0x79` (50 Hz) with pulse widths correct to
+within 4 µs at three angles put the fault **provably downstream of the chip's output pins** — which
+is a wire or a supply, not software. That distinction is the whole diagnostic: without it you spend
+the evening in `avid/adapters/servo.py`.
+
+### ⚠️ 5c.2 It works by hand and is dead under the unit (#413)
+
+Two causes, both fixed in [`robot.service`](robot.service), both invisible to every bench run
+because the login user has what the service user does not:
+
+- **`i2c` missing from `SupplementaryGroups`.** `/dev/i2c-1` is `root:i2c crw-rw----`, and the
+  PCA9685 behind every servo command is an I²C device — so the robot **could not move at all under
+  systemd** while every bench run drove it correctly.
+- **`lgpio` writes `.lgd-nfy-N` into the process's current working directory**, which is
+  `/opt/avid` and read-only under `ProtectSystem=strict`. `Environment=LG_WD=/var/lib/robot` moves
+  them; `StateDirectory=robot` creates the target.
+
+⚠️ **That pattern hit four times in one session** — these two, the disconnected 5 V supply, and
+`git`'s `safe.directory` refusing because `/opt/avid` is owned by `alisleiman0` while the service
+runs as `robot` (#419). The unit's own comment already described a fifth from M7 (`audio`).
+**When something works by hand and not under systemd, suspect user, permission and environment
+before logic** — and reinstall the unit from the repo rather than patching the machine (§3).
+
+### ⚠️ 5c.3 `actuation_deg` is the servo's span, not the linkage's reach (#356)
+
+`[servo] actuation_deg` calibrates **degree → pulse width** for the servo *model* — an SG90 sweeps
+~180° between 500 µs and 2500 µs. It is **not** a safe reach. Taking it from an axis's `max_deg`
+makes every commanded angle wrong the moment a reach is narrowed, and it does so **silently**:
+`position()`, the contract suite and `FakeServo` all go on agreeing with each other, because the
+fake ignores pulse widths entirely. The only instrument that disagrees is the horn.
+
+It was accidentally correct for two milestones because both profiles shipped `max_deg = 180.0`, and
+#200's narrowed per-axis reaches are what armed it.
+
+### Horn alignment, and the fix that is not a fix
+
+If the head moves but to the wrong angles — mirrored, offset, or hitting a limit early — **reseat
+the horn on its spline**. Do not invert a sign or add an offset in code: the calibration then lives
+in two places that disagree, the linkage and the model, and every later reading is wrong in a way
+nothing can detect. The horn is the adjustable part; that is what it is for.
+
+### ⚠️ The reach limits are PROVISIONAL and are not pinned yet
+
+`config/pi.toml` ships `pan 30–150°` and `tilt 60–120°`, deliberately conservative, with the
+comment saying so. **They are not measured** — #207's AC-10 is the job of pinning them, and it needs
+the bench:
+
+1. With the head assembled, drive each axis in small steps to the point where the linkage binds or
+   the head touches its own chassis. Approach from the middle, never from the ends.
+2. Back off a margin and record the number that was actually reached.
+3. Commit the measured values **and delete the "provisional" comment** — a provisional value with
+   the comment removed is worse than either.
+
+⚠️ Until then, `did_it_move_pi.py`'s sweeps and every gesture run inside a reach that nothing has
+verified. Both axes have traversed their full declared reach cleanly across four sweeps with no
+binding (#206, 2026-08-22) — which does **not** contradict the provisional values and does not pin
+them either.
+
+### Power, and the one number nobody has
+
+R-04 is *"servo stall browns out the Pi; SD corruption"*. SPK-4 measured it on 2026-08-22 (#206):
+both servos stalled simultaneously produced **no undervoltage** — `vcgencmd get_throttled` clean
+across n=874 samples over 180 s, the sticky bit never latched, zero kernel complaints.
+
+⚠️ **The margin is unmeasured**, and that is not a detail. No multimeter was available, so the rail
+voltage at the servo connector and at the Pi's 5 V were never read: we know it did not brown out,
+not by how much. The inputs have since moved against us — the supply is **15 W, not 27 W** (#401),
+and #400 takes the rig from two actuators to four. **Re-measure with a meter before #400 lands.**
+
+```sh
+vcgencmd get_throttled        # want 0x0; any bit set, including a sticky one, is a finding
+dmesg | grep -i 'under-voltage\|undervoltage'
+```
+
+---
+
 ## 6. Shell & SSH traps
 
 **`pkill -f <pattern>` kills its own SSH session** when the pattern appears in the remote command

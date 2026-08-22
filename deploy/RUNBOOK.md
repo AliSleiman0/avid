@@ -398,7 +398,9 @@ as every bench run was done as the login user:
 
 Both are in [`robot.service`](robot.service) now, so the fix is to
 [reinstall the unit](#42-reinstall-the-units-and-config-from-the-repo), not to hand-edit the
-machine.
+machine. The rig itself — channel map, the register read-back that proves a fault is downstream of
+the chip, horn alignment, and why the reach limits are still provisional — is
+[`PI_OPERATIONS.md` §5c](PI_OPERATIONS.md#5c-servos-and-motion-m9).
 
 **Not to be confused with** a **power** fault, the third member of this family and identical from
 the couch: the servos need their own 5–6 V rail, and a disconnected supply gives you a motionless
