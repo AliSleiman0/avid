@@ -162,9 +162,18 @@ def test_routes_are_described_as_they_are_actually_served() -> None:
                 assert says_unbuilt, (
                     f"{name} mentions {route} without saying it is not implemented"
                 )
+    # ⚠️ Scoped to the "as built" claim itself, not to the whole file — the THIRD instance of the
+    # same defect in these guards, and the second in this module. Removing `/facts` from §2's
+    # as-built list left this green, because the word `/facts` still appeared further down in §3's
+    # audit bullet. "Does the string exist somewhere in the document" is never the question; the
+    # question is always whether the *claim* is right.
+    as_built = [block for block in _paragraphs(_SECURITY) if "As built" in block]
+    assert len(as_built) == 1, (
+        f"expected exactly one 'As built' claim in SECURITY.md, found {len(as_built)}"
+    )
     for route in sorted(served):
-        assert route in _SECURITY, (
-            f"{route} is served and SECURITY.md §2 does not list it among the built routes"
+        assert route in as_built[0], (
+            f"{route} is served and SECURITY.md's as-built list does not name it: {as_built[0]!r}"
         )
 
 

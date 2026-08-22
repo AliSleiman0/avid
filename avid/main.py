@@ -1088,6 +1088,10 @@ async def _run(config: Config, *, build: str) -> int:
         metrics=ProvidedMetrics(metrics),
         state=state_report,
         tap=tap,
+        # §7.10's audit (#386), over the SAME port MemoryService writes through — not a second
+        # connection and not fresh SQL. "What do you know about me?" must be answered by the store
+        # that holds the answer, or the audit is a second opinion about the user's own data.
+        facts=fact_store,
     )
     return await lifecycle.run(
         bus=bus,

@@ -206,6 +206,23 @@ class SqliteFactRepo:
 
         return await self._run(_fetch)
 
+    async def fetch_all(self) -> Sequence[Fact]:
+        """Every fact including superseded ones, oldest first — §7.10's audit (#386).
+
+        Deliberately a sibling of :meth:`fetch_live` rather than a parameter on it: the two answer
+        different questions, in different orders, for different callers, and one of them is on the
+        §7.7 ranking hot path while the other is read by a person once.
+        """
+
+        def _fetch() -> list[Fact]:
+            conn = self._conn_sync()
+            rows = conn.execute(
+                f"SELECT {_FACT_COLUMNS} FROM facts ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+            return [_row_to_fact(row) for row in rows]
+
+        return await self._run(_fetch)
+
     async def mark_superseded(self, old_id: int, new_id: int, *, at: int) -> None:
         def _mark() -> None:
             conn = self._conn_sync()

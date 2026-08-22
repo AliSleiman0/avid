@@ -95,10 +95,22 @@ other), plus an `absent` list for anything it could not read.
 happening at all"* on a robot that looks stuck: talk to it and watch. A line beginning `: dropped`
 means **your client** fell behind, not the robot.
 
-⚠️ **`GET /facts` is described in SDS §9.5 but is not implemented yet** (#386) — it answers 404,
-and the "what do you know about me?" audit is currently a spoken query. Do not spend a night
-curling it. This paragraph is checked by `tests/docs/test_runbook.py`, so the day that route
-lands, it fails CI rather than misleading someone quietly.
+`/facts` is §7.10's privacy audit — *what do you know about me?* — and it answers from the same
+store the robot writes to:
+
+```sh
+curl -s '127.0.0.1:8787/facts' | python3 -m json.tool
+curl -s '127.0.0.1:8787/facts?include_superseded=1' | python3 -m json.tool
+```
+
+Without the flag you get the **live** facts; with it, the full history including the rows
+supersession retired. The response echoes `include_superseded` back, so a short list can be told
+from a filtered one. ⚠️ **A forgotten fact is in neither view** — `forget` is a hard cascading
+DELETE, so it is absent because it is gone, not because it is hidden.
+
+⚠️ **Every route SDS §9.5 specifies now exists.** If a curl to one of them 404s, that is a routing
+bug or the wrong port, not an unbuilt feature — which was the right first guess until #386 and is
+now the wrong one.
 
 ### 1.4 The uptime record, which outlives the logs
 

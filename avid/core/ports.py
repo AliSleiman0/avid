@@ -572,6 +572,24 @@ class FactRepository(Protocol):
         here; ``retrieve()`` only ever ranks live ones."""
         ...
 
+    async def fetch_all(self) -> Sequence[Fact]:
+        """Every fact, superseded ones included, **oldest first** — §7.10's audit (#386).
+
+        The history view behind ``GET /facts?include_superseded=1``, and a genuinely different
+        question from :meth:`fetch_live`: that one answers *what is true now* for the §7.7 ranking
+        hot path, this one answers *what has ever been held about me*, which is a **rights**
+        question and must include the rows supersession retired.
+
+        ⚠️ Ordered by ``created_at``, not by ``last_accessed_at``. A supersession chain read
+        most-recently-accessed-first is unreadable as a chain — the point of showing history is
+        that the reader can follow what replaced what.
+
+        It does **not** include deleted facts, because there are none to include: ``forget`` is a
+        hard cascading DELETE (§7.10), so a fact the user withdrew consent for is absent from this
+        view for the same reason it is absent from the database.
+        """
+        ...
+
     async def mark_superseded(self, old_id: int, new_id: int, *, at: int) -> None:
         """Point ``old_id`` at the fact that replaced it (§7.8), setting ``superseded_by`` **and**
         ``superseded_at`` together — the schema's paired ``CHECK`` rejects setting one without the
