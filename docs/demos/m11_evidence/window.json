@@ -1,21 +1,27 @@
 {
   "_what": "The M11 soak window (#389, O5, SDS §12.6). Written when the clock started.",
   "_why_committed": "A window-start epoch held only on the Pi is one SD-card failure from making thirty days ungradeable. This file is the durable record; the same numbers are on issue #389.",
-  "window_start_epoch": 1787403029,
-  "window_start_utc": "2026-08-22T12:50:29Z",
-  "window_end_epoch": 1789995029,
-  "window_end_utc": "2026-09-21T12:50:29Z",
+  "window_start_epoch": 1787404688,
+  "window_start_utc": "2026-08-22T13:18:08Z",
+  "window_end_epoch": 1789996688,
+  "window_end_utc": "2026-09-21T13:18:08Z",
   "days": 30,
-  "build_under_test": "v0.M10.0-45-g2bcb39e",
-  "boot_id_at_open": "5e1009ea-6a0d-423f-9ec8-f58b590904dc",
-  "boot_started_at": 1787402993,
+  "build_under_test": "v0.M10.0-47-g8d03690",
+  "boot_id_at_open": "c7c6c3d5",
+  "boot_started_at": 1787404576,
   "host": "AVID — Raspberry Pi 4 Model B Rev 1.5, 2 GB",
   "host_timezone": "Etc/UTC",
+  "interventions_log": "/var/lib/soak/interventions.jsonl",
+  "_restarted_once": {
+    "first_open": "2026-08-22T12:50:29Z, epoch 1787403029, build v0.M10.0-45-g2bcb39e",
+    "why_restarted": "Deliberately, ~28 minutes in, to test that the soak survives a reboot — and to land the intervention log (#389/S12.6) before the real window rather than during it. Discovering on day 29 that a power blip invalidates the record is the disaster this milestone is arranged to avoid; discovering it 28 minutes in costs 28 minutes.",
+    "result": "Pi rebooted unattended and came back: robot active, soak-sampler active, samples.db persisted across the reboot and the sampler resumed writing to the same file."
+  },
   "sampler": {
     "unit": "soak-sampler.service",
     "interval_s": 60,
     "samples_db": "/var/lib/soak/samples.db",
     "robot_db": "/var/lib/robot/robot.db"
   },
-  "grade_command": "sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py --mode grade --since 1787403029 --config /etc/robot/config.toml"
+  "grade_command": "sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py --mode grade --since 1787404688 --config /etc/robot/config.toml"
 }
