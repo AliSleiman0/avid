@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-22 · `main = a7dfcab` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
+**As of:** 2026-08-22 · `main = 8afcb7d` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
 
 ## ⭐ Next session — ⏱️ THE SOAK IS RUNNING. Do not deploy to the Pi.
 
@@ -69,14 +69,21 @@ nothing else will remember which was which.
 | | | |
 |---|---|---|
 | ~~**#387**~~ | ~~the runbook, symptom-first~~ | ✅ **`deploy/RUNBOOK.md`, #425** |
-| **#21** | SDS §13, Security & Privacy | `prio:must` — now the only `must` left in Group B |
+| ~~**#21**~~ | ~~SDS §13, Security & Privacy~~ | ✅ **§13.1–§13.7 written, #427** |
 | **#385** | `GET /state` + the SSE tap | ⚠️ landing it **fails `tests/docs/test_runbook.py`** by design — §1.3 documents the route as unbuilt, so the change that makes that wrong must update it |
 | **#386** | `GET /facts` — §7.10's privacy audit | same guard, same reason |
 | **#388** | AC-1…AC-6, the release artifact | only AC-7 landed |
 
-**Take #21 next.** It is the last `prio:must` here, it is the only Group B item with no dependency
-on anything, and #385/#386 now carry a deliberate tripwire that is easier to honour once the
-runbook has settled.
+**Group B has no `prio:must` left.** What remains is #388 (the release artifact — AC-1…AC-6; only
+AC-7 landed) and the two API routes, and **#385/#386 now carry a deliberate tripwire in two
+places**: both `tests/docs/` guards assert those routes are unbuilt, so shipping either turns the
+runbook *and* the security documents red until they are updated. That is the intended cost, not an
+obstacle — but budget for it.
+
+**New this session:** **#428** — no capture indicator. Filed out of §13.5 rather than fixed inside
+it. The robot polls the camera through `SLEEPING` and nothing on the device says so; the mechanism
+is an open design question (face corner / separate bar / hardware LED / reasoned decline) and the
+constraint is that it must be driven by the **camera actually being open**, never by `RobotState`.
 
 ### #207 is 8 of 12, and waiting on decisions rather than code
 
@@ -139,18 +146,51 @@ venv without the extras** and turns the suite 79 red in untouched files (`Module
 numpy`). Run the second interpreter in a throwaway `UV_PROJECT_ENVIRONMENT=.venv311` instead, then
 delete it.
 
+### 🔐 SDS §13 shipped (#21 → #427), and it found three lies on the way
+
+Writing the section is not the finding. **Reading the code to write it found three claims in
+`SECURITY.md` that had stopped being true** — a model the project stopped using on 2026-08-01,
+`structlog` (imported nowhere, and **SDS §3.12.2 had already corrected the identical sentence in
+#378** — the correction never reached the other file), and `GET /facts` described as the privacy
+audit when that route is not served.
+
+⚠️ **The transferable one is the second.** A correction landed in one document and not in its
+sibling, and nothing noticed for months. Two documents stating the same fact is one of them being
+wrong later.
+
+Two facts §13 now records that were nowhere before, both found by reading rather than remembering:
+
+- **Deleted data survives in the provisioning backups.** `/var/backups/robot/*.db` sits outside the
+  retention window and outside `forget`'s reach, and nothing reaps it. A fact the user withdrew
+  consent for is still in every backup taken before the deletion.
+- **"Nothing uplinks until you speak" is true to within 300 ms** — the pre-roll ring buffer drains
+  at the rising edge. Prose would have got that wrong; the code did not allow it.
+
+`tests/docs/test_security_claims.py` (9 tests) now holds every falsifiable literal in both
+documents. Two design notes worth reusing:
+
+- **Check against the profile that is deployed, not "somewhere in the repo".** `config/sim.toml`
+  still pins the mini, so the weaker rule would have passed the original stale claim untouched.
+- ⚠️ **Parse, do not grep, when the prose is about the code.** `banner.py`'s docstring says
+  *"nothing here calls `get_secret_value()`"* — a substring search reads that denial as the
+  violation and fails the one module written to be safe. `ast` does not.
+
+13 neuters, 13 real assertion failures.
+
 ### Closed and filed today
 
-**Closed:** #401 · #384 · #404 · #206 · #410 · **#387**.
-**Filed:** #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
+**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21**.
+**Filed:** **#428** (no capture indicator — out of §13.5) · #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
 pre-fix run) · #407 (five modules say "ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**.
+**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**.
 
 ---
 
 ## Current state
 
-- **`main = a7dfcab`**, zero open PRs. Suite **1778 passed / 67 skipped** on 3.11 and 3.13.
+- **`main = 8afcb7d`**, zero open PRs. Suite **1787 passed / 67 skipped** on 3.11 and 3.13.
+- 🔐 **`SDS.md` §13 is now the security authority** (#21/#427) and `SECURITY.md` is the
+  operator-facing summary that defers to it. Do not add a rule to `SECURITY.md` without §13.
 - 📕 **`deploy/RUNBOOK.md` exists** (#387/#425) — symptom-first, thirteen entries, each Confirm /
   Fix / **Not-to-be-confused-with**. Read it before diagnosing anything on the rig; it is now the
   first stop and `PI_OPERATIONS.md` is the second. `tests/docs/test_runbook.py` keeps it honest.
