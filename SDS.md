@@ -3755,9 +3755,16 @@ reason above; the argument for it was wrong and is corrected rather than quietly
 ## 12.7 Operations
 
 The design document stops at the boundary of *what the system is*. **What to do when it
-misbehaves** lives in the runbook (PMP WBS 8.4, AVID-387), symptom-first, and in
-`deploy/PI_OPERATIONS.md` for bring-up and provisioning. This subsection exists so that a work
+misbehaves** lives in `deploy/RUNBOOK.md` (PMP WBS 8.4, AVID-387), symptom-first — entries are named
+by what is *observed*, because the person reading it does not yet know which subsystem it is — and
+in `deploy/PI_OPERATIONS.md` for bring-up and provisioning. This subsection exists so that a work
 package which had no SDS section now has one — PMP §4.3's rule, honoured rather than worked around.
+
+The runbook is held to §14's standard rather than to a documentation one: `tests/docs/test_runbook.py`
+checks its cross-links resolve, that every endpoint it tells an operator to call is one this
+application actually serves — **in both directions**, so a route it describes as unimplemented
+failing to stay unimplemented is a red build — and that every entry carries the discriminator that
+separates its fault from the one it resembles. A runbook nothing checks is F-9 in prose.
 
 ---
 
