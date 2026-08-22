@@ -1,0 +1,21 @@
+{
+  "_what": "The M11 soak window (#389, O5, SDS §12.6). Written when the clock started.",
+  "_why_committed": "A window-start epoch held only on the Pi is one SD-card failure from making thirty days ungradeable. This file is the durable record; the same numbers are on issue #389.",
+  "window_start_epoch": 1787403029,
+  "window_start_utc": "2026-08-22T12:50:29Z",
+  "window_end_epoch": 1789995029,
+  "window_end_utc": "2026-09-21T12:50:29Z",
+  "days": 30,
+  "build_under_test": "v0.M10.0-45-g2bcb39e",
+  "boot_id_at_open": "5e1009ea-6a0d-423f-9ec8-f58b590904dc",
+  "boot_started_at": 1787402993,
+  "host": "AVID — Raspberry Pi 4 Model B Rev 1.5, 2 GB",
+  "host_timezone": "Etc/UTC",
+  "sampler": {
+    "unit": "soak-sampler.service",
+    "interval_s": 60,
+    "samples_db": "/var/lib/soak/samples.db",
+    "robot_db": "/var/lib/robot/robot.db"
+  },
+  "grade_command": "sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py --mode grade --since 1787403029 --config /etc/robot/config.toml"
+}
