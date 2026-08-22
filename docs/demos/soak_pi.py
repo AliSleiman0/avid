@@ -99,6 +99,10 @@ class _Criterion:
 
 # ── the sampler's own store ──────────────────────────────────────────────────────────────────
 
+# How close a logged intervention must be to an unclean stop to be treated as its explanation.
+# Generous: an operator writes the note before or after pulling the plug, not during.
+_INTERVENTION_MATCH_S = 900
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
     id        INTEGER PRIMARY KEY,
@@ -268,6 +272,112 @@ def _boot_records(db_path: str, since: int, until: int) -> list[BootRecord]:
         )
         for r in rows
     ]
+
+
+def _read_interventions(path: Path) -> list[dict[str, Any]]:
+    """The operator's own record of what they did to the robot (#389, SDS §12.6).
+
+    §12.6 states the limit this exists for: *"The mechanism cannot distinguish a deploy from an
+    operator `systemctl stop`: both are signals."* And a power cut cannot be distinguished from a
+    crash at all — both leave `stopped_at` NULL and nothing else. The log is where a human writes
+    down what the instrument structurally cannot see.
+
+    One JSON object per line, appended by hand::
+
+        {"at": 1787403600, "kind": "power_cut", "note": "unplugged the bench strip"}
+
+    ⚠️ **Never raises and never grades.** A malformed line is skipped and counted, because an
+    operator's typo at 2 a.m. must not take down the report for a thirty-day window.
+    """
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    malformed = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("at"), int):
+            entries.append(parsed)
+        else:
+            malformed += 1
+    if malformed:
+        entries.append(
+            {"at": 0, "kind": "_malformed", "note": f"{malformed} unreadable line(s)"}
+        )
+    return sorted(entries, key=lambda e: int(e["at"]))
+
+
+def _intervention_criterion(
+    entries: list[dict[str, Any]], unclean: list[BootRecord], window: tuple[int, int]
+) -> _Criterion:
+    """What the operator says they did, set beside what the robot recorded.
+
+    ⚠️ **Reported, never graded — and this is the important property.** An operator note must not
+    turn a red criterion green. *"Widening a budget to fit a measurement is a last resort, taken
+    only with the diagnosis attached, and the original target stays visible"* (§7.1); a human
+    typing "that one was me" is not a measurement at all. So AC-3 and AC-3b keep their verdicts and
+    this line adds the context a reader needs to interpret them.
+
+    What it *does* buy: an unplanned stop with a matching note reads as an explained event rather
+    than an unexplained one, and thirty days from now nobody will remember which was which.
+    """
+    since, until = window
+    inside = [
+        e
+        for e in entries
+        if since <= int(e["at"]) < until or e.get("kind") == "_malformed"
+    ]
+    # ⚠️ The empty-log case must still list the unclean stops, and getting this wrong was caught by
+    # its own test. An early return here meant the WORST case — stops with no explanation at all —
+    # produced the LEAST information, which is the "hid a criterion" family (§7.1) reappearing
+    # inside the thing written to prevent it.
+
+    # An unclean stop near a logged intervention is explained; one that is not, is not.
+    explained, rows = 0, []
+    for record in unclean:
+        near = [
+            e
+            for e in inside
+            if abs(int(e["at"]) - record.ended_at) <= _INTERVENTION_MATCH_S
+        ]
+        if near:
+            explained += 1
+            rows.append(
+                f"boot {record.boot_id[:8]} ended {record.ended_at} <- "
+                f"{near[0].get('kind', '?')}: {near[0].get('note', '')}"
+            )
+        else:
+            rows.append(
+                f"boot {record.boot_id[:8]} ended {record.ended_at} <- UNEXPLAINED"
+            )
+    for entry in inside:
+        rows.append(
+            f"logged {entry['at']} {entry.get('kind', '?')}: {entry.get('note', '')}"
+        )
+    detail = (
+        f"{len(inside)} logged; {explained} of {len(unclean)} unclean stop(s) have a matching "
+        f"note within {_INTERVENTION_MATCH_S}s. AC-3/AC-3b keep their verdicts regardless — a "
+        f"note explains an event, it does not excuse one."
+    )
+    if not inside:
+        detail = (
+            f"no interventions logged for this window, against {len(unclean)} unclean stop(s). "
+            "⚠️ That is not the same as 'nobody touched it' — this log is written by hand, so an "
+            "empty log and an unlogged power cut are indistinguishable here."
+        )
+    return _Criterion(
+        "INTV",
+        "operator interventions (reported, not graded)",
+        "recorded",
+        detail,
+        rows=rows[:12],
+    )
 
 
 def _memory_criterion(samples: list[sqlite3.Row]) -> _Criterion:
@@ -466,6 +576,11 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
         )
     )
     criteria.append(
+        _intervention_criterion(
+            _read_interventions(Path(args.interventions)), unplanned, (since, until)
+        )
+    )
+    criteria.append(
         _Criterion(
             "AC-3b",
             "zero unplanned stops (crash / watchdog kill)",
@@ -562,6 +677,12 @@ def main() -> int:
     parser.add_argument("--config", default="/etc/robot/config.toml")
     parser.add_argument("--samples", default="/var/lib/soak/samples.db")
     parser.add_argument("--robot-db", default="/var/lib/robot/robot.db")
+    parser.add_argument(
+        "--interventions",
+        default="/var/lib/soak/interventions.jsonl",
+        help="operator's own log of what they did to the robot (#389, SDS S12.6) - one JSON "
+        "object per line. Reported, never graded.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument(
