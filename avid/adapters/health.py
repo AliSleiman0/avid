@@ -28,7 +28,8 @@ import json
 import logging
 from uuid import uuid4
 
-from avid.core.ports import BehaviorTools, MetricsSource
+from avid.adapters.event_tap import EventTap, render, render_drops
+from avid.core.ports import BehaviorTools, MetricsSource, StateSource
 
 _log = logging.getLogger("avid.adapters.health")
 
@@ -56,6 +57,18 @@ _NOT_FOUND = (
     b"Connection: close\r\n"
     b"\r\n"
     b"not found"
+)
+
+
+# The SSE response head. `Cache-Control: no-cache` and the absence of Content-Length are what
+# make a client stream rather than buffer; `Connection: close` because HTTP/1.1 keep-alive has no
+# meaning for a response that never ends.
+_SSE_HEAD = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"Content-Type: text/event-stream\r\n"
+    b"Cache-Control: no-cache\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
 )
 
 
@@ -101,6 +114,9 @@ class HealthServer:
         port: int,
         behavior: BehaviorTools | None = None,
         metrics: MetricsSource | None = None,
+        state: StateSource | None = None,
+        tap: EventTap | None = None,
+        keepalive_s: float = 15.0,
     ) -> None:
         if bind not in _LOOPBACK:
             raise ValueError(
@@ -119,7 +135,22 @@ class HealthServer:
         # than pretending an unwired registry is an empty one — which would be this endpoint's own
         # "absent is not zero" rule, broken at the door.
         self._metrics = metrics
+        # §9.5's GET /state (#385) and GET /events/stream. Optional for the same reason as the two
+        # above, and answering 503 rather than inventing a reading: a robot whose state source was
+        # never wired is not a robot in an unknown state, it is an unwired server, and those are
+        # different sentences.
+        self._state = state
+        self._tap = tap
+        # How long a quiet stream waits before writing an SSE keepalive comment. Injected rather
+        # than a constant so a test can use a small one — and it is the mechanism AC-4 rests on:
+        # on an idle robot, the write to a client that walked away is what finally raises.
+        self._keepalive_s = keepalive_s
         self._server: asyncio.Server | None = None
+        # Every in-flight stream. `stop()` cancels them, because `server.wait_closed()` waits for
+        # open connections and one held-open `curl -N` would otherwise hold shutdown past
+        # systemd's 5 s stop budget (SDS §9.2) — a debugging endpoint taking the robot's shutdown
+        # down with it.
+        self._streams: set[asyncio.Task[None]] = set()
 
     @property
     def bound_port(self) -> int:
@@ -137,7 +168,18 @@ class HealthServer:
         _log.info("control API listening on %s:%d", self._bind, self.bound_port)
 
     async def stop(self) -> None:
-        """Stop serving and release the socket. Idempotent."""
+        """Stop serving, end every open stream, and release the socket. Idempotent.
+
+        ⚠️ The streams are cancelled **before** ``wait_closed()``, not after: an SSE client holds
+        its connection open indefinitely by design, and ``wait_closed()`` waits for open
+        connections. Closing the listener first and hoping would hang shutdown for as long as a
+        `curl -N` was left running.
+        """
+        for task in tuple(self._streams):
+            task.cancel()
+        if self._streams:
+            await asyncio.gather(*self._streams, return_exceptions=True)
+            self._streams.clear()
         if self._server is None:
             return
         self._server.close()
@@ -161,6 +203,13 @@ class HealthServer:
             # how much body to expect, and reading to the blank line is what lets the client's
             # write complete before we reply and close.
             length = await self._read_headers(reader)
+            # ⚠️ One route does not answer-and-close. Everything else in this server writes a
+            # complete response and hangs up; `/events/stream` holds the socket open for hours by
+            # design, so it takes the writer instead of returning bytes — and it must be
+            # dispatched here rather than inside `_route`, whose contract is "return a response".
+            if method == "GET" and path == "/events/stream":
+                await self._serve_stream(writer)
+                return
             writer.write(await self._route(method, path, reader, length))
             await writer.drain()
         except (OSError, ValueError, asyncio.IncompleteReadError) as exc:
@@ -187,10 +236,18 @@ class HealthServer:
             if method != "GET":
                 return _METHOD_NOT_ALLOWED
             return self._metrics_response()
+        if path == "/state":
+            if method != "GET":
+                return _METHOD_NOT_ALLOWED
+            return self._state_response()
         if path == "/quiet":
             if method != "POST":
                 return _METHOD_NOT_ALLOWED
             return await self._quiet(reader, length)
+        if path == "/events/stream":
+            # A GET reaches `_serve_stream` before this and never arrives here; anything else is
+            # the wrong method rather than an unknown path, the same distinction `/quiet` makes.
+            return _METHOD_NOT_ALLOWED
         return _NOT_FOUND
 
     def _metrics_response(self) -> bytes:
@@ -211,6 +268,87 @@ class HealthServer:
             _log.warning("metrics snapshot could not be serialised: %s", exc)
             return _response("500 Internal Server Error", b"metrics unavailable")
         return _response("200 OK", body, content_type="application/json")
+
+    def _state_response(self) -> bytes:
+        """``GET /state`` — §9.5's row: the operational state, the affect, and the session (#385).
+
+        Synchronous for the same reason ``_metrics_response`` is: every value behind
+        :class:`~avid.core.ports.StateSource` is an attribute read, and adding an ``await`` would
+        only invite someone to put a query behind one (P8).
+
+        ⚠️ ``RobotState`` and ``Affect`` arrive as two independent readings and are serialised as
+        two independent fields. SDS §3.10 makes them orthogonal, and a route that inferred one
+        from the other would publish that error as fact — see ``core/state_report.py``.
+        """
+        if self._state is None:
+            return _response("503 Service Unavailable", b"no state source")
+        try:
+            body = json.dumps(self._state.snapshot()).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            _log.warning("state snapshot could not be serialised: %s", exc)
+            return _response("500 Internal Server Error", b"state unavailable")
+        return _response("200 OK", body, content_type="application/json")
+
+    async def _serve_stream(self, writer: asyncio.StreamWriter) -> None:
+        """``GET /events/stream`` — the SSE tap (#385, SDS §9.5, §3.5.1).
+
+        Run as a tracked task so :meth:`stop` can cancel it; the caller awaits that task, so a
+        client disconnecting still unwinds through the ``finally`` here.
+        """
+        if self._tap is None:
+            writer.write(_response("503 Service Unavailable", b"no event tap"))
+            await writer.drain()
+            return
+        task = asyncio.current_task()
+        if task is not None:
+            self._streams.add(task)
+        try:
+            await self._pump_stream(writer, self._tap)
+        except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+            # The ordinary end of a stream: the client pressed Ctrl-C. Not a warning.
+            _log.debug("event stream closed by the client: %s", exc)
+        except asyncio.CancelledError:
+            _log.debug("event stream cancelled by shutdown")
+        finally:
+            if task is not None:
+                self._streams.discard(task)
+
+    async def _pump_stream(self, writer: asyncio.StreamWriter, tap: EventTap) -> None:
+        """Write SSE frames until the client goes away or the server stops.
+
+        ⚠️ The keepalive is not cosmetic. On an idle robot nothing is published for minutes, and a
+        socket is only discovered to be dead when something is written to it — so without a
+        periodic comment a vanished ``curl`` would sit in the tap's client set indefinitely,
+        which is AC-4's leak.
+        """
+        # ⚠️ Attach BEFORE writing the head, not after. Between the two there is an `await`, and
+        # anything published inside it would be missed by a client that has already been told the
+        # stream is open — a tap with a blind spot at exactly the moment you started watching. It
+        # also makes attachment observable the instant the client can read the head, which is what
+        # lets the tests assert rather than poll.
+        client = tap.attach()
+        try:
+            writer.write(_SSE_HEAD)
+            await writer.drain()
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        client.queue.get(), timeout=self._keepalive_s
+                    )
+                except TimeoutError:
+                    writer.write(b": keepalive\n\n")
+                    await writer.drain()
+                    continue
+                if client.dropped:
+                    # Told in band, before the next event, so the gap is visible exactly where it
+                    # happened. §3.5.5: silent drops are a debugging catastrophe — and this is the
+                    # debugger.
+                    writer.write(render_drops(client.dropped))
+                    client.dropped = 0
+                writer.write(render(event))
+                await writer.drain()
+        finally:
+            tap.detach(client)
 
     async def _quiet(self, reader: asyncio.StreamReader, length: int | None) -> bytes:
         """``POST /quiet {"duration_s": N}`` — §9.5's row, §10.4's manual override.

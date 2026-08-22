@@ -16,6 +16,8 @@ import pytest
 
 from avid.adapters import HealthServer
 from avid.core.metrics import MetricsRegistry, ProvidedMetrics
+from avid.core.state_report import StateReport
+from avid.domain import Affect, RobotState
 
 
 async def _request(port: int, path: str) -> tuple[int, bytes]:
@@ -288,5 +290,143 @@ async def test_metrics_survives_an_unserialisable_value() -> None:
     try:
         status, _ = await _request(server.bound_port, "/metrics")
         assert status == 500
+    finally:
+        await server.stop()
+
+
+# ── GET /state (#385, SDS §9.5) ────────────────────────────────────────────────────────────
+
+
+def _report(
+    *, state: object = None, affect: object = None, session: object = None
+) -> StateReport:
+    report = StateReport()
+    if state is not None:
+        report.register("state", lambda: state)
+    if affect is not None:
+        report.register("affect", lambda: affect)
+    if session is not None:
+        report.register("session", lambda: session)
+    return report
+
+
+async def test_state_reports_the_operational_state_and_the_affect() -> None:
+    server = HealthServer(
+        bind="127.0.0.1",
+        port=0,
+        state=_report(state=RobotState.LISTENING, affect=Affect.HAPPY, session=True),
+    )
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/state")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["state"] == "LISTENING"
+        assert payload["affect"] == "HAPPY"
+        assert payload["session"] is True
+        assert payload["absent"] == []
+    finally:
+        await server.stop()
+
+
+@pytest.mark.parametrize(
+    ("state", "affect"),
+    [
+        (RobotState.SLEEPING, Affect.HAPPY),
+        (RobotState.LISTENING, Affect.CONFUSED),
+        (RobotState.IDLE, Affect.SLEEPING),
+    ],
+)
+async def test_state_and_affect_are_reported_independently(
+    state: RobotState, affect: Affect
+) -> None:
+    """AC-1, and the reason it is spelled out.
+
+    SDS §3.10 makes the two **orthogonal** — the robot can be SLEEPING-and-happy or
+    IDLE-and-sleeping-faced — and *"conflating them is the most common design error in this class
+    of project"*. A reporter that derived affect from state could satisfy one of these rows and
+    not all three; the last is the one that catches it, since a derived affect would say IDLE.
+    """
+    server = HealthServer(
+        bind="127.0.0.1", port=0, state=_report(state=state, affect=affect)
+    )
+    await server.start()
+    try:
+        _, body = await _request(server.bound_port, "/state")
+        payload = json.loads(body)
+        assert payload["state"] == state.name
+        assert payload["affect"] == affect.name
+    finally:
+        await server.stop()
+
+
+async def test_state_names_what_it_could_not_read_rather_than_inventing_it() -> None:
+    """The same rule ``/metrics`` applies: absent is not a default (SDS §3.12.2).
+
+    A ``/state`` that answered ``IDLE`` because nothing was wired would be a lie with a plausible
+    face — and the reader has no way to tell it from a genuinely idle robot.
+    """
+    server = HealthServer(
+        bind="127.0.0.1", port=0, state=_report(state=RobotState.IDLE)
+    )
+    await server.start()
+    try:
+        _, body = await _request(server.bound_port, "/state")
+        payload = json.loads(body)
+        assert payload["state"] == "IDLE"
+        assert payload["absent"] == ["affect", "session"]
+        assert "affect" not in payload
+    finally:
+        await server.stop()
+
+
+async def test_state_is_503_when_no_source_is_wired() -> None:
+    server = HealthServer(bind="127.0.0.1", port=0)
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/state")
+        assert status == 503
+        assert b"no state source" in body
+    finally:
+        await server.stop()
+
+
+async def test_a_state_provider_that_raises_does_not_take_the_robot_down() -> None:
+    """SDS §3.12.3: a crashing control endpoint must not stop the robot — and a reliability
+    defect living inside a reliability feature is the worst place to put one."""
+
+    def boom() -> RobotState:
+        raise RuntimeError("the source is broken")
+
+    report = StateReport()
+    report.register("state", boom)
+    report.register("affect", lambda: Affect.IDLE)
+    server = HealthServer(bind="127.0.0.1", port=0, state=report)
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/state")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["affect"] == "IDLE"
+        assert "state" in payload["absent"]
+    finally:
+        await server.stop()
+
+
+async def test_state_rejects_the_wrong_method() -> None:
+    server = HealthServer(
+        bind="127.0.0.1", port=0, state=_report(state=RobotState.IDLE)
+    )
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.bound_port)
+        writer.write(
+            b"POST /state HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+        )
+        await writer.drain()
+        status_line = await reader.readline()
+        await reader.read()
+        writer.close()
+        assert int(status_line.split()[1]) == 405
     finally:
         await server.stop()

@@ -47,6 +47,7 @@ from avid.adapters import (
     SystemdNotifier,
 )
 from avid.adapters.build_id import resolve_build_id
+from avid.adapters.event_tap import event_types
 from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
@@ -558,12 +559,22 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
     assert main(["--config", str(_SIM_TOML)]) == 0
 
     bus = captured["bus"]
+    # ⚠️ The SSE tap (#385) subscribes to EVERY domain event type, so `set(bus._subs)` is now the
+    # whole catalogue and would say nothing. The property this test exists for — *a service
+    # subscribes to what it needs and nothing more* — is preserved by asking a narrower question:
+    # which types have a subscriber that is not the tap. Widening the expected set to "everything"
+    # instead would have kept the test green and thrown the assertion away.
+    service_subscribed = {
+        event_type
+        for event_type, subs in bus._subs.items()
+        if any(not sub.name.startswith("EventTap.") for sub in subs)
+    }
     # Every event type the wired services care about, and nothing else: the two reactive faces,
     # ConversationService's ``audio.speech_started`` origin + ``audio.speech_ended`` (#102) + its
     # ``audio.playback_finished`` barge-in feed (#104), the cost meter's ``conversation.turn_ended``
     # (#105), and EpisodeRecorder's four ``conversation.*`` facts (#123 — ``turn_started`` /
     # ``user_transcribed`` / ``assistant_responded`` new here; ``turn_ended`` shared with the meter).
-    assert set(bus._subs) == {
+    assert service_subscribed == {
         AffectChanged,
         StateTransitioned,
         AudioSpeechStarted,
@@ -597,9 +608,28 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         MotionGestureCompleted,
         MotionGesturePreempted,
     }
+    # And the tap's own half of the same claim: it hears everything, by construction.
+    tap_subscribed = {
+        event_type
+        for event_type, subs in bus._subs.items()
+        if any(sub.name.startswith("EventTap.") for sub in subs)
+    }
+    assert tap_subscribed == set(event_types()), (
+        "the SSE tap must subscribe to every domain event type — an event missing from the tap "
+        "is invisible in exactly the situation the tap exists for"
+    )
 
     subs = [sub for subs in bus._subs.values() for sub in subs]
-    assert {sub.name for sub in subs} == _EXPECTED_SUBSCRIPTIONS
+    # Same split as above, for the same reason: `_EXPECTED_SUBSCRIPTIONS` is §9.1.5's drift check
+    # over the SERVICES' subscriber names, and folding 32 `EventTap.*` names into it would turn a
+    # precise list into a list nobody maintains. The tap's names are checked against their own
+    # source instead.
+    assert {
+        sub.name for sub in subs if not sub.name.startswith("EventTap.")
+    } == _EXPECTED_SUBSCRIPTIONS
+    assert {sub.name for sub in subs if sub.name.startswith("EventTap.")} == {
+        f"EventTap.{event_type.__name__}" for event_type in event_types()
+    }
     # DROP_OLDEST for the edges where only the latest reading is worth acting on (§9.1.3).
     # BehaviorService's memory + system feeds are DROP_NEWEST, matching the catalog's own column:
     # a dropped `memory.fact_stored` is a routine that never becomes a schedule, so the OLDEST
