@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-22 · `main = 8afcb7d` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
+**As of:** 2026-08-22 · `main = 548316e` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
 
 ## ⭐ Next session — ⏱️ THE SOAK IS RUNNING. Do not deploy to the Pi.
 
@@ -72,11 +72,13 @@ nothing else will remember which was which.
 | ~~**#21**~~ | ~~SDS §13, Security & Privacy~~ | ✅ **§13.1–§13.7 written, #427** |
 | **#385** | `GET /state` + the SSE tap | ⚠️ landing it **fails `tests/docs/test_runbook.py`** by design — §1.3 documents the route as unbuilt, so the change that makes that wrong must update it |
 | **#386** | `GET /facts` — §7.10's privacy audit | same guard, same reason |
-| **#388** | AC-1…AC-6, the release artifact | only AC-7 landed |
+| ~~**#388**~~ | ~~AC-1…AC-6, the release artifact~~ | ✅ **#430 + #431; the dry run is green** |
 
-**Group B has no `prio:must` left.** What remains is #388 (the release artifact — AC-1…AC-6; only
-AC-7 landed) and the two API routes, and **#385/#386 now carry a deliberate tripwire in two
-places**: both `tests/docs/` guards assert those routes are unbuilt, so shipping either turns the
+⚠️ **CORRECTION to what this section said earlier today.** It claimed Group B had no `prio:must`
+left while **#388 was labelled `prio:must`** — it was one, and it is now done. Group B is *now*
+genuinely empty of `must`s: only #385 and #386 remain, both `prio:should`.
+
+**#385/#386 carry a deliberate tripwire in two places**: both `tests/docs/` guards assert those routes are unbuilt, so shipping either turns the
 runbook *and* the security documents red until they are updated. That is the intended cost, not an
 obstacle — but budget for it.
 
@@ -177,18 +179,52 @@ documents. Two design notes worth reusing:
 
 13 neuters, 13 real assertion failures.
 
+### 📦 The release path shipped (#388 → #430, #431)
+
+`v1.0.0` at the M11 gate now has a path to exist. build → verify → publish, and **publish `needs:`
+verify** — that edge is the whole of AC-3, because an artifact nobody has installed is a tarball,
+and a verify step running *beside* the thing it gates is a gate that passes on silence.
+Verification installs the wheel on **3.11**, from the wheel alone with no checkout on the path.
+
+⚠️ **AC-6's dry run failed on its first execution**, which is the entire argument for AC-6: a
+`workflow_dispatch` names a tag nobody created, and the notes generator ran `git log <that tag>`
+and died with exit 128. The path could be *run* but not *rehearsed*. Fixed in #431; the second run
+is green with `publish` correctly **skipped**.
+
+⚠️ **Two of my own guards were passing on silence**, caught by the neuter step before merge: a
+`uses:` regex that matched nothing (the workflow writes `- uses:`), so a third-party action could
+be inserted and the test stayed green; and a missing-member test satisfied by `tarfile` raising all
+by itself. Both fixed and re-neutered. **17 neuters, 2 inert** — that ratio is the argument for the
+step.
+
+⚠️ **And I hit the `git checkout --` trap this file already records** — the neuter harness restored
+a file to HEAD and destroyed the *uncommitted* fix it was proving. Commit first, then neuter, then
+restore. Cost one reapply; recorded again because knowing it was not enough.
+
+**Decisions now written down in `docs/RELEASE.md`:** what "Pi-deployable" means (the permanence
+guarantee, not the deployment mechanism — the Pi runs an editable checkout and `git pull`s), and
+**no retroactive artifacts** — one built today from an old tree and labelled as that milestone
+would be a fabrication of a build that never happened.
+
+Sharpening the premise: `v0.M4.0` *does* have a GitHub Release. It has **0 assets**, so the issue's
+claim held exactly as written.
+
 ### Closed and filed today
 
-**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21**.
+**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21** · **#388**.
 **Filed:** **#428** (no capture indicator — out of §13.5) · #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
 pre-fix run) · #407 (five modules say "ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**.
+**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**, **#430**, **#431**.
 
 ---
 
 ## Current state
 
-- **`main = 8afcb7d`**, zero open PRs. Suite **1787 passed / 67 skipped** on 3.11 and 3.13.
+- **`main = 548316e`**, zero open PRs. Suite **1826 passed / 67 skipped** on 3.11 and 3.13.
+- 📦 **A tag now builds a verified artifact** (#388 → #430/#431). `git push origin vX` runs
+  build → verify → publish, and **publish `needs:` verify**. Dry-run it any time with
+  `gh workflow run release.yml -f tag=v0.0.0-rc.1` — it builds and verifies and does **not**
+  publish. `docs/RELEASE.md` carries the decisions.
 - 🔐 **`SDS.md` §13 is now the security authority** (#21/#427) and `SECURITY.md` is the
   operator-facing summary that defers to it. Do not add a rule to `SECURITY.md` without §13.
 - 📕 **`deploy/RUNBOOK.md` exists** (#387/#425) — symptom-first, thirteen entries, each Confirm /
