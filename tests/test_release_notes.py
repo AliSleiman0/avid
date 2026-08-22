@@ -12,6 +12,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TOOL = _REPO_ROOT / "tools" / "release_notes.py"
@@ -35,7 +36,10 @@ parse = _h.parse
 render_notes = _h.render_notes
 
 
-def _commits(*subjects: str) -> list[Commit]:
+def _commits(*subjects: str) -> list[Any]:
+    # `Commit` comes from a path-loaded module, so it is a value rather than a name mypy can use
+    # in a type position (`tools/` is deliberately not a package — see `_load`). `Any` here is
+    # the honest annotation, not a dodge: the element type genuinely is not statically known.
     return [
         Commit(sha=f"{index:07x}", subject=subject)
         for index, subject in enumerate(subjects)
