@@ -16,6 +16,9 @@ Companion documents:
   is not the repo* — `/etc/robot/config.toml` and the systemd unit are copies that rot, and because
   missing config keys fall back to schema defaults, drift yields **silently wrong results**, not
   errors.
+- **`deploy/RUNBOOK.md`** — symptom-first: *the robot is misbehaving right now, what do I do.*
+  Named by what you observe, not by subsystem. Each entry says how to confirm it, how to fix it, and
+  **how to tell it apart from the thing it resembles** — which is where its value is.
 
 ---
 
