@@ -156,24 +156,55 @@ def test_every_curled_route_is_served() -> None:
     )
 
 
-def test_routes_documented_as_unimplemented_are_still_unimplemented() -> None:
-    """The other direction, and the one that bites later.
+def _claim_blocks(text: str) -> list[str]:
+    """The document split into claim blocks: paragraphs, then bullets and table rows.
 
-    §1.3 tells the reader that ``/state``, ``/facts`` and ``/events/stream`` 404 today (#385,
-    #386). The day either ships, this fails — so the runbook is updated by the change that makes
-    it wrong, instead of quietly costing someone a night.
+    Shared in spirit with ``tests/docs/test_security_claims.py``'s helper of the same shape, and
+    kept as two copies on purpose: these two modules are each other's independent check on the
+    same documents, and a shared helper is a single point at which both could go blind together.
+    """
+    blocks: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        if not paragraph.strip():
+            continue
+        blocks.extend(
+            block
+            for block in re.split(r"\n(?=\s*(?:[-*]\s|\|))", paragraph)
+            if block.strip()
+        )
+    return blocks
+
+
+def test_no_served_route_is_described_as_unimplemented() -> None:
+    """The other direction, and the one that bit twice.
+
+    §1.3 used to tell the reader that ``/state``, ``/facts`` and ``/events/stream`` 404. As each
+    shipped (#385, #386) this failed and the runbook was corrected by the change that made it
+    wrong — which is the whole point, and it worked.
+
+    ⚠️ Scoped to the **claim block** rather than the whole document, matching the fix
+    ``tests/docs/test_security_claims.py`` needed for the identical reason: "does the phrase
+    appear anywhere in the file" is only a correct question while *every* route named here is
+    unbuilt together. The moment one ships and another has not, a surviving sentence about the
+    second makes the check accuse the first. Fixed here at the same time deliberately — a
+    correction that lands in one document and not its sibling is the exact defect AVID-21 found
+    (SDS §3.12.2's `structlog` sentence, corrected in #378 and left standing in `SECURITY.md`).
     """
     served = _served_routes()
-    for route in ("/state", "/facts", "/events/stream"):
-        claim = f"`GET {route}`"
-        if route in served:
-            assert claim not in _RUNBOOK, (
-                f"{route} is now served, but RUNBOOK.md §1.3 still lists it as unimplemented"
-            )
-        else:
-            assert claim in _RUNBOOK, (
-                f"{route} is still unimplemented and RUNBOOK.md no longer says so"
-            )
+    checked = 0
+    for route in ("/state", "/facts", "/events/stream", "/metrics", "/health"):
+        for block in _claim_blocks(_RUNBOOK):
+            if route not in block:
+                continue
+            checked += 1
+            if route in served:
+                assert "not implemented" not in block, (
+                    f"{route} is served, but RUNBOOK.md still calls it not implemented "
+                    f"in: {block[:120]!r}"
+                )
+    assert checked, (
+        "no route is mentioned in the runbook at all — this guard has gone blind"
+    )
 
 
 def test_literals_match_their_sources() -> None:

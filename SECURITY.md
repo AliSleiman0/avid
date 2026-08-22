@@ -37,10 +37,8 @@ scoping buys.
   **Localhost binding *is* the authentication.**
 - `0.0.0.0` would be a security bug. `ApiConfig` rejects a non-loopback bind **at config load**, so
   the process refuses to start; the server asserts it again at construction.
-- ⚠️ **As built the API serves `/health`, `/metrics`, `/state`, `/events/stream` and
-  `POST /quiet`** (#385).
-- ⚠️ `/facts` appears in SDS §9.5 but is **not implemented** (#386), so §7.10's audit is currently
-  a spoken query rather than an endpoint.
+- **As built the API serves `/health`, `/metrics`, `/state`, `/facts`, `/events/stream` and
+  `POST /quiet`** — every route SDS §9.5 specifies (#380, #385, #386).
 - `/events/stream` is a **read-only tap** on the internal event bus (#385): event names, sources
   and correlation ids, never payloads. Like every other route it is loopback-only, and that is
   the whole of its access control — a live feed of what the robot is doing deserves the same
@@ -62,7 +60,9 @@ scoping buys.
   deletion is a privacy bug, so it is never an event.
 - Raw transcripts are retained **90 days**, and the retention is **enforced** by `EpisodeRecorder`'s
   bounded prune pass — not merely declared (§7.5).
-- The "what do you know about me?" audit is currently a **spoken query**; the endpoint is #386.
+- The "what do you know about me?" audit is **`GET /facts`** (#386), reading through the same
+  `FactRepository` the robot writes to; `?include_superseded=1` adds the history §7.8 retired. A
+  forgotten fact appears in **neither** view, because `forget` deleted it.
 - ⚠️ **Two escapes, named in §13.3**: provisioning backups under `/var/backups/robot/` sit outside
   the retention window and outside `forget`'s reach, and **user content reaches the logs in two
   known places** (the `forget` query text and the "routine fact stored with no schedule" warning).

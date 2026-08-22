@@ -1039,6 +1039,7 @@ class FactRepository(Protocol):          # durable fact storage, as MemoryServic
     async def add(self, fact: Fact, *, embedding: bytes | None = None) -> int: ...  # returns the assigned rowid
     async def get(self, fact_id: int) -> Fact | None: ...
     async def fetch_live(self) -> Sequence[Fact]: ...              # non-superseded, idx_facts_live hot path
+    async def fetch_all(self) -> Sequence[Fact]: ...               # §7.10's audit (#386): history too, created_at order
     async def mark_superseded(self, old_id: int, new_id: int, *, at: int) -> None: ...  # §7.8; paired CHECK
     async def delete(self, fact_id: int) -> None: ...             # forget() primitive, hard DELETE + cascade (§7.10)
     async def load_embeddings(self) -> Sequence[tuple[int, bytes]]: ...  # (id, BLOB) for the §8.5 boot rebuild
@@ -3066,12 +3067,12 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
 | `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`. ⚠️ **`build` is the deployed commit, not the release line** (AVID-388): `git describe --always --dirty --tags`, falling back to `avid.__version__` off a checkout. `-dirty` means the machine has been edited. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
 | `GET` | `/state` | Current `RobotState`, `Affect`, session status — **three independent readings** (§3.10: the two are orthogonal, so neither is derived from the other), plus an `absent` list. Built at AVID-385. |
-| `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" ⚠️ **Not built** — AVID-386; the audit is currently a *spoken* query answered from memory, not an endpoint (§13.4). |
-| `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8. ⚠️ **Not built** — AVID-386. |
+| `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" Built at AVID-386, through the `FactRepository` port — never fresh SQL. |
+| `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8 — `fetch_all`, **created_at order**, because a supersession chain read accessed-first is unreadable as a chain. A malformed flag is a 400, not a silent `false`. |
 | `POST` | `/quiet` | `{duration_s}` — §10.4's manual override, also reachable via `set_quiet` tool |
 | `GET` | `/events/stream` | **SSE tap. Live event feed.** Built at AVID-385. ⚠️ One subscription **per concrete event type** — dispatch is by exact runtime type with no subclass fan-out (§9.1.5) and subscription is static (§3.5.2), so a wildcard tap is structurally impossible and "ten lines" below was wrong. Per-client bounded queue, `DROP_OLDEST`, and the client is **told** what it missed. |
 
-⚠️ **As built, this server answers `/health`, `/metrics`, `/state`, `/events/stream` and `POST /quiet`** (`avid/adapters/health.py`; unknown paths 404, a known path with the wrong method 405). Only the two `/facts` rows remain design rather than machine (AVID-386) — the distinction this document has paid for elsewhere as F-9, and one `tests/docs/` now holds in place for the security documents (§13.7) and the runbook alike, in both directions.
+**As built, this server answers every route in the table above** (`avid/adapters/health.py`; unknown paths 404, a known path with the wrong method 405) — the last of them at AVID-386. For three milestones this section described rows that did not exist, which is the F-9 shape this document has paid for elsewhere; `tests/docs/` now holds the description and the machine together, in both directions, for the security documents (§13.7) and the runbook alike.
 
 `/events/stream` deserves its place. §3.5.1 admits you can't read the code and know what happens. Correlation IDs let you reconstruct a turn *afterwards*, from logs. This lets you watch it happen, live, while you talk to the robot:
 
@@ -3910,12 +3911,13 @@ routable address would be a security bug, and it is not merely documented — `A
 validator rejects any non-loopback `bind` **at config load**, so the whole process refuses to
 start misconfigured, and `LocalHealthServer.__init__` asserts it again as defence in depth.
 
-⚠️ **As built the server answers `/health`, `/metrics`, `/state`, `/events/stream` and
-`POST /quiet`** (AVID-385).
+**As built the server answers every route §9.5 specifies** — `/health`, `/metrics`, `/state`,
+`/facts`, `/events/stream` and `POST /quiet` (AVID-380, AVID-385, AVID-386).
 
-⚠️ §9.5's table also describes `/facts`, and that one is **not implemented** (AVID-386) — so
-§7.10's audit, *"what do you know about me?"*, is still a **spoken query answered from memory**
-rather than an endpoint anyone can curl.
+§7.10's audit, *"what do you know about me?"*, is therefore `GET /facts`, reading through the same
+`FactRepository` the robot writes to. ⚠️ It is **loopback-only like everything else**, and that
+binding is doing more work here than anywhere: this route returns every fact the robot holds about
+its user in one response.
 
 `/events/stream` is a read-only tap on the internal bus and it carries **event names, sources and
 correlation ids, never payloads** — deliberately, because a tap that reproduced every event's

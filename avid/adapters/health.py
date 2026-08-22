@@ -26,10 +26,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import asdict
+from enum import Enum
+from urllib.parse import parse_qs
 from uuid import uuid4
 
 from avid.adapters.event_tap import EventTap, render, render_drops
-from avid.core.ports import BehaviorTools, MetricsSource, StateSource
+from avid.core.ports import BehaviorTools, FactRepository, MetricsSource, StateSource
+from avid.domain.memory import Fact
 
 _log = logging.getLogger("avid.adapters.health")
 
@@ -70,6 +74,40 @@ _SSE_HEAD = (
     b"Connection: close\r\n"
     b"\r\n"
 )
+
+
+def _include_superseded(query: str) -> bool | None:
+    """Parse ``?include_superseded=0|1``. ``None`` means the caller asked for something else.
+
+    ⚠️ A value that is neither 0 nor 1 is an error rather than a silent ``False``. On a privacy
+    endpoint a typo that quietly *narrows* what you are shown is the wrong failure: the reader
+    would see a shorter list and no reason to doubt it. Absent is fine and means live-only, which
+    is the documented default and not a guess.
+    """
+    parsed = parse_qs(query, keep_blank_values=True)
+    values = parsed.get("include_superseded")
+    if not values:
+        return False
+    if len(values) != 1 or values[0] not in ("0", "1"):
+        return None
+    return values[0] == "1"
+
+
+def _render_fact(fact: Fact) -> dict[str, object]:
+    """One fact as JSON. Enum by name, tuple to list, UUID to str.
+
+    The embedding is not here because it is not on :class:`~avid.domain.memory.Fact` at all
+    (§8.5 keeps the vector on the index side) — so the field that would turn an audit into a
+    1,536-byte-per-row dump nobody reads is excluded by the domain's own shape rather than by a
+    filter someone has to remember.
+    """
+    rendered: dict[str, object] = asdict(fact)
+    rendered["kind"] = fact.kind.name if isinstance(fact.kind, Enum) else fact.kind
+    rendered["derived_from"] = list(fact.derived_from)
+    rendered["source_correlation_id"] = (
+        str(fact.source_correlation_id) if fact.source_correlation_id else None
+    )
+    return rendered
 
 
 def _response(status: str, body: bytes, *, content_type: str = "text/plain") -> bytes:
@@ -116,6 +154,7 @@ class HealthServer:
         metrics: MetricsSource | None = None,
         state: StateSource | None = None,
         tap: EventTap | None = None,
+        facts: FactRepository | None = None,
         keepalive_s: float = 15.0,
     ) -> None:
         if bind not in _LOOPBACK:
@@ -141,6 +180,10 @@ class HealthServer:
         # different sentences.
         self._state = state
         self._tap = tap
+        # §7.10's audit, over the same port MemoryService writes through (#386). Optional like the
+        # rest, and 503 when absent — this route answers "what do you know about me?", and an empty
+        # list from an unwired store is the one wrong answer it must never give.
+        self._facts = facts
         # How long a quiet stream waits before writing an SSE keepalive comment. Injected rather
         # than a constant so a test can use a small one — and it is the mechanism AC-4 rests on:
         # on an idle robot, the write to a client that walked away is what finally raises.
@@ -198,7 +241,11 @@ class HealthServer:
         try:
             request_line = await reader.readline()
             method, _, rest = request_line.decode("latin-1").partition(" ")
-            path = rest.partition(" ")[0]
+            target = rest.partition(" ")[0]
+            # ⚠️ Split once, here. Every route compares `path` to a literal, so before #386 a
+            # request for `/health?x=1` was a 404 — harmless until a route needed a parameter, and
+            # then it is the whole feature. `query` is passed down rather than re-parsed per route.
+            path, _, query = target.partition("?")
             # The headers are read rather than discarded now: POST needs Content-Length to know
             # how much body to expect, and reading to the blank line is what lets the client's
             # write complete before we reply and close.
@@ -210,7 +257,7 @@ class HealthServer:
             if method == "GET" and path == "/events/stream":
                 await self._serve_stream(writer)
                 return
-            writer.write(await self._route(method, path, reader, length))
+            writer.write(await self._route(method, path, query, reader, length))
             await writer.drain()
         except (OSError, ValueError, asyncio.IncompleteReadError) as exc:
             _log.warning("control API request dropped: %s", exc)
@@ -221,6 +268,7 @@ class HealthServer:
         self,
         method: str,
         path: str,
+        query: str,
         reader: asyncio.StreamReader,
         length: int | None,
     ) -> bytes:
@@ -240,6 +288,10 @@ class HealthServer:
             if method != "GET":
                 return _METHOD_NOT_ALLOWED
             return self._state_response()
+        if path == "/facts":
+            if method != "GET":
+                return _METHOD_NOT_ALLOWED
+            return await self._facts_response(query)
         if path == "/quiet":
             if method != "POST":
                 return _METHOD_NOT_ALLOWED
@@ -349,6 +401,40 @@ class HealthServer:
                 await writer.drain()
         finally:
             tap.detach(client)
+
+    async def _facts_response(self, query: str) -> bytes:
+        """``GET /facts`` — §7.10's privacy audit, *"what do you know about me?"* (#386).
+
+        §7.10's guarantee has two halves: ``forget`` is a hard cascading DELETE, and the user can
+        **see** what is held about them. The delete half shipped at M7; this is the other one, and
+        until it existed the answer required opening SQLite by hand — which is not an answer a user
+        has.
+
+        ⚠️ **Awaits, where its two neighbours are synchronous.** ``/metrics`` and ``/state`` read
+        attributes; this reads a database, so it goes through the port's executor and never touches
+        the loop with SQLite (P8, AC-4). A store with thousands of facts must not stall the robot
+        to answer a curl.
+
+        ⚠️ **The scope is echoed back.** *"What do you know about me"* answered with a bare list is
+        an answer the reader cannot check — they cannot tell a short history from a filtered one.
+        """
+        if self._facts is None:
+            return _response("503 Service Unavailable", b"no fact store")
+        include = _include_superseded(query)
+        if include is None:
+            return _response(
+                "400 Bad Request",
+                b"include_superseded must be 0 or 1",
+            )
+        facts = await (self._facts.fetch_all() if include else self._facts.fetch_live())
+        body = json.dumps(
+            {
+                "facts": [_render_fact(fact) for fact in facts],
+                "count": len(facts),
+                "include_superseded": include,
+            }
+        ).encode("utf-8")
+        return _response("200 OK", body, content_type="application/json")
 
     async def _quiet(self, reader: asyncio.StreamReader, length: int | None) -> bytes:
         """``POST /quiet {"duration_s": N}`` — §9.5's row, §10.4's manual override.

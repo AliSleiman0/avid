@@ -132,6 +132,41 @@ async def test_fetch_live_excludes_superseded_and_orders_by_recency(
     assert ids == [new, mid]  # most-recently-accessed first (idx_facts_live order)
 
 
+async def test_fetch_all_includes_superseded_and_orders_by_creation(
+    repo: FactRepository,
+) -> None:
+    """§7.10's audit view (#386) — a genuinely different question from ``fetch_live``.
+
+    ``fetch_live`` answers *what is true now*, most-recently-accessed first, for the §7.7 ranking
+    hot path. This answers *what has ever been held about me*, which is a **rights** question: the
+    rows supersession retired are exactly the ones a user asking "what do you know about me" is
+    entitled to see. Ordered by creation so a supersession chain reads as a chain.
+    """
+    old = await repo.add(make_fact(text="drinks coffee", created_at=100, last_accessed_at=900))
+    new = await repo.add(make_fact(text="drinks tea now", created_at=200, last_accessed_at=100))
+    await repo.mark_superseded(old, new, at=250)
+
+    everything = await repo.fetch_all()
+    ids = [fact.id for fact in everything]
+    assert ids == [old, new], "history is oldest-first; accessed-order would read as [new, old]"
+    superseded = next(fact for fact in everything if fact.id == old)
+    assert superseded.superseded_by == new
+
+
+async def test_fetch_all_does_not_resurrect_a_forgotten_fact(
+    repo: FactRepository,
+) -> None:
+    """AC-6 at the store. ``forget`` is a hard cascading DELETE (§7.10), so the history view has
+    nothing to show — the row is gone, not hidden, and a view that could show it would mean the
+    deletion had never been one."""
+    kept = await repo.add(make_fact(text="has a dog called Biscuit"))
+    forgotten = await repo.add(make_fact(text="is looking for a new job"))
+    await repo.delete(forgotten)
+
+    assert [fact.id for fact in await repo.fetch_all()] == [kept]
+    assert [fact.id for fact in await repo.fetch_live()] == [kept]
+
+
 async def test_mark_superseded_sets_both_pointer_columns(repo: FactRepository) -> None:
     a = await repo.add(make_fact(text="old"))
     b = await repo.add(make_fact(text="new"))

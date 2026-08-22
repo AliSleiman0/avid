@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 import pytest
 
-from avid.adapters import HealthServer
+from avid.adapters import FakeClock, FakeFactRepository, HealthServer
 from avid.core.metrics import MetricsRegistry, ProvidedMetrics
 from avid.core.state_report import StateReport
 from avid.domain import Affect, RobotState
+from avid.domain.memory import Fact
 
 
 async def _request(port: int, path: str) -> tuple[int, bytes]:
@@ -428,5 +430,159 @@ async def test_state_rejects_the_wrong_method() -> None:
         await reader.read()
         writer.close()
         assert int(status_line.split()[1]) == 405
+    finally:
+        await server.stop()
+
+
+# ── GET /facts — §7.10's privacy audit (#386) ──────────────────────────────────────────────
+
+
+@pytest.fixture
+async def store() -> AsyncIterator[FakeFactRepository]:
+    repo = FakeFactRepository(clock=FakeClock())
+    try:
+        yield repo
+    finally:
+        await repo.aclose()
+
+
+def _fact(text: str, *, created_at: int = 100) -> Fact:
+    return Fact(
+        id=0,
+        text=text,
+        kind="preference",
+        importance=5,
+        created_at=created_at,
+        last_accessed_at=created_at,
+    )
+
+
+async def test_facts_returns_the_live_facts(store: FakeFactRepository) -> None:
+    await store.add(_fact("has a dog called Biscuit"))
+    server = HealthServer(bind="127.0.0.1", port=0, facts=store)
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/facts")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["count"] == 1
+        assert payload["facts"][0]["text"] == "has a dog called Biscuit"
+        assert payload["include_superseded"] is False
+    finally:
+        await server.stop()
+
+
+async def test_facts_excludes_superseded_until_asked(store: FakeFactRepository) -> None:
+    """AC-1 and AC-2, and the reason the flag is echoed back.
+
+    A user asking *"what do you know about me?"* and getting a list with no statement of scope
+    cannot tell a short history from a filtered one — so the answer says which question it
+    answered.
+    """
+    old = await store.add(_fact("drinks coffee", created_at=100))
+    new = await store.add(_fact("drinks tea now", created_at=200))
+    await store.mark_superseded(old, new, at=250)
+    server = HealthServer(bind="127.0.0.1", port=0, facts=store)
+    await server.start()
+    try:
+        _, body = await _request(server.bound_port, "/facts")
+        live = json.loads(body)
+        assert [fact["id"] for fact in live["facts"]] == [new]
+        assert live["include_superseded"] is False
+
+        _, body = await _request(server.bound_port, "/facts?include_superseded=1")
+        history = json.loads(body)
+        assert [fact["id"] for fact in history["facts"]] == [old, new]
+        assert history["count"] == 2
+        assert history["include_superseded"] is True
+    finally:
+        await server.stop()
+
+
+async def test_a_forgotten_fact_is_in_neither_view(store: FakeFactRepository) -> None:
+    """AC-6 — the behavioural half of #257's guarantee, asserted at the surface a user checks.
+
+    §7.10's two halves meet here: ``forget`` is a hard cascading DELETE, and this route is how a
+    person confirms it. A fact still visible in the history view would mean the deletion had never
+    been one, and the store's own test would not have caught that — this is the door the user
+    knocks on.
+    """
+    kept = await store.add(_fact("has a dog called Biscuit"))
+    forgotten = await store.add(_fact("is looking for a new job"))
+    await store.delete(forgotten)
+    server = HealthServer(bind="127.0.0.1", port=0, facts=store)
+    await server.start()
+    try:
+        for path in ("/facts", "/facts?include_superseded=1"):
+            _, body = await _request(server.bound_port, path)
+            payload = json.loads(body)
+            assert [fact["id"] for fact in payload["facts"]] == [kept], path
+            texts = [fact["text"] for fact in payload["facts"]]
+            assert "is looking for a new job" not in texts, path
+    finally:
+        await server.stop()
+
+
+async def test_a_fact_never_carries_an_embedding(store: FakeFactRepository) -> None:
+    """A vector dump is the one field that would turn an audit into something nobody reads."""
+    await store.add(_fact("has a dog called Biscuit"), embedding=b"\x00" * 16)
+    server = HealthServer(bind="127.0.0.1", port=0, facts=store)
+    await server.start()
+    try:
+        _, body = await _request(server.bound_port, "/facts")
+        rendered = json.loads(body)["facts"][0]
+        assert "embedding" not in rendered
+        assert set(rendered) >= {"id", "text", "kind", "importance", "created_at"}
+    finally:
+        await server.stop()
+
+
+@pytest.mark.parametrize("value", ["", "yes", "true", "2", "01"])
+async def test_a_malformed_flag_is_refused_rather_than_read_as_false(
+    store: FakeFactRepository, value: str
+) -> None:
+    """⚠️ On a privacy endpoint, a typo that quietly *narrows* what you are shown is the wrong
+    failure: the reader sees a shorter list and no reason to doubt it."""
+    server = HealthServer(bind="127.0.0.1", port=0, facts=store)
+    await server.start()
+    try:
+        status, body = await _request(
+            server.bound_port, f"/facts?include_superseded={value}"
+        )
+        assert status == 400
+        assert b"include_superseded" in body
+    finally:
+        await server.stop()
+
+
+async def test_facts_is_503_when_no_store_is_wired() -> None:
+    """An empty list from an unwired store is the one wrong answer this route must never give."""
+    server = HealthServer(bind="127.0.0.1", port=0)
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/facts")
+        assert status == 503
+        assert b"no fact store" in body
+    finally:
+        await server.stop()
+
+
+async def test_facts_refuses_a_routable_bind() -> None:
+    """AC-5. Shared with every other route, asserted separately here because this one returns
+    everything the robot knows about its user — which makes the binding load-bearing rather than
+    ceremonial."""
+    with pytest.raises(ValueError, match="loopback"):
+        HealthServer(bind="0.0.0.0", port=8787, facts=None)
+
+
+async def test_a_query_string_does_not_break_the_other_routes() -> None:
+    """The path/query split (#386) touches every route, so the regression is asserted, not hoped
+    for: before it, `/health?x=1` was a 404."""
+    server = HealthServer(bind="127.0.0.1", port=0)
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/health?probe=1")
+        assert status == 200
+        assert body == b"ok"
     finally:
         await server.stop()
