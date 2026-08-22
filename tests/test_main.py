@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import avid.main as avid_main
+from avid import __version__
 from avid.adapters import (
     FakeBootLog,
     FakeCamera,
@@ -43,11 +46,12 @@ from avid.adapters import (
     SqliteFactRepo,
     SystemdNotifier,
 )
+from avid.adapters.build_id import resolve_build_id
 from avid.core import lifecycle
-from avid.core.banner import describe_runtime
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
 from avid.core.hal import Axis, DisplayFrame
+from avid.core.metrics import MetricsRegistry
 from avid.core.ports import AffectTools, GestureTools
 from avid.core.state_manager import StateManager
 from avid.domain import (
@@ -473,7 +477,18 @@ def test_main_wires_and_delegates_to_lifecycle(
     assert isinstance(captured["boot_log"], FakeBootLog)
     sim = load_config(_SIM_TOML)
     assert captured["heartbeat_interval_s"] == sim.runtime.heartbeat_interval_s
-    assert captured["build"] == describe_runtime(sim, config_path="")["build"]
+    # #388: the identifier is resolved ONCE in `main()` and threaded to the banner, the boot_log
+    # row and the /metrics provider. This asserts the lifecycle got the same string the resolver
+    # produces — "two answers to which build?" is still the drift being guarded against, but the
+    # single answer now tracks the deployed COMMIT rather than a static `version = "0.0.0"`.
+    expected_build = resolve_build_id(
+        package_dir=Path(avid_main.__file__).resolve().parent, fallback=__version__
+    )
+    assert captured["build"] == expected_build
+    assert expected_build != "0.0.0", (
+        "the build identifier is still the static pyproject version — §12.6's split-window "
+        "guard cannot fire on a string that never changes (#388)"
+    )
 
     assert captured["bus"] is not None
     assert captured["clock"] is not None
@@ -782,6 +797,41 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         await asyncio.wait_for(task, timeout=1.0)
 
 
+def test_the_build_metric_does_not_reshell_on_every_scrape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠️ P8. The soak scrapes `/metrics` every 60 s for thirty days (#388).
+
+    `build` used to be registered as ``lambda: describe_runtime(...)["build"]`` — a call, not a
+    value. Substituting a `git describe` into that path would have made the fix for a reporting
+    bug into **43,200 subprocess spawns inline on the event loop**, which is the kind of
+    self-inflicted P8 violation this project has shipped before.
+
+    The provider must close over the resolved *string*.
+
+    ⚠️ **Identity across scrapes was the first assertion here and it did not bite.** CPython interns
+    short strings, so a deliberately re-deriving provider returned the same object and the test
+    stayed green — a test passing while the property it named was violated, which is the failure
+    this project keeps paying for. Replaced with one that cannot be fooled: resolve first, then
+    break ``subprocess.run``, then scrape. Anything that shells out now fails loudly.
+    """
+    package_dir = Path(avid_main.__file__).resolve().parent
+    build = resolve_build_id(package_dir=package_dir, fallback=__version__)
+    registry = MetricsRegistry()
+    registry.register("build", lambda: build)
+
+    def _exploding_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the build provider shelled out on a /metrics scrape")
+
+    # monkeypatch, not unittest.mock — banned outside tests/adapters/ (SDS §14.3).
+    monkeypatch.setattr(subprocess, "run", _exploding_run)
+    for _ in range(50):
+        assert registry.snapshot()["metrics"]["build"] == build, (
+            "the build provider re-derived its value — over a 30-day soak that is tens of "
+            "thousands of subprocess spawns on the event loop"
+        )
+
+
 def test_main_logs_the_runtime_banner_before_it_does_anything(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -793,7 +843,7 @@ def test_main_logs_the_runtime_banner_before_it_does_anything(
     """
     seen: dict[str, Any] = {}
 
-    async def _stub_run(config: Any) -> int:
+    async def _stub_run(config: Any, *, build: str) -> int:
         seen["logged_by_now"] = [
             r.getMessage()
             for r in caplog.records

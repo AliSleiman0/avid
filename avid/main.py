@@ -59,6 +59,7 @@ from avid.adapters import (
     SystemClock,
     SystemdNotifier,
 )
+from avid.adapters.build_id import resolve_build_id
 from avid.core import lifecycle
 from avid.core.banner import describe_runtime, format_banner
 from avid.core.config import Config, load_config
@@ -918,7 +919,7 @@ def _wire_services(
     return (memory, audio, conversation, episode_recorder, presence, behavior, motion)
 
 
-async def _run(config: Config) -> int:
+async def _run(config: Config, *, build: str) -> int:
     """Build the adapters and bus, then hand off to the lifecycle.
 
     This is the P3 site: :class:`SystemClock`, the display, the notifier, and the
@@ -982,7 +983,11 @@ async def _run(config: Config) -> int:
     # display a face and the mic/speaker/VAD an audio loop, rather than health-map entries. It
     # returns the services with an owned task (AudioService) for the lifecycle to start/stop.
     metrics = MetricsRegistry()
-    metrics.register("build", lambda: describe_runtime(config, config_path="")["build"])
+    # ⚠️ Closes over the resolved STRING, not over a call that would re-derive it (#388). This
+    # provider runs on every /metrics scrape, and the soak scrapes every 60 s for thirty days —
+    # a `git describe` here would be 43,200 subprocess spawns inline on the event loop (P8),
+    # introduced by the fix for a reporting bug.
+    metrics.register("build", lambda: build)
     metrics.register("uptime_s", lambda: clock.now() - boot_started_at)
     # The failure a soak exists to surface: §3.5 says silent drops are a debugging catastrophe and
     # loud drops are a tuning signal — and until now "loud" meant one log line per drop, visible
@@ -1051,7 +1056,7 @@ async def _run(config: Config) -> int:
         # The same identifier the #373 banner logged, so a row in `boot_log` and a line in the
         # journal name the same build. Two answers to "which build?" is the drift #373 exists to
         # end; there is deliberately only one source.
-        build=describe_runtime(config, config_path="")["build"],
+        build=build,
         heartbeat_interval_s=config.runtime.heartbeat_interval_s,
     )
 
@@ -1114,9 +1119,17 @@ def main(argv: list[str] | None = None) -> int:
     # before either path does any work: the first thing in the journal should be what this process
     # resolved. A run that cannot say what it was is not evidence (SDS §12.1, row F-9), and the
     # value of this line is entirely in appearing *before* the thing it explains.
+    # ⚠️ Resolved ONCE, here, and threaded to every consumer — the banner, the `boot_log` row and
+    # `GET /metrics` all print this same string (#388). `avid.__version__` is the fallback, not the
+    # answer: it is `version = "0.0.0"` from `pyproject.toml`, static across every commit, which is
+    # why §12.6's split-window guard could never fire until now.
+    build = resolve_build_id(
+        package_dir=Path(__file__).resolve().parent, fallback=__version__
+    )
     _log.info(
-        "runtime %s", format_banner(describe_runtime(config, config_path=args.config))
+        "runtime %s",
+        format_banner(describe_runtime(config, config_path=args.config, build=build)),
     )
     if args.capture is not None:
         return asyncio.run(_capture(config, name=args.capture, seconds=args.seconds))
-    return asyncio.run(_run(config))
+    return asyncio.run(_run(config, build=build))

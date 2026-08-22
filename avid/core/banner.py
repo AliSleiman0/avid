@@ -30,21 +30,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from avid import __version__
 from avid.core.config import Config
 
-# ⚠️ The build identifier comes from ``avid.__version__`` — the package's ONE version source,
-# which already falls back to "0.0.0.dev0" on a raw checkout — rather than a second
-# ``importlib.metadata`` call here. Two mechanisms answering "which build?" is precisely the
-# drift this issue exists to stop, and it would be a poor joke to introduce it in the fix.
+# ⚠️ The build identifier is **injected**, not read here (#388). The rule this module was written
+# to protect still holds — there is exactly ONE answer to "which build?", and the banner, the
+# `boot_log` row and `GET /metrics` all print the same string — but the earlier wording conflated
+# two different facts:
 #
-# ⚠️ It is only as precise as the packaging makes it, and today that is `version = "0.0.0"` in
-# `pyproject.toml` — the same string for every commit. **AVID-388 is what makes this a real
-# identifier**, and until it lands the honest reading of this field is "which release line",
-# not "which commit". Said here so nobody grades a soak window on it prematurely.
+#   * the RELEASE LINE  — `avid.__version__`, what `pyproject.toml` declares
+#   * the DEPLOYED BUILD — which commit is actually running
+#
+# This field is the second, and it had been the first. `version = "0.0.0"` is static, so the
+# banner said `0.0.0` on every commit — and §12.6's split-window guard, which grades a soak on
+# whether this string changes mid-window, could therefore never fire. That was not a cosmetic
+# gap: it was a criterion that passed on silence in the gate that decides `v1.0.0`.
+#
+# `avid.adapters.build_id.resolve_build_id` produces it from `git describe` and falls back to
+# `avid.__version__` off a checkout, and the composition root resolves it **once** — a resolver
+# called per `/metrics` scrape would spawn a subprocess 43,200 times across a thirty-day soak,
+# inline on the event loop (P8).
 
 
-def describe_runtime(config: Config, *, config_path: str | Path) -> dict[str, str]:
+def describe_runtime(
+    config: Config, *, config_path: str | Path, build: str
+) -> dict[str, str]:
     """The one-line startup record: what was loaded, and what it resolved to.
 
     ``adapters`` is rendered by **iterating the pydantic model** rather than naming the fields
@@ -59,7 +68,7 @@ def describe_runtime(config: Config, *, config_path: str | Path) -> dict[str, st
     adapters = config.adapters.model_dump()
     return {
         "config": str(config_path),
-        "build": __version__,
+        "build": build,
         "realtime_model": config.ai.model,
         "text_model": config.ai.text_model,
         "transcription_model": config.ai.transcription_model,

@@ -397,6 +397,34 @@ A third ONNX adapter should sweep the counts on the Pi, not copy either number.
 
 ---
 
+## 5. Reading which build is actually running (#388)
+
+```sh
+curl -s 127.0.0.1:8787/metrics | python3 -m json.tool | grep build
+```
+
+`build` is `git describe --always --dirty --tags` against `/opt/avid`, resolved **once at
+startup** — so it is the build the *running process* started with, not what `/opt/avid` is at now.
+After a `git pull` it does not change until the service restarts, and that is deliberate: a soak
+window is graded on what actually ran.
+
+```
+v0.M10.0-41-gf2e8e74          the release line, 41 commits past it, at f2e8e74
+v0.M10.0-41-gf2e8e74-dirty    ⚠️ SOMEONE HAS EDITED FILES ON THE MACHINE
+0.0.0                         no git — a wheel install, or /opt/avid is not a checkout
+```
+
+⚠️ **`-dirty` is the one to care about.** It is this document's central lesson — *the machine is not
+the repo* — showing up in the soak record. A thirty-day window whose build reads `-dirty` describes
+a robot nobody can check out and reproduce. If you see it: `cd /opt/avid && git status` and find
+out what was changed by hand and why.
+
+⚠️ **It was `0.0.0` on every commit until 2026-08-22**, and §12.6's split-window guard graded soak
+windows on it, so that guard could never fire. If you ever see `0.0.0` here again on a machine that
+*is* a checkout, the resolver has regressed and the guard is inert again.
+
+---
+
 ## 5a. Vision (M8)
 
 **The model is `face_detection_yunet_2026may.onnx`, and the `2023mar` files beside it in the

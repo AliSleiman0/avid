@@ -3063,7 +3063,7 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
-| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
+| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`. ⚠️ **`build` is the deployed commit, not the release line** (AVID-388): `git describe --always --dirty --tags`, falling back to `avid.__version__` off a checkout. `-dirty` means the machine has been edited. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
 | `GET` | `/state` | Current `RobotState`, `Affect`, session status |
 | `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" |
 | `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8 |
@@ -3531,7 +3531,7 @@ entry leaves this table by being measured or by being decided, not by being forg
 | **Session open** | ~1.08 s, first turn only | AVID-157 | The dominant term is a vendor handshake. The only remaining lever is a pre-warmed or pooled connection, which **reopens ADR-007** — the gate exists precisely to avoid holding a socket while nobody speaks. A decision with an ADR-shaped edge, not a fix. |
 | **O1 unmeasured post-AVID-194** | unknown | **AVID-406** | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
 | ~~No memory metric~~ | — | AVID-404 | **Closed 2026-08-22**, verified on the Pi. `rss_bytes` and `mem_available_bytes` ship and the soak records both. Kept rather than deleted: a backlog that silently loses its resolved entries teaches nothing about what it cost to notice. |
-| **`build` cannot distinguish two commits** | blocks #389 | **AVID-388** | ⚠️ `version = "0.0.0"` for every commit, so §12.6's build-change guard **can never fail**. Not a slow path — an *inert check* in the gate that decides `v1.0.0`, and the only entry here that blocks the clock. |
+| ~~`build` cannot distinguish two commits~~ | — | AVID-388 | **Closed 2026-08-22.** `build` is now `git describe --always --dirty --tags`, resolved once at startup. §12.6's guard is no longer inert and is observed failing on a two-build window. Kept as a row: it was the entry that blocked the clock, and a backlog that loses its resolved entries teaches nothing about what it cost to notice. |
 | **FTS5 at 10k facts** | 55.5 of 62.3 ms | §7.7, SPK-3 | Not reachable at this robot's scale, and the obvious optimisation (int8 vectors) targets the half that is already free. |
 | **Acoustic echo cancellation** | half-duplex uplink | AVID-163 | Would remove the AVID-159 energy margin and un-mute the uplink during playback. Real work, not a tuning pass. |
 | **Cold DNS** | ~5.1 s, once per process | AVID-157 | `systemd-resolved` is inactive on this Pi, so nothing caches locally and every process pays a fresh lookup. Non-fatal while the router's cache is warm; it sits in front of the first conversation after a boot. |
@@ -3672,16 +3672,23 @@ For M11's gate (AVID-389) they mean:
   (AVID-373) is **not graded as one window**; it is reported as two, or as a failure to hold the
   variable still.
 
-  > ⚠️ **This rule is normative and its mechanism is currently inert. Do not open a window until
-  > AVID-388 lands.** `build` comes from `avid.__version__`, which is `version = "0.0.0"` in
-  > `pyproject.toml` — **the same string for every commit** (§3.12.2, and `core/banner.py` says so
-  > in its own comment). Verified on the Pi, 2026-08-22: `GET /metrics` reported `0.0.0` before and
-  > after a deploy that moved HEAD five commits. `soak_pi.py`'s criterion is
-  > `pass if len({builds}) <= 1`, so with a constant string it **can never fail** — delete the
-  > check and no report changes, which is the test AVID-264 taught. Thirty days is long enough that
-  > somebody deploys mid-window, and the guard would wave it through while the figures describe two
-  > robots averaged together. **AVID-388 is what makes `build` a real identifier**, which is why it
-  > blocks the clock rather than being written alongside it.
+  > ⚠️ **This mechanism was inert until 2026-08-22 and is worth knowing about.** `build` came from
+  > `avid.__version__` — `version = "0.0.0"` in `pyproject.toml`, **the same string for every
+  > commit**. Verified on the Pi: `GET /metrics` reported `0.0.0` before and after a deploy that
+  > moved HEAD five commits. The criterion is `pass if len({builds}) <= 1`, so with a constant it
+  > **could never fail**: delete the check and no report changed, which is AVID-264's test. A
+  > criterion that passes on silence, in the gate that decides `v1.0.0`.
+  >
+  > **AVID-388 fixed it.** `build` is now `git describe --always --dirty --tags` — e.g.
+  > `v0.M10.0-41-gf2e8e74`: release line, commits since, short SHA, and **`-dirty` when someone
+  > has edited the machine**, which is `PI_OPERATIONS.md`'s own lesson made visible in the soak
+  > record. Resolved **once** at startup (`avid/adapters/build_id.py`) and threaded to the banner,
+  > the `boot_log` row and `/metrics` — a resolver called per scrape would be 43,200 subprocess
+  > spawns across the window, inline on the loop (P8).
+  >
+  > ⚠️ The guard is now **observed** failing on a two-build window, not merely present:
+  > `tests/demos/test_soak_memory_column.py`. A guard nobody has watched fail is not known to
+  > work, which is how this survived three milestones.
 - **Numerator** — seconds in which the robot process was up. **A SLEEPING robot is UP.** SLEEPING
   is an operational state the design intends (§3.10, M8's nap), not an absence; grading it as
   downtime would penalise the feature.
