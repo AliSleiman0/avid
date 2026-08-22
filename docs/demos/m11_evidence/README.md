@@ -8,9 +8,13 @@ the sampler's earliest row tells you when *sampling* began, not what window was 
 
 ## Opened
 
-**2026-08-22T12:50:29Z** (epoch `1787403029`), closing **2026-09-21T12:50:29Z**.
+**2026-08-22T13:18:08Z** (epoch `1787404688`), closing **2026-09-21T13:18:08Z**.
 
-Build under test: **`v0.M10.0-45-g2bcb39e`**.
+Build under test: **`v0.M10.0-47-g8d03690`**.
+
+⚠️ An earlier window opened at 12:50:29Z and was **deliberately restarted 28 minutes in**, to test
+that the soak survives a reboot and to land the intervention log before the window rather than
+during it. Recorded in `window.json` rather than quietly overwritten.
 
 ## ⚠️ Do not deploy to the Pi during the window
 
@@ -28,12 +32,42 @@ here as such rather than absorbed.
 
 ```sh
 sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
-    --mode grade --since 1787403029 --config /etc/robot/config.toml
+    --mode grade --since 1787404688 --config /etc/robot/config.toml
 ```
 
 Exit code is non-zero on **fail or inconclusive** — inconclusive is not a pass, and most often
 means the sampler itself has holes, which makes every other number a statement about a smaller
 window than the one claimed.
+
+## What a power cut costs you — measured, not guessed
+
+The Pi was rebooted before this window opened, to find out:
+
+| | |
+|---|---|
+| both units come back unattended | ✅ `robot` and `soak-sampler` are `enabled` |
+| `samples.db` survives | ✅ persisted across the reboot, sampler resumed writing to the same file |
+| the window epoch survives | ✅ it is this file |
+
+**But it is not free, and which criterion it costs depends on how the power went:**
+
+- **A graceful `reboot`** records `stop_reason=signal` — a **clean** stop, which §12.6 defines as a
+  **manual restart**. That fails **AC-3**, and AC-3 is part of O5.
+- **A power cut** leaves `stopped_at` NULL — an unclean stop, indistinguishable from a crash. That
+  fails **AC-3b**, which is *not* part of O5's definition but is reported and makes the exit
+  non-zero.
+- Either way the outage counts against uptime (7h12m of slack at the 99% bar over 30 days) and
+  against AC-0 coverage, since the sampler is down too.
+
+**If it happens, write it down** — `/var/lib/soak/interventions.jsonl`, one JSON object per line:
+
+```json
+{"at": 1787404800, "kind": "power_cut", "note": "unplugged the bench strip"}
+```
+
+⚠️ That note **explains** an event; it does not **excuse** one. AC-3 and AC-3b keep their verdicts.
+It exists because a power cut and a crash leave byte-identical records and journald is volatile
+(#381), so thirty days from now nothing else will remember which was which.
 
 ## What is being measured
 
