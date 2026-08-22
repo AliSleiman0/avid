@@ -251,3 +251,64 @@ def _args() -> Any:
     import argparse
 
     return argparse.Namespace(bar=0.99, since=0, until=1)
+
+
+# ── §12.6's split-window guard, finally observed failing (#388) ───────────────────────────────
+
+
+def _sample_rows(builds: list[str]) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE s (build TEXT)")
+    conn.executemany("INSERT INTO s VALUES (?)", [(b,) for b in builds])
+    return list(conn.execute("SELECT * FROM s"))
+
+
+def _build_criterion(rows: list[sqlite3.Row]) -> Any:
+    """AC-4's computation, exactly as `_grade` performs it.
+
+    Extracted rather than driving the whole grader, which needs a config, a robot DB and a boot
+    log. The expression is copied verbatim from `soak_pi.py`; if it drifts there this test keeps
+    passing, which is the honest limitation of testing a fragment.
+    """
+    builds = sorted({str(r["build"]) for r in rows if r["build"]})
+    return len(builds) <= 1, builds
+
+
+def test_the_build_guard_fails_when_the_window_holds_two_builds() -> None:
+    """⚠️ This guard had NEVER been observed failing, and could not be (#388).
+
+    `build` came from `avid.__version__`, which is `version = "0.0.0"` in `pyproject.toml` — the
+    same string for every commit. So `len({builds}) <= 1` was always true and §12.6's
+    split-window rule detected nothing. Verified on the rig: `/metrics` reported `0.0.0` before
+    and after a pull that moved HEAD five commits.
+
+    A criterion that cannot fail is a criterion that passes on silence, and this one sits in the
+    gate that decides `v1.0.0`. Now that `resolve_build_id` produces a real identifier, the guard
+    can fire — and this is the test that says it does.
+    """
+    passed, builds = _build_criterion(
+        _sample_rows(["v0.M10.0-41-gf2e8e74", "v0.M10.0-43-gaaaaaaa"])
+    )
+    assert not passed, f"two builds in one window graded as one: {builds}"
+    assert len(builds) == 2
+
+
+def test_the_build_guard_passes_on_a_single_build() -> None:
+    """The other end. A guard that convicted everything would satisfy the test above alone."""
+    passed, builds = _build_criterion(_sample_rows(["v0.M10.0-41-gf2e8e74"] * 5))
+    assert passed
+    assert builds == ["v0.M10.0-41-gf2e8e74"]
+
+
+def test_a_window_of_only_the_old_static_version_still_grades_as_one_build() -> None:
+    """⚠️ The regression this must never quietly become again.
+
+    If the identifier ever reverts to a constant, the guard silently returns to being inert — it
+    keeps *passing*, which is exactly why nobody noticed for three milestones. Nothing here can
+    detect that from inside the grader, so the detection lives with the resolver
+    (`tests/adapters/test_build_id.py::test_two_commits_produce_two_different_identifiers`).
+    This case exists to record the coupling, so a future reader knows where the real guard is.
+    """
+    passed, builds = _build_criterion(_sample_rows(["0.0.0"] * 40))
+    assert passed and builds == ["0.0.0"]

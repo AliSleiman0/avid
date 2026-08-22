@@ -14,6 +14,11 @@ from pydantic import SecretStr
 from avid.core.banner import describe_runtime, format_banner
 from avid.core.config import Config
 
+# #388: the identifier is injected now. A realistic `git describe` value, deliberately NOT
+# "0.0.0" — a test pinned to the old static string would have gone green on the very bug that
+# string caused.
+_BUILD = "v0.M10.0-41-gf2e8e74"
+
 _KEY = "sk-test-DO-NOT-LOG-1234567890"
 
 
@@ -24,7 +29,7 @@ def _config(**over: object) -> Config:
 
 def test_reports_the_resolved_models_and_config_path() -> None:
     config = _config()
-    fields = describe_runtime(config, config_path="config/pi.toml")
+    fields = describe_runtime(config, config_path="config/pi.toml", build=_BUILD)
     assert fields["config"] == "config/pi.toml"
     # Read from the config, never restated here — the assertion compares against the object so it
     # cannot pass by agreeing with a literal that has drifted (CLAUDE.md §7.1).
@@ -42,7 +47,7 @@ def test_every_adapter_field_is_reported() -> None:
     record that looks complete) the banner exists to prevent.
     """
     config = _config()
-    rendered = describe_runtime(config, config_path="x.toml")["adapters"]
+    rendered = describe_runtime(config, config_path="x.toml", build=_BUILD)["adapters"]
     for name, value in config.adapters.model_dump().items():
         assert f"{name}={value}" in rendered
 
@@ -53,7 +58,7 @@ def test_a_fake_adapter_is_visible() -> None:
     A `"fake"` device on the Pi is the M4 failure — a gate that printed PASS over a mute robot —
     and it should be readable in the first lines of a journal, before anyone reads a gate result.
     """
-    fields = describe_runtime(_config(), config_path="x.toml")
+    fields = describe_runtime(_config(), config_path="x.toml", build=_BUILD)
     assert "servo=fake" in fields["adapters"]
 
 
@@ -65,7 +70,7 @@ def test_the_api_key_is_reported_as_present_but_never_by_value() -> None:
     ``get_secret_value()``.
     """
     fields = describe_runtime(
-        _config(openai_api_key=SecretStr(_KEY)), config_path="x.toml"
+        _config(openai_api_key=SecretStr(_KEY)), config_path="x.toml", build=_BUILD
     )
     assert fields["openai_key"] == "present"
     blob = format_banner(fields)
@@ -80,7 +85,7 @@ def test_the_api_key_is_reported_as_present_but_never_by_value() -> None:
 def test_an_absent_key_says_absent_rather_than_nothing() -> None:
     """Absent is reported, not omitted — the M6 gate-defect family: a field that is silently
     missing reads exactly like a field that was never checked."""
-    fields = describe_runtime(_config(), config_path="x.toml")
+    fields = describe_runtime(_config(), config_path="x.toml", build=_BUILD)
     assert fields["openai_key"] == "absent"
 
 
@@ -91,7 +96,7 @@ def test_format_quotes_only_values_containing_spaces() -> None:
 
 def test_every_field_reaches_the_formatted_line() -> None:
     """A field computed but not rendered is a field nobody will ever see."""
-    fields = describe_runtime(_config(), config_path="x.toml")
+    fields = describe_runtime(_config(), config_path="x.toml", build=_BUILD)
     line = format_banner(fields)
     for key in fields:
         assert f"{key}=" in line
@@ -99,6 +104,6 @@ def test_every_field_reaches_the_formatted_line() -> None:
 
 def test_banner_has_no_dataclass_or_mutable_surface() -> None:
     """It returns plain data. Nothing downstream should be able to mutate the record of what ran."""
-    fields = describe_runtime(_config(), config_path="x.toml")
+    fields = describe_runtime(_config(), config_path="x.toml", build=_BUILD)
     assert isinstance(fields, dict)
     assert not dataclasses.is_dataclass(fields)
