@@ -102,12 +102,17 @@ constraint is that it must be driven by the **camera actually being open**, neve
 
 | | |
 |---|---|
-| **AC-5** | *"confirmed in the enclosure"* — #206 measured a **bench** rig and there is no enclosure. A wording call. |
-| **AC-9** | half done. PMP's R-04 line is updated; **`PI_OPERATIONS.md` still owes** the servo/systemd traps. Laptop work. |
-| **AC-10** | ⛔ bench — pin #200's **provisional** `min_deg`/`max_deg` to measured safe reach. Worth doing while the servos are proven good. |
-| **AC-11** | the `v0.M9.0` tag |
+| ~~**AC-5**~~ | ✅ **settled 2026-08-23 (#436)** — there is no enclosure and none is planned, so the criterion was *unsatisfiable*, not unmet. Amended on the issue **with the original wording preserved above it**; the enclosure condition is carried on PMP R-04 |
+| ~~**AC-9**~~ | ✅ **#436** — `PI_OPERATIONS.md` §5c now exists (there was no servo section at all) |
+| **AC-10** | ⛔ bench — pin #200's **provisional** `min_deg`/`max_deg` to measured safe reach. The **procedure is now written down** in §5c, so the bench session is execution rather than design |
+| **AC-11** | the `v0.M9.0` tag, once AC-10 lands |
 
-Passed with evidence on the issue: AC-0, 1, 2, 3, 4, 6, 7, 8.
+**#207 is now 10 of 12**, and both remaining criteria need the rig. Passed with evidence on the
+issue: AC-0, 1, 2, 3, 4, 5, 6, 7, 8, 9.
+
+⚠️ **AC-10 does not need a deploy, but it does need `robot.service` stopped** — which is an
+intervention against the soak: log it to `/var/lib/soak/interventions.jsonl`, and expect it to cost
+AC-3 and some uptime. Decide that deliberately, not at the bench.
 
 ### 🔥 What today actually found
 
@@ -248,18 +253,39 @@ Worth remembering the next time one of these guards is written.
 15, then 2 of 10) — including an ordering test whose fixture made both orderings identical. Every
 one looked right. The step is not a formality.
 
+### 🔩 #207's two laptop-doable criteria (#436)
+
+**AC-9** gave `PI_OPERATIONS.md` a servo section, which it had never had — the channel map lived
+only in `config/pi.toml` and every bring-up trap lived only in issue threads. It is organised
+around the fact that **every failure here looks like success**: four separate faults (no V+, no
+`i2c` group, `lgpio` vs a read-only WorkingDirectory, a slipped horn) each produce a perfect trace
+and a motionless robot. The V+ case is written up with the register read-back that settled it.
+
+**AC-5** was the wording call, and the answer was *unsatisfiable, not unmet*: it asked for the
+stall test "in the enclosure" and **there is no enclosure** — SDS §4.8 is an unwritten ToC entry,
+no WBS package, no issue, nothing planned. Left literal it would have blocked AC-11 forever on an
+artefact nobody is building.
+
+⚠️ **The pattern to reuse:** amend on the issue, **keep the original wording visible above the
+amendment**, and give the deferred half a real owner — here PMP's R-04 row, which already owns
+"re-measure with a meter before #400 lands". `PI_OPERATIONS.md` §7 already prescribed this
+(M2's "none skipped", M4's "≤200 ms mouth-to-ear"); it just had not been applied here yet.
+
 ### Closed and filed today
 
 **Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21** · **#388** · **#385** · **#386**.
 **Filed:** **#428** (no capture indicator — out of §13.5) · #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
 pre-fix run) · #407 (five modules say "ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**, **#430**, **#431**, **#433**, **#434**.
+**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**, **#427**, **#430**, **#431**, **#433**, **#434**, **#436**.
 
 ---
 
 ## Current state
 
-- **`main = 1d74b7f`**, zero open PRs. Suite **1866 passed / 67 skipped** on 3.11 and 3.13.
+- **`main = 9d265ae`**, zero open PRs. Suite **1866 passed / 67 skipped** on 3.11 and 3.13.
+- 📕 **`PI_OPERATIONS.md` §5c is the servo rig** — channel map, the four faults that all look like
+  success, the PCA9685 register read-back that locates one downstream of the chip, and why the
+  reach limits are still provisional.
 - 🔌 **The control API is complete** (#385, #386): `/health`, `/metrics`, `/state`,
   `/facts`, `/events/stream`, `POST /quiet`. `curl -N 127.0.0.1:8787/events/stream` is the live
   event feed — the fastest answer to *"is anything happening at all"* on a robot that looks stuck.
