@@ -37,10 +37,54 @@ from pathlib import Path
 _log = logging.getLogger("avid.adapters.build_id")
 
 # --always so a repo with no tags still yields a SHA; --dirty so a machine someone edited says so.
-_DESCRIBE = ("git", "describe", "--always", "--dirty", "--tags")
+#
+# ⚠️ `-c safe.directory=*` is not optional, and leaving it out shipped this adapter inert. On the
+# Pi `/opt/avid` is owned by `alisleiman0` while the service runs as `User=robot`, so git refuses:
+#
+#     fatal: detected dubious ownership in repository at '/opt/avid'
+#
+# That protection exists to stop a hostile repo's config executing as you. It does not apply to a
+# read-only `describe` with no hooks, on a checkout we deployed ourselves — and the alternative,
+# `git config --global --add safe.directory /opt/avid` for the robot user, would put the fix in
+# MACHINE STATE rather than in the artifact, which is precisely the drift `PI_OPERATIONS.md`
+# exists to prevent. Scoped to this one invocation; nothing global changes.
+_DESCRIBE = (
+    "git",
+    "-c",
+    "safe.directory=*",
+    "describe",
+    "--always",
+    "--dirty",
+    "--tags",
+)
 
 # Generous for a local git call and short enough that a wedged git cannot delay boot.
 _TIMEOUT_S = 5.0
+
+
+def _looks_like_a_checkout(package_dir: Path) -> bool:
+    """Is there a ``.git`` at or above *package_dir*?
+
+    This decides how loudly a fallback is reported. Off a checkout — a wheel install, a container —
+    falling back is the expected answer and DEBUG is right. *On* one, falling back means something
+    that should have worked did not, and a quiet `0.0.0` there puts §12.6's split-window guard back
+    to being inert without anyone noticing. That is exactly how this adapter shipped broken.
+    """
+    return any((p / ".git").exists() for p in (package_dir, *package_dir.parents))
+
+
+def _report_fallback(package_dir: Path, fallback: str, why: str) -> str:
+    if _looks_like_a_checkout(package_dir):
+        _log.warning(
+            "build id: %s is a git checkout but `git describe` failed (%s) — reporting %r. "
+            "SDS 12.6's split-window guard cannot distinguish two builds on this value.",
+            package_dir,
+            why,
+            fallback,
+        )
+    else:
+        _log.debug("build id: %s (%s); using %s", package_dir, why, fallback)
+    return fallback
 
 
 def resolve_build_id(*, package_dir: Path, fallback: str) -> str:
@@ -61,23 +105,19 @@ def resolve_build_id(*, package_dir: Path, fallback: str) -> str:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         # No git binary, or it could not be executed. Common and not an error: a wheel install.
-        _log.debug("build id: git unavailable (%s); using %s", exc, fallback)
-        return fallback
+        return _report_fallback(package_dir, fallback, f"git unavailable: {exc}")
     if completed.returncode != 0:
         # Not a checkout, or a git that refused. `stderr` is the useful half.
-        _log.debug(
-            "build id: git describe exited %d (%s); using %s",
-            completed.returncode,
-            completed.stderr.strip(),
+        return _report_fallback(
+            package_dir,
             fallback,
+            f"exit {completed.returncode}: {completed.stderr.strip()}",
         )
-        return fallback
     described = completed.stdout.strip()
     if not described:
         # Exit 0 with nothing on stdout should not happen, but an empty build id would be worse
         # than a vague one: it reads as "unknown" everywhere it is printed.
-        _log.debug("build id: git describe printed nothing; using %s", fallback)
-        return fallback
+        return _report_fallback(package_dir, fallback, "git describe printed nothing")
     return described
 
 
