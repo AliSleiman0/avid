@@ -142,8 +142,12 @@ async def test_fetch_all_includes_superseded_and_orders_by_creation(
     rows supersession retired are exactly the ones a user asking "what do you know about me" is
     entitled to see. Ordered by creation so a supersession chain reads as a chain.
     """
-    old = await repo.add(make_fact(text="drinks coffee", created_at=100, last_accessed_at=900))
-    new = await repo.add(make_fact(text="drinks tea now", created_at=200, last_accessed_at=100))
+    # ⚠️ The access times are the opposite way round from the creation times ON PURPOSE. With
+    # `old` also accessed first, `ORDER BY last_accessed_at DESC` and `ORDER BY created_at ASC`
+    # produce the same list and the assertion below cannot fail — which is what an earlier version
+    # of this test did, caught by neutering the ORDER BY and watching it stay green.
+    old = await repo.add(make_fact(text="drinks coffee", created_at=100, last_accessed_at=100))
+    new = await repo.add(make_fact(text="drinks tea now", created_at=200, last_accessed_at=900))
     await repo.mark_superseded(old, new, at=250)
 
     everything = await repo.fetch_all()
