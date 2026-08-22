@@ -98,6 +98,49 @@ def test_camera_device_access_granted() -> None:
     assert "PrivateDevices" not in _SERVICE
 
 
+def test_servo_device_access_granted() -> None:
+    """The PCA9685 is an I2C device and /dev/i2c-1 is ``root:i2c crw-rw----`` (#207).
+
+    ⚠️ This is the THIRD group discovered missing on hardware, after `video` and `audio`, and
+    every time the symptom was the same: the bench run works and the service is dead. A bench
+    runs as the *login* user, which is in `i2c`; the `robot` nologin user is in nothing it is
+    not given here. Without this the robot could not move at all under systemd while
+    ``motion_pi.py`` drove both axes perfectly by hand.
+    """
+    groups = _SERVICE["SupplementaryGroups"].split()
+    assert "i2c" in groups, (
+        "the servo adapter reaches /dev/i2c-1, which is group-gated; without `i2c` here every "
+        "servo write fails under the unit and only under the unit"
+    )
+
+
+def test_lgpio_notify_files_go_somewhere_writable() -> None:
+    """``lgpio`` writes ``.lgd-nfy-N`` into the CWD, and the CWD is read-only (#207).
+
+    The chain is Pca9685Servo -> adafruit_servokit -> adafruit_blinka -> lgpio, and the last
+    link creates notification files in the process's working directory. ``WorkingDirectory`` is
+    the code tree, which ``ProtectSystem=strict`` mounts read-only, so the failure is
+    ``FileNotFoundError: '.lgd-nfy-3'`` on **every** servo write.
+
+    ⚠️ Asserting the value points *inside StateDirectory* rather than merely being set: a
+    ``LG_WD`` aimed at another read-only path would satisfy a presence check and fail
+    identically on the Pi.
+    """
+    assert "Environment" in _SERVICE, (
+        "LG_WD is unset — servo writes will fail under the unit"
+    )
+    assignments = dict(
+        part.split("=", 1) for part in _SERVICE["Environment"].split() if "=" in part
+    )
+    lg_wd = assignments.get("LG_WD")
+    assert lg_wd is not None, f"no LG_WD in Environment={_SERVICE['Environment']!r}"
+    assert lg_wd.startswith("/var/lib/robot"), (
+        f"LG_WD={lg_wd!r} is outside StateDirectory, so it is read-only under "
+        "ProtectSystem=strict and the servos stay dead"
+    )
+    assert _SERVICE["StateDirectory"] == "robot"
+
+
 def test_pi_profile_writes_only_to_writable_paths() -> None:
     # ProtectSystem=strict makes the code tree read-only, so every path the app
     # writes at runtime must be absolute and outside /opt/avid — otherwise the app

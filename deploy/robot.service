@@ -14,6 +14,12 @@ NotifyAccess=main
 User=robot
 Group=robot
 WorkingDirectory=/opt/avid
+# ⚠️ lgpio — reached via adafruit_blinka, under adafruit_servokit, under Pca9685Servo — creates
+# `.lgd-nfy-N` notification files in the process's CURRENT WORKING DIRECTORY. That is
+# /opt/avid above, which ProtectSystem=strict makes read-only, so EVERY servo write failed
+# with `FileNotFoundError: '.lgd-nfy-3'` and the robot was motionless under the unit (#207).
+# LG_WD moves them to the one path this service can write. StateDirectory=robot creates it.
+Environment=LG_WD=/var/lib/robot
 ExecStart=/opt/avid/.venv/bin/python -m avid --config /etc/robot/config.toml
 Restart=always
 RestartSec=5
@@ -50,7 +56,12 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # both passed because their benches run as the *login* user, which is in `audio`; the service
 # audio path had never actually worked. Found at the M7 gate prep, where AC-2's
 # `systemctl restart` makes running-as-the-service unavoidable.
-SupplementaryGroups=video gpio audio
+# `i2c` is the third member of this list to be discovered missing on hardware, and the third
+# time the symptom was "works on the bench, dead under the unit" (#207). /dev/i2c-1 is
+# root:i2c crw-rw----, and the PCA9685 behind every servo command is an I2C device — so
+# without this the robot could not move AT ALL under systemd, while every bench run drove it
+# correctly as the login user, which is in `i2c`.
+SupplementaryGroups=video gpio audio i2c
 # Creates /var/lib/robot (owned by the service user) for the on-device SQLite DB
 # — config/pi.toml [memory] db_path = /var/lib/robot/robot.db. Written at M2+.
 StateDirectory=robot
