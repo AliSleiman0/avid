@@ -199,6 +199,7 @@
 13.4 Data in transit
 13.5 Camera and microphone privacy controls
 13.6 Update integrity
+13.7 How these claims are kept true
 
 ## 14. Testing Strategy
 14.1 Test pyramid
@@ -3064,11 +3065,13 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 |---|---|---|
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
 | `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`. ⚠️ **`build` is the deployed commit, not the release line** (AVID-388): `git describe --always --dirty --tags`, falling back to `avid.__version__` off a checkout. `-dirty` means the machine has been edited. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
-| `GET` | `/state` | Current `RobotState`, `Affect`, session status |
-| `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" |
-| `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8 |
+| `GET` | `/state` | Current `RobotState`, `Affect`, session status. ⚠️ **Not built** — AVID-385. |
+| `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" ⚠️ **Not built** — AVID-386; the audit is currently a *spoken* query answered from memory, not an endpoint (§13.4). |
+| `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8. ⚠️ **Not built** — AVID-386. |
 | `POST` | `/quiet` | `{duration_s}` — §10.4's manual override, also reachable via `set_quiet` tool |
-| `GET` | `/events/stream` | **SSE tap. Live event feed.** |
+| `GET` | `/events/stream` | **SSE tap. Live event feed.** ⚠️ **Not built** — AVID-385. |
+
+⚠️ **As built, this server answers exactly `/health`, `/metrics` and `POST /quiet`** (`avid/adapters/health.py`; unknown paths 404, a known path with the wrong method 405). The rows marked above describe the design, not the machine — the distinction this document has paid for elsewhere as F-9, and one `tests/docs/` now holds in place for the security documents (§13.7) and the runbook alike.
 
 `/events/stream` deserves its place. §3.5.1 admits you can't read the code and know what happens. Correlation IDs let you reconstruct a turn *afterwards*, from logs. This lets you watch it happen, live, while you talk to the robot:
 
@@ -3765,6 +3768,254 @@ checks its cross-links resolve, that every endpoint it tells an operator to call
 application actually serves — **in both directions**, so a route it describes as unimplemented
 failing to stay unimplemented is a red build — and that every entry carries the discriminator that
 separates its fault from the one it resembles. A runbook nothing checks is F-9 in prose.
+
+---
+
+# 13. Security and Privacy
+
+This section was a table-of-contents entry for eleven months while `SECURITY.md` carried the real
+rules (AVID-21, `debt` per PMP §10.6). Writing it found three claims in that file that had stopped
+being true — the pinned model, the logging library, and an audit endpoint that does not exist —
+which is the argument for §13.7's guard and, in miniature, the argument for the section: **a
+security document that is wrong is worse than one that is missing, because it is trusted.**
+
+`SECURITY.md` remains, reduced to the operator-facing summary. **This section is the authority.**
+
+## 13.1 Threat model
+
+Pico is a single-user desktop companion on a home LAN, physically in the user's room, fully under
+their control. The model is a **trusted device on a trusted network** — which is a scoping
+decision, not an absence of one, and it is only honest if the non-goals are written down beside it.
+
+**Assets, in the order the loss hurts:**
+
+| Asset | Where it lives | Loss looks like |
+|---|---|---|
+| The user's facts | `facts` in `robot.db` | someone learns what the robot was told in confidence |
+| Ninety days of raw transcripts | `episodes` (§7.5) | the same, at conversation granularity |
+| Live room audio and video | RAM, in flight | the room is heard or seen by something that is not the robot |
+| `OPENAI_API_KEY` | process env, `/etc/robot/robot.env` | a stranger spends the user's money |
+| Behavioural control | the loopback API's `POST /quiet`, the tool surface | the robot is made to act, or made silent |
+
+**Actors, and what each is assumed to be able to do:**
+
+- **The user.** Trusted completely. Every control in the system is theirs.
+- **A housemate, guest or visitor.** *Present in the room and never asked.* They are inside every
+  boundary that matters — the mic hears them, the camera counts them, and anything they say near
+  an open session reaches the vendor. This is the actor the design does least for, and §13.5 says
+  so rather than implying otherwise.
+- **Another device on the LAN.** Assumed benign, and given nothing: the control API is loopback,
+  asserted (§13.4). SSH is the only listening service the project adds beyond it.
+- **A compromised dependency.** The realistic remote adversary for a device with no inbound
+  surface — mitigated by a committed lock, a `--frozen` CI install and a runtime dependency set of
+  exactly one package (§13.6).
+- **OpenAI, as a processor.** Not an adversary; a party that receives data by design. What it
+  receives is enumerated in §13.4 and is deliberately small.
+- **Physical access.** Out of scope. Anyone holding the device has `robot.db`.
+
+**Trust boundaries**, from the inside out: the process (one user, `robot`, `NoNewPrivileges`,
+`ProtectSystem=strict`, §3.11.3) → the loopback socket → the LAN → the WSS session to OpenAI. And
+one that is not a network boundary at all and is easy to forget: **the storage at rest**, which
+survives the process, the reboot and the user's memory of what they told it.
+
+**Non-goals, stated so nobody reads a guarantee that was never offered:**
+
+- No multi-user isolation. One device, one household, one database. The robot cannot tell two
+  speakers apart, so it cannot keep two people's facts apart either.
+- No defence against physical access, and no disk encryption. The SD card / SSD is plaintext.
+- No authentication anywhere. Not on the control API (§13.4), not on the tool surface.
+- No defence against a hostile LAN. A device that can reach the Pi's SSH is treated as the user.
+- No protection of the *content* of a conversation from the vendor that is answering it.
+
+## 13.2 Secrets management
+
+**`OPENAI_API_KEY` is read from the environment exactly once, in `load_config`
+(`avid/core/config.py`) — the one function in the tree permitted to touch `os.environ` — and
+injected as a value.** P7 is the rule and CI is the mechanism: the lint job greps the whole of
+`avid/` for `os.environ`/`os.getenv` and fails the build on a hit outside that file.
+
+- The field is a **`SecretStr | None`**, so an accidental `print(config)` or a pydantic repr yields
+  `**********` rather than the key.
+- It is unwrapped by `get_secret_value()` in exactly **two places, both in `main.py`**, handing it
+  to the two adapters that need it (the Realtime client and the text model). No service, no domain
+  module and no log formatter can reach the plaintext, because none of them is given it.
+- It is **never in the TOML.** Config carries settings; the environment carries the key. On the Pi
+  it lives in `EnvironmentFile=-/etc/robot/robot.env`, root-owned `0600`, referenced by the unit
+  and never inside it.
+- **The startup banner reports presence, never value** (§3.12.2, AVID-373): `openai_key=present` /
+  `absent`, because "the robot is mute" and "no key was injected" are the same symptom and telling
+  them apart is the banner's job. `avid/core/banner.py` never calls `get_secret_value()`, so the
+  exclusion is structural rather than careful.
+- **A bad key at boot is the single permitted hard stop** (§3.12.3, F-11). Everything else
+  degrades. A key that is wrong should be loud immediately, not discovered as silence at 22:00.
+- Secret scanning runs on every pull request as a repository integration, outside this tree's
+  workflow file — so a key committed by accident is caught at the PR, not at the next audit.
+
+## 13.3 Data at rest
+
+Everything the robot remembers is **SQLite on the device, never synced, never uploaded** (§8,
+§7.10). There is no account, no cloud copy and no backup that leaves the machine.
+
+- **`forget` is a hard, cascading `DELETE`** (§7.10, UC-07) — the row, its FTS5 index entry, its
+  embedding and its dependent rows. Not a tombstone, not a supersession. Supersession is an
+  epistemics feature (*what is true now*); deletion is a **rights** feature (*what may be
+  retained*), and conflating them would leave a robot that answers "forgotten" while the row sits
+  there.
+- **`PRAGMA foreign_keys = ON` per connection** (`avid/adapters/sqlite.py`) — SQLite defaults it
+  *off*, so without it every `ON DELETE CASCADE` in the schema is decoration. A `forget` that
+  orphans an embedding is a **privacy** bug, not a tidiness one.
+- **`MemoryService.forget()` is a direct awaited call, durable before it returns.** Deletion is
+  never an event: the bus is at-most-once with no replay (§9.1.4), and a dropped deletion is
+  exactly the failure that must not be silent.
+- The **relevance floor is 0.65**, stricter than §7.8's supersession bar, because the error costs
+  are reversed — a doubtful supersession costs one model call, a doubtful deletion destroys data
+  permanently.
+- **Raw transcripts are retained 90 days, and the retention is enforced rather than declared**:
+  `EpisodeRecorder` runs a bounded prune pass on the injected clock (`episode_retention_days`,
+  `episode_prune_interval_s`, `episode_prune_batch` — §7.5, AVID-123). A retention policy that
+  lives only in a config comment is a policy nothing applies.
+- **Logs are not storage.** journald runs `Storage=volatile` in tmpfs with a 64 MB cap
+  (`deploy/journald-avid.conf`, AVID-381), so nothing in the journal survives a reboot. The logs
+  themselves are structured JSON composed with the **stdlib `logging`** module and `json.dumps` —
+  ⚠️ *not* `structlog`, which §3.12.2 credited until AVID-378 and `SECURITY.md` until this section
+  was written, and which has never been a dependency of this project.
+
+⚠️ **Two ways data escapes all of the above, named because omitting them would make this section a
+worse document than `SECURITY.md` was:**
+
+1. **Database backups taken during provisioning** — `deploy/PI_OPERATIONS.md` instructs an operator
+   to copy `robot.db` to `/var/backups/robot/` before a migration. Those copies are outside the
+   retention window and outside `forget`'s reach: a fact deleted at the user's request still exists
+   in every backup taken before the deletion. There is no reaping of them. **If the user exercises
+   a deletion, the backups are stale copies of data they withdrew consent for**, and clearing them
+   is a manual act nothing prompts.
+2. **User content does reach the logs, in two known places** — the `forget` query text
+   (`"forgot %d fact(s) matching %r"`) and the fact text in the "routine fact stored with no
+   schedule" warning (`avid/services/memory.py`). Both are bounded by the volatile journal, which
+   makes the exposure short-lived rather than absent. "Secrets are never logged" is true and is a
+   different claim from "no personal content is ever logged", which is false.
+
+## 13.4 Data in transit
+
+**Two sockets, and they could not be less alike.**
+
+**Outbound to OpenAI** — WSS, TLS, with the **server-side API key used directly** (ADR-010,
+§6.2.1). There is no ephemeral client-secret exchange, because the Pi *is* the trusted server;
+there is no browser and no third party to hand a token to.
+
+**Inbound on the control API** — plaintext HTTP/1.1 on `127.0.0.1:8787`, no TLS, no auth, no
+accounts. **Localhost binding is the authentication** (§9.5): anyone who can reach the socket
+already has a shell on the robot, at which point the socket is not the problem. Binding to a
+routable address would be a security bug, and it is not merely documented — `ApiConfig`'s
+validator rejects any non-loopback `bind` **at config load**, so the whole process refuses to
+start misconfigured, and `LocalHealthServer.__init__` asserts it again as defence in depth.
+
+⚠️ **As built the server answers `/health`, `/metrics` and `POST /quiet`.** §9.5's table also
+describes `/state`, `/facts` and `/events/stream`; those are **not implemented** (AVID-385,
+AVID-386). §7.10's audit — *"what do you know about me?"* — is therefore a **spoken query answered
+from memory**, not an endpoint anyone can curl.
+
+**What actually leaves this device**, exhaustively:
+
+| Leaves | Does not leave |
+|---|---|
+| Uplinked microphone audio, while a session is open | Any camera frame, ever (§13.5) |
+| The session instructions: personality, plus the **top-k retrieved facts** as a memory block | The fact store; any fact outside the top-k for that turn |
+| Tool definitions and tool-call arguments (§6.6) | Embeddings, or any text sent for indexing (ADR-011 — the embedder is local) |
+| The vendor's transcription of the user's own audio (`whisper-1`) | Episodes; the boot log; metrics; logs |
+
+**Audio uplinks only after the local gate fires.** The server's own VAD is off since AVID-194; the
+local Silero gate is the single turn-taking authority (§6.3, ADR-007), and `ConversationService`
+opens a session on `audio.speech_started` and closes it after `[gate] session_idle_close_s` of
+quiet. So the microphone is captured continuously *on-device* and uplinked only inside a turn.
+
+⚠️ **The precise version of that claim includes a 300 ms tail.** `AudioService` keeps a pre-roll
+ring buffer and drains it at the rising edge, so the audio sent begins **300 ms before** the gate
+fired — otherwise every turn would lose its first syllable. "Nothing is uplinked until you speak"
+is therefore true to within `[audio] ring_buffer_ms`, and the honest sentence is the one with the
+number in it.
+
+## 13.5 Camera and microphone privacy controls
+
+**The camera's output never leaves the device, and is never stored.** `PresenceService` polls a
+frame, runs the local YuNet detector on it, feeds the result to a pure hysteresis filter and
+**discards the pixels**. What survives a frame is a detection count and filter state. No frame is
+written to disk, none is put on the bus, and none is uplinked — this is the strongest privacy
+property the system has, and it is structural: no code path exists that could send one.
+
+Face detection is **local ONNX inference** (§7.4's pattern, AVID-226). Embeddings are local too
+(ADR-011). The only model that sees anything from this room in the cloud is the conversational one,
+and only inside a turn (§13.4).
+
+**The controls that exist:**
+
+| Control | What it actually does |
+|---|---|
+| `POST /quiet {duration_s}` and the `set_quiet` tool | suppresses **proactive turns** for a duration (§10.4) |
+| Quiet hours (`[behavior] quiet_hours`) | the same, on a schedule |
+| `[adapters] camera = "fake"` | a provisioning-time act: the real camera is never opened |
+| Unplugging the camera | the honest one, and it degrades rather than crashes (§3.12.3) |
+
+⚠️ **The gaps, which are real and are not defects of this document:**
+
+- **There is no capture indicator.** The face shows the robot's *state* — LISTENING, THINKING —
+  which correlates with the microphone but is not a statement about the camera at all. **Presence
+  polling deliberately continues through `SLEEPING`**, because that is how the robot notices you
+  came back (§3.10). A sleeping-looking robot is watching the room, and nothing on the device says
+  so.
+- **Quiet hours silence the robot; they do not stop capture.** The mic and camera run through them.
+- **A guest is not asked.** Anything said near an open session reaches the vendor, and the room's
+  occupancy is counted regardless of who is in it. The single-user model (§13.1) has no seam for a
+  second person's consent.
+- The **fake display** writes PNGs of the rendered face to `[display] frames_dir` — the robot's
+  face, not the room, but it is an image on disk that nothing prunes.
+
+These are recorded as accepted properties of a single-user desktop device, not as work items. A
+capture indicator is the one that would most change the honesty of the product, and it is cheap —
+an entry for the backlog rather than a claim made here.
+
+## 13.6 Update integrity
+
+**An update is `git pull` into `/opt/avid` followed by a restart, and there is no signature
+verification, no verified boot and no rollback mechanism.** That is the accepted risk. It is
+stated rather than dressed up, because the compensating controls are real and specific:
+
+- **`uv.lock` is committed and CI installs `--frozen`**, so a dependency cannot change under the
+  project silently. The runtime dependency set is **`pydantic` alone** (ADR-012); everything heavy
+  is an opt-in extra confined to adapters.
+- **Model snapshots are dated and pinned** (§6.10's volatility warning). A vendor rename cannot
+  change the robot's behaviour without a config edit.
+- **Migrations are ordered, checksummed and append-only** (§8.6): editing an applied migration
+  fails at boot rather than letting a deployed database diverge from the schema the code expects.
+- **The running build identifies itself.** `git describe --always --dirty --tags` is resolved once
+  at startup and reported by the banner, the `boot_log` row and `GET /metrics` (AVID-388). **A
+  `-dirty` build is a machine nobody can check out and reproduce**, and it announces itself in
+  three places instead of hiding.
+- **§12.6's split-window rule is an integrity control wearing a measurement's clothes**: a soak
+  window whose build changes mid-flight is not one window, and the gate fails it. The effect is
+  that an undeclared deploy invalidates the evidence rather than quietly contaminating it.
+
+⚠️ **The deployed machine is not the repo**, and that is the highest-likelihood integrity failure
+here by a wide margin — not a supply-chain attack. `/etc/robot/config.toml`, the systemd units and
+the ALSA mixer state are all **copies**, and a *missing* key in a copied config adopts a schema
+default silently (F-9). `deploy/PI_OPERATIONS.md` §3 exists for this and `deploy/RUNBOOK.md` makes
+it a first-five-minutes check.
+
+## 13.7 How these claims are kept true
+
+Every falsifiable literal above is checked against its source by
+`tests/docs/test_security_claims.py`, for the reason this section opened with. The check exists
+because it was **written from three real defects**, not from a hypothetical: `SECURITY.md` named a
+model the project stopped using on 2026-08-01, named `structlog` — which the SDS itself had already
+corrected in AVID-378 and which is imported nowhere — and described `GET /facts` as the privacy
+audit when no such route is served.
+
+It asserts that any model snapshot these documents name is one the repo configures; that the bind
+and port match `ApiConfig`; that any logging library they name is a real dependency; that the
+retention and deletion constants match `avid/core/config.py`; that the routes they describe match
+what `avid/adapters/health.py` serves, **in both directions**, so AVID-385/386 landing turns the
+documents red rather than leaving them wrong; and that `openai_api_key` is a `SecretStr` unwrapped
+only in the composition root — §13.2's central claim, held by an assertion rather than by care.
 
 ---
 
