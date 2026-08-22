@@ -6,214 +6,165 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-22 · `main = 9e8b05a` + this commit · `v0.M10.0` tagged · gh `AliSleiman0`.
+**As of:** 2026-08-22 (late) · `main = f2e8e74` + this commit · `v0.M10.0` tagged · gh `AliSleiman0`.
 
-## ⭐ Next session — the Pi is REACHABLE, Group A is DEPLOYED, and the clock can start
+## ⭐ Next session — M9 is 8/12 and the soak is blocked on two laptop jobs
 
-⚠️ **This section replaces the previous one entirely. Two things changed that invalidate the old
-plan: the Pi is no longer hard to reach, and Group A is no longer waiting to be written.**
+⚠️ **This section replaces the previous one entirely.** The previous baton said *"the clock can
+start."* **It cannot yet**, and the reason is new: the soak's own build-change guard is inert. Two
+laptop-only issues stand between here and starting the 30 days.
 
 ### The one-line state
 
-**M11's Group A is built, merged, deployed to the rig and verified on real hardware.** The only
-thing between here and starting the 30-day soak is a decision about the SD card. `v1.0.0` is that
-soak plus Group B, which is designed to be written *while it runs*.
+The robot **moves under its own service for the first time** — that had never worked. #207 is
+8 of 12, held by three items that need the bench and one that needs a decision. `v1.0.0` is the
+30-day soak, and the soak should not open until **#388** and **#410** land.
 
-### 🔑 The Pi now has a permanent address
+### 🔑 Reaching the Pi
 
 ```sh
-ssh alisleiman0@avid-pico            # Tailscale — works from anywhere, survives network changes
-curl http://avid-pico:8787/metrics
+ssh alisleiman0@avid.local           # worked most reliably this session
+ssh alisleiman0@100.127.197.112      # Tailscale IP — also fine
 ```
 
-Tailscale was installed 2026-08-21 (`avid-pico`, tailnet `alisleiman0.github`, `100.127.197.112`)
-**because the address moved three times in one evening.** Verified end-to-end from the laptop.
-`deploy/PI_OPERATIONS.md` §0 has the details, including the trap that `ssh AVID` can fail while
-`ping AVID` succeeds — use `AVID.local` if the tunnel is ever down.
+⚠️ **`avid-pico` fails host-key verification** — the Tailscale *name* is not in `known_hosts`, only
+`avid`, `avid.local` and `100.127.197.112`. ⚠️ **All three dropped simultaneously for ~10 minutes**
+mid-session and came back untouched; Tailscale reported the node offline while it was demonstrably
+up. Try all three before concluding anything.
 
-### What shipped this session (11 PRs)
+### ⛔ The two things blocking the soak clock — both laptop work
 
-**Group A — all merged, closed, and verified ON THE RIG:**
+**#388 — `build` is `"0.0.0"` for every commit, so §12.6's build-change guard CAN NEVER FIRE.**
+Verified on the rig: `/metrics` reported `0.0.0` before *and* after a pull that moved HEAD five
+commits. `soak_pi.py`'s criterion is `pass if len({builds}) <= 1`, so with a constant string it is
+**inert** — delete the check and no report changes (#264's test). `core/banner.py` already knew and
+even names #388 as the fix: *"said here so nobody grades a soak window on it prematurely."*
+Something does. Thirty days is long enough that someone deploys mid-window, and the guard would
+wave it through. **#377 files this under Group B; it belongs in Group A.**
 
-| | | verified on hardware |
+**#410 — `soak_pi.py` has no gate test.** M3, M4, M5, M7 and M9 harnesses each have one; the
+harness that decides `v1.0.0` does not, and it is the only one whose defects cannot be found by
+re-running it — they surface on day thirty. `tests/demos/test_soak_memory_column.py` covers only
+the memory column #404 added.
+
+### #207 — what is left, and which needs the bench
+
+| | | |
 |---|---|---|
-| **#378** | SDS §12 authored — and it defines O5 gradeably | n/a (docs) |
-| **#373** | startup banner | first line of the journal, all 12 adapters |
-| **#379** | uptime + restart accounting, migration `0002` | migration applied; **heartbeat fires** (+62 s) |
-| **#380** | `GET /metrics` | 35 subscribers, 0 dropped, `absent: []` |
-| **#381** | journald `Storage=volatile` | `/run/log/journal` exists — journal is in RAM |
-| **#383** | soak harness + O5 gate | dry-run proven; sampler unit not yet installed |
+| **AC-5** | ⚠️ decision | *"confirmed in the enclosure, where airflow and cable strain differ."* #206 measured a **bench** rig. There is no enclosure. Either the criterion drops that clause or it stays open against hardware that does not exist. |
+| **AC-9** | half done | PMP's R-04 line is updated (`b405fb5`). **`PI_OPERATIONS.md` still owes this session's traps** — the `LG_WD`/`i2c` unit fix, the disconnected-supply diagnosis, the register read-back technique. **Laptop work.** |
+| **AC-10** | ⛔ bench | Pin #200's **provisional** `min_deg`/`max_deg` to each linkage's *measured* safe reach and delete the provisional comment. Worth doing while the servos are proven good. |
+| **AC-11** | ⏸ | tag `v0.M9.0`, close the milestone. |
 
-Plus **#395** and **#396** — two flaky tests CI caught, both merged the same day, both green
-locally (see `avid-flaky-test-families`), and **#162**, which had been fixed since 2026-07-29 and
-never closed by hand.
+Passed and recorded with evidence on the issue: **AC-0, 1, 2, 3, 4, 6, 7, 8.**
 
-### ⚠️ #382 (USB SSD) is the only Group A item left — and it is now optional
+### 🔥 The find of the session: servo motion had NEVER worked under systemd
 
-#381 moved the logs into RAM, which was the dominant write source, so R-05 is materially smaller
-than when the SSD was proposed. **Starting the soak tonight on the SD card is defensible**;
-waiting on shipping costs days of the only resource that cannot be recovered. Either way,
-**image the card first** — that turns a re-image into a twenty-minute restore.
+Two causes in `robot.service`, both fixed in **#413**, both invisible on the bench:
 
-### Measured on the rig, 2026-08-21
+1. **`lgpio` writes `.lgd-nfy-N` into the current working directory** — reached via
+   `adafruit_blinka` under `adafruit_servokit` under `Pca9685Servo`. `WorkingDirectory=/opt/avid`
+   is read-only under `ProtectSystem=strict`. → `Environment=LG_WD=/var/lib/robot`.
+2. **`i2c` was missing from `SupplementaryGroups`** (`video gpio audio`). `/dev/i2c-1` is
+   `root:i2c crw-rw----` and the PCA9685 is an I²C device.
 
-- **`Raspberry Pi 4 Model B Rev 1.5, 2 GB`** — the SDS said Pi 5 / 8 GB / 27 W from M0 until
-  2026-08-22; §2.7.1 now names this board and carries a dated correction note (#401). The sealed
-  measurements were always taken here, so none of them moved.
-- **279 MiB used, 1.5 GiB available** with every adapter real. The RAM worry was overstated —
-  but that is one idle reading, and ⚠️ **`GET /metrics` has no memory provider at all**, so the
-  soak has no memory column and thirty days would end with no answer on growth (new SDS §12.6.1).
-  The instrument has to land **before** the window opens: a mid-flight build change splits it.
-- **56 °C, `throttled=0x0`, 1800 MHz, no heatsink.** 24 °C of headroom. A heatsink is $2 at
-  electroslab (search "heat sink", two words) and only becomes necessary once the robot is enclosed.
-- Deployed HEAD was `cc89217`, which **did** contain #309's clause fix, and `[ai] model` resolves to
-  the **flagship** — so #310's "silently running the mini" hypothesis is dead. See #310.
-- `proactive_log` id=16 is `suppressed / stale` — **M10's AC-0 is still unmet**, and the reason is
-  visible: the robot is not up when the trigger is due. Always-on fixes it as a side effect.
+⚠️ **Third instance of one family, and the unit's own comment describes the second:** *"`audio` is
+not optional either, and its absence was invisible for two milestones… M4 and M5 both passed
+because their benches run as the login user."* Identical here — every harness drove both axes
+perfectly as `alisleiman0` while the service could not move at all. **A gate run by hand would have
+passed while the product was motionless.**
 
-### Tonight's order — the M11 soak
+Two CI assertions guard it now, each proven to bite. The `LG_WD` one checks the value points
+**inside `StateDirectory`**, not merely that it is set — an `LG_WD` aimed at another read-only path
+would satisfy a presence check and fail identically on the Pi.
 
-1. **Decide the SD card**: image it and start, or wait for #382. *(Recommendation: image and start.)*
-2. **Install the sampler** — `deploy/soak-sampler.service`, then start the clock and record the
-   window-start epoch somewhere durable.
-3. **Flip `servo = "pca9685"`** when the motion work is next touched — it is still `"fake"` on the
-   machine, so #207 cannot be graded until it is flipped.
-4. Then Group B (#384, #21, #385, #386, #387, #388) **while the soak runs**.
+### #414 — five "the speaker dropped audio" WARNINGs were barge-ins, misattributed
 
-⚠️ **Do not seal M9 from a laptop.** Unchanged, and still true.
+**No audio was ever lost.** `interrupt()` awaited `stop()` *before* bumping the playback epoch, and
+`stop()` both releases the in-flight write and yields — so the released writer resumed while the
+guard still read "live episode" and logged a hardware fault. Bench signature: **5 WARNINGs, 0 DEBUG
+lines.** Fixed in **#416**, deployed.
 
-### The M9 bench evening (#206 → #207) — a SEPARATE evening from the soak above
+Four hypotheses were eliminated by measurement *before* the log pointed here — **432 chunk plays**
+across servo motion, chunk size, arrival jitter and concurrent capture, all clean, precisely
+because none of those runs called `stop()` mid-write.
 
-**1. #206 first, and it is time-boxed to 0.5 IED.** *Does the servo brown out the Pi under stall
-on a shared rail?* Answer it and stop. R-04's failure mode is not "the robot glitches" — it is
-**SD-card corruption**, the one failure here that costs a re-image rather than a restart. The
-register line was written for **one** servo; the rig has two and the worst case is both stalled at
-once. Photograph the wiring *before* power-on; if it is not a separate 5–6 V rail with common
-ground, fix the wiring rather than "just trying it". Bounded holds only — a held stall cooks the
-gearset — and afterwards confirm both servos still traverse their full declared reach.
+⚠️ **#414 stays open for one outlier**: `accepted 140 of 150` sat at the *start* of a playback, not
+against an interruption. One counter-example in five is enough not to close on a sweep.
 
-**2. ~~Reprovision the Pi~~ — ✅ DONE 2026-08-21.** The Pi is synced to `9e8b05a`, the config was
-repaired (the #200 one-axis failure fired exactly as predicted below, and the splice recipe is now
-in `PI_OPERATIONS.md` §3), and `load_config` validates. ⚠️ **The one step still outstanding is the
-flip: `servo` is still `"fake"` on the machine**, so #207 cannot be graded until it is `"pca9685"`.
-The original instructions are kept below because they are the recipe for the *next* reprovision.
+⚠️ **And the fix has not been re-observed on the rig.** It is deployed and the service is active,
+but no conversation has run against it. **The next live conversation should show DEBUG "barge-in
+truncated the write" where WARNINGs used to be.** If it shows WARNINGs, AC-8's pass is wrong and
+should be reversed rather than explained.
 
-```sh
-sudo systemctl stop robot
-sudo install -m 644 -o root -g root /opt/avid/config/pi.toml /etc/robot/config.toml
-sudo install -m 644 -o root -g root /opt/avid/deploy/robot.service /etc/systemd/system/robot.service
-sudo systemctl daemon-reload
-# then flip [adapters] servo = "pca9685" on the MACHINE — the repo template ships every device
-# "fake" by design (PI_OPERATIONS §3); selecting real hardware is a provisioning act.
-```
+### Two harnesses now committed, and one earned its keep immediately
 
-⚠️ **A machine still carrying the old one-axis `[servo]` now FAILS TO LOAD** rather than silently
-running on one axis. That is #200's deliberate loudness: sections are `extra="forbid"`, so
-`channel = 0` or `[motion] axes` at the top level is a hard error. Verify with `load_config`, never
-by eye.
+- **`docs/demos/did_it_move_pi.py`** — "did the head actually move?", from the camera, against a
+  still-camera noise floor re-derived each run. **It caught what two human observations missed**:
+  both axes were reported motionless on a rig whose fault was a disconnected 5 V supply. Its
+  conclusion is asymmetric by design — a large difference is conclusive, a small one is not proof
+  of stillness — and it prints frame brightness so a dark room stays distinguishable from a dead
+  servo. **#207's remaining bench work should use it rather than eyes.**
+- **`docs/demos/brownout_pi.py`** — records; the human induces. It never drives a servo into a hard
+  stop, and it refuses to claim a result the stimulus may not have earned: **two runs produced
+  identical clean output with nobody touching the horns**, and its own report is what marked them
+  no-result rather than pass.
 
-**3. `#207`'s harness is already written and ready.**
+### Everything closed and filed this session
 
-```sh
-/opt/avid/.venv/bin/python docs/demos/motion_pi.py --config /etc/robot/config.toml \
-    --json docs/demos/m9_evidence/gate.json
-```
+**Closed:** #401 (spec named a Pi 5; the rig is a Pi 4B 2 GB) · #384 (SDS §11 authored) · #404
+(memory metrics, verified on the Pi) · #206 (SPK-4: two-servo stall, no brown-out, **margin
+unmeasured**).
 
-It observes only. It grades AC-0/2/3/4/5, reports AC-1/4/6/7 as `HUMAN`, and **exits non-zero
-while any of those is unrecorded**. A run against `servo = "fake"` prints a loud warning before it
-does anything — that is the M4 failure exactly.
+**Filed:** #406 (O1 stale — last measured 2026-08-01, #194 landed 08-16, ceiling still pinned to
+the pre-fix run) · #407 (five modules say "ReSpeaker"; the rig has a USB PnP mic) · #410 · #414 ·
+#415 (`response_cancel_not_active`).
 
-### Five things to know before standing at the rig
+**Merged:** #405, #408, #409, #411, #412, #413, #416 — seven PRs, `main = f2e8e74`.
 
-⚠️ **A trace is not a moved head.** `tests/e2e/test_m9_gate.py` proves the whole arc on every
-commit and every assertion in it is against `FakeServo`. A wrong channel, a stale config, a horn
-slipping on its spline, an I²C address collision — each produces a **perfect trace** and a
-motionless robot.
-
-⚠️ **"Did it move" passes on the hardware ADR-009 replaced.** A pan-only robot still nods, because
-#201 degrades a nod to a small pan sway. What separates a 2 DoF rig from a 1 DoF one is that nod
-and turn land on **different axes** — ch13 and ch0. That is AC-2's real content.
-
-⚠️ **The direction convention is fixed in code and must be confirmed against the head.**
-Increasing degrees is **up** on tilt and **left** on pan. A mirrored horn is corrected
-**mechanically**, by reseating it on its spline — *not* by inverting a sign, because an inverted
-sign is invisible in a trace and surfaces months later as a servo aiming at the wrong side of the
-room (`domain/vision.py` already carries that warning for `BBox`).
-
-⚠️ **The reaches are provisional and AC-10 pins them.** `pi.toml` ships pan 30–150, tilt 60–120,
-commented `# provisional — #207`. `0–180` is the servo's *electrical* range, not the bracket's.
-⚠️ And they are now **genuinely different** from `[servo] actuation_deg` — see #356: the adapter
-used to calibrate its degree→pulse mapping from `max_deg`, which was accidentally correct only
-while both were 180.
-
-⚠️ **The display cannot be fitted alongside the amp and servo** — the 40-pin header is full. So
-AC-1 ("affect drives gesture") probably cannot be watched on the face and the head at once.
-**Decide which half is read from the log before starting**, not mid-run.
-
-### ⚠️ The old "if the Pi is not reachable" ladder is RETIRED
-
-It ran for two sessions and is now obsolete: **Tailscale removed the premise.** `avid-pico`
-resolves from anywhere and survives a network change, so "the Pi is out of reach" stops being a
-planning branch and becomes a fault to fix.
-
-Its three items all resolved:
-
-- **Item 0 — what is deployed at `/opt/avid`** — ✅ ran 2026-08-21. `cc89217`, which contained
-  #309's fix; and the banner now answers it for every future run in one journal line.
-- **M10's AC-0** — ✅ read. **Still unmet**: id=16 is `suppressed / stale`. The 30-day soak is what
-  produces it.
-- **#310** — ✅ AC-1 answered off-rig (4/4 both models), and the "wrong model" hypothesis died on
-  the rig. Only AC-4 remains, and it needs a person.
-
-### Newly open, all correctly parked behind `v1.0.0`
-
-- **#400** — two driven wheels, bounded net-zero steps on the desk. **Committed work, not Icebox.**
-  $17.50 of parts priced at electroslab; N20 micro gear motors + L9110S beat the CR servo on size
-  *and* on stall current, which matters more now (see #401's power row). ⚠️ Blocked on a bench
-  check: the cliff sensors need 2 free GPIO inputs and the PCA9685 cannot read.
-- **#401** — the SDS names the wrong computer. `prio:must`, and **#384 should not be written until
-  it lands** or §11's resource budget describes a machine that does not exist.
-- **#402 / milestone M12 — "It has a fleet."** OTA, telemetry, entitlement, and ephemeral
-  API-token minting. The finding worth keeping: **ADR-010's premise — *"the Pi is a trusted device
-  we fully control"* — dies the moment the robot is sold**, and the naive fix (an API proxy) would
-  route customer audio through us and destroy the on-device privacy claim that is currently a
-  genuine differentiator against EMO and Loona.
-
-### What M9 changed that a later reader will trip over
-
-- **`Axis` moved into `domain/motion.py`** and is re-exported from `core/hal.py` — the ADR-013
-  `BBox` move, for ADR-009's reason. `avid.core.hal.Axis` is still the spelling every port and
-  adapter uses. Recorded in SDS §3.9.4.
-- **`[motion] axes` is deleted, not reconciled.** The rig's inventory is `Servo.axes` and there is
-  exactly one copy of it (§3.9.3). `[motion]` is now the service's tuning only.
-- **`MotionService` is the only caller of `move_to`/`relax`** — asserted by a test over the source
-  tree. `main.py`'s `_ = servo` is gone.
-- **The P8 gate was rebuilt mid-milestone** (#328). It still detects at 50 ms but now convicts only
-  on **gross** (≥ 100 ms, asyncio's own default) or **corroborated** (the same frame twice). A
-  declared load generator's own coroutine is exempt via `@pytest.mark.p8_load`. See below.
+---
 
 ## Current state
 
-- **M9 code-complete, not sealed.** Seven issues merged this session (#199–#205), plus #289, #356
-  and #328. Zero open PRs. `main = de8a7bb`.
-- **M10 sealed as `v0.M10.0`.** Nine of eleven milestones tagged; M9 and M11 remain.
-- **The suite is 1668 passed / 65 skipped**, on 3.11 and 3.13. `avid/domain/motion.py`,
-  `avid/services/motion.py`, `avid/services/tools.py` and `avid/core/ports.py` are all at 100%.
-- ⚠️ **The e2e M9 gate adds ~18 s to a suite run**, deliberately: `FakeServo` sweeps in real time
-  because a servo sweep is not fakeable, and that test's job is to look like the robot. The
-  *service* suite scales its sweeps 5×; the gate does not.
-- ⚠️ **The Pi** was last at `alisleiman0@172.20.10.6` and **dropped off the hotspot at ~02:05 on
-  2026-08-20**. Address moves with the network. Nothing has been run on it this session.
+- **`main = f2e8e74`, zero open PRs.** Suite **1734 passed / 67 skipped** on 3.11 and 3.13.
+- **The Pi is up, healthy, and moving.** `robot.service` active and enabled, running `f2e8e74`,
+  `[adapters] servo = "pca9685"` (flipped during #206 and **kept** — #207 could not be graded while
+  it was `"fake"`). `/metrics`: rss ~232 MiB, available ~1.5 GiB, `absent: []`, `throttled=0x0`.
+- **M9 is 8/12 and not sealed.** M10 sealed (`v0.M10.0`). Nine of eleven milestones tagged.
+- ⚠️ **The soak clock has NOT started and should not until #388 and #410 land.** #382 (USB SSD) is
+  optional since #381 moved logs to RAM.
+- ⚠️ **The two config copies that are deliberately different** — the machine's quiet window is
+  `02:00→09:00` and `session_idle_close_s = 300`, against `config/pi.toml`'s `22:00→07:30` and
+  `30`. **Do not reconcile in either direction.** Every *other* key that differs was checked this
+  session and resolves to the same value via schema defaults.
+- ⚠️ **`/etc/systemd/system/robot.service` is now installed FROM the repo** (`diff` verified
+  identical) rather than hand-edited. Backups exist at `.pre206.bak` and `.pre207.bak`.
 - ⚠️ **`mypy` cannot run bare locally** — numpy's stubs use 3.12 `type` syntax against the 3.11
-  target. `uv run --frozen --exact mypy avid` reproduces CI exactly.
-- ⚠️ **The machine's quiet window is `02:00→09:00`, NOT `config/pi.toml`'s `22:00→07:30`.**
-  Deliberate. **Do not reconcile in either direction.**
-- ⚠️ **One process slip this session, owned rather than buried:** the previous handoff commit
-  (`de8a7bb`) was pushed **directly to `main`** instead of through a PR. The content was fine; the
-  ritual was not followed. Branch protection is off (it needs Pro), so nothing stopped it — which
-  is a reason for care rather than a licence. This edit went through a PR.
+  target. **`uv run --frozen --exact mypy avid` reproduces CI exactly.** (This session used
+  `--python-version 3.13` as a workaround before noticing the documented recipe; use the recipe.)
+- ⚠️ **A docs-only PR shows an EMPTY check list, not a green one** — `paths-ignore` skips
+  `**/*.md` and `docs/**`. The workflow's own comment says so. Verify locally and say which.
 
-## What just shipped (2026-08-20, M9)
+### Gotchas this session paid for
+
+- ⚠️ **`git checkout -- <file>` reverts to HEAD, not to your uncommitted edits.** Neutering a guard
+  to prove a test bites destroyed the fix it was proving. **Commit first, then neuter, then
+  restore** — which is the discipline already written down, ignored once and immediately punished.
+- ⚠️ **Git Bash `/tmp` and Windows `C:\tmp` are different directories.** A shell redirect wrote one,
+  Python read the other, and `gh issue edit --body-file` then re-posted an unmodified body. It
+  looked like success. **Use the scratchpad path both agree on**, and verify after editing an issue
+  body — check the length and the checkbox counts.
+- ⚠️ **Python 3.11 rejects same-quote nesting inside f-strings** (a 3.12 feature). Bit twice on
+  one-liners run over SSH. Ship a file instead of fighting quoting; ADR-008 is not only about
+  `avid/`.
+- ⚠️ **`pgrep -f <pattern>` matches the shell running it.** A wait-loop on `pgrep -f brownout.py`
+  never exited because its own command line contained the pattern.
+- ⚠️ **Piping to `tail` hides the exit code**, and a traceback scrolled past reads as success — a
+  probe "completed" while having died on its first line, and the operator watched a still robot.
+  **Smoke-test anything a human is asked to observe, before asking them to observe it.** This cost
+  two wasted observation windows.
+
+## What shipped earlier (2026-08-20, M9)
 
 Ten PRs. In dependency order, with what each one is actually *for*:
 
