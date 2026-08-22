@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-22 · `main = 5b29d49` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
+**As of:** 2026-08-22 · `main = a7dfcab` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
 
 ## ⭐ Next session — ⏱️ THE SOAK IS RUNNING. Do not deploy to the Pi.
 
@@ -68,11 +68,15 @@ nothing else will remember which was which.
 
 | | | |
 |---|---|---|
-| **#387** | the runbook, symptom-first | `prio:must` |
-| **#21** | SDS §13, Security & Privacy | `prio:must` |
-| **#385** | `GET /state` + the SSE tap | |
-| **#386** | `GET /facts` — §7.10's privacy audit | |
+| ~~**#387**~~ | ~~the runbook, symptom-first~~ | ✅ **`deploy/RUNBOOK.md`, #425** |
+| **#21** | SDS §13, Security & Privacy | `prio:must` — now the only `must` left in Group B |
+| **#385** | `GET /state` + the SSE tap | ⚠️ landing it **fails `tests/docs/test_runbook.py`** by design — §1.3 documents the route as unbuilt, so the change that makes that wrong must update it |
+| **#386** | `GET /facts` — §7.10's privacy audit | same guard, same reason |
 | **#388** | AC-1…AC-6, the release artifact | only AC-7 landed |
+
+**Take #21 next.** It is the last `prio:must` here, it is the only Group B item with no dependency
+on anything, and #385/#386 now carry a deliberate tripwire that is easier to honour once the
+runbook has settled.
 
 ### #207 is 8 of 12, and waiting on decisions rather than code
 
@@ -111,18 +115,45 @@ against an interruption. And ⚠️ **the fix has not been re-observed on the ri
 conversation should show DEBUG `"barge-in truncated the write"` where WARNINGs used to be. If it
 shows WARNINGs, #207's AC-8 pass is wrong and should be reversed rather than explained.
 
+### 📕 The runbook shipped (#387 → #425)
+
+`deploy/RUNBOOK.md`, indexed by what is **observed** rather than by subsystem, because the person
+reading it does not yet know which subsystem it is. Thirteen entries; §1's first five minutes; §4's
+recovery procedures each stating what they **destroy** and what they cost O5 while the window is
+open; §5's what-not-to-do; §6's cross-links.
+
+Two things worth carrying forward:
+
+- ⚠️ **AC-3 asked for `GET /state` and that route does not exist.** The machine serves `/health`,
+  `/metrics` and `POST /quiet`. §1.3 says so — and `tests/docs/test_runbook.py` asserts it **in both
+  directions**, so #385/#386 landing turns the runbook red rather than leaving it quietly wrong.
+- **A runbook nothing checks is F-9 in prose.** The guard checks links (anchors computed with
+  GitHub's slug rule, never typed), curled routes against `health.py`, literals against their
+  sources (port, config path, venv interpreter, `SupplementaryGroups`, `LG_WD`, the intervention
+  log), index ↔ entries both ways, all three parts per entry, and a `**Destroys:**` line on every
+  recovery step. **14 neuters, 14 real assertion failures** — including *shipping* `/state` in
+  `health.py` to prove the reverse check fires.
+
+⚠️ Local trap re-confirmed while running the 3.11 leg: **`uv run --python 3.11` rebuilds the main
+venv without the extras** and turns the suite 79 red in untouched files (`ModuleNotFoundError:
+numpy`). Run the second interpreter in a throwaway `UV_PROJECT_ENVIRONMENT=.venv311` instead, then
+delete it.
+
 ### Closed and filed today
 
-**Closed:** #401 · #384 · #404 · #206 · #410.
+**Closed:** #401 · #384 · #404 · #206 · #410 · **#387**.
 **Filed:** #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
 pre-fix run) · #407 (five modules say "ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423.
+**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**.
 
 ---
 
 ## Current state
 
-- **`main = 5b29d49`**, zero open PRs. Suite **1771 passed / 67 skipped** on 3.11 and 3.13.
+- **`main = a7dfcab`**, zero open PRs. Suite **1778 passed / 67 skipped** on 3.11 and 3.13.
+- 📕 **`deploy/RUNBOOK.md` exists** (#387/#425) — symptom-first, thirteen entries, each Confirm /
+  Fix / **Not-to-be-confused-with**. Read it before diagnosing anything on the rig; it is now the
+  first stop and `PI_OPERATIONS.md` is the second. `tests/docs/test_runbook.py` keeps it honest.
 - ⏱️ **The M11 soak is RUNNING** — opened 2026-08-22T13:18:08Z, closes 2026-09-21T13:18:08Z, build
   `v0.M10.0-47-g8d03690`. `robot` and `soak-sampler` both `active` + `enabled`.
 - **The robot moves under its own service** — that had never worked before today.
