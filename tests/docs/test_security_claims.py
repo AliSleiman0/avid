@@ -89,7 +89,9 @@ def test_the_control_api_bind_and_port_match_the_schema() -> None:
     defaults = ApiConfig()
     endpoint = f"{defaults.bind}:{defaults.port}"
     for name, text in _DOCS.items():
-        assert endpoint in text, f"{name} does not name the control API's actual {endpoint}"
+        assert endpoint in text, (
+            f"{name} does not name the control API's actual {endpoint}"
+        )
         for found_port in re.findall(rf"{re.escape(defaults.bind)}:(\d+)", text):
             assert int(found_port) == defaults.port, (
                 f"{name} names port {found_port}; ApiConfig's default is {defaults.port}"
@@ -184,9 +186,13 @@ def test_the_logging_library_the_documents_credit_is_the_one_in_use() -> None:
     imports = [
         path
         for path in (_REPO_ROOT / "avid").rglob("*.py")
-        if re.search(r"^\s*(?:import|from)\s+structlog", path.read_text(encoding="utf-8"), re.M)
+        if re.search(
+            r"^\s*(?:import|from)\s+structlog", path.read_text(encoding="utf-8"), re.M
+        )
     ]
-    assert not imports, f"structlog is imported by {imports}, and both documents deny it"
+    assert not imports, (
+        f"structlog is imported by {imports}, and both documents deny it"
+    )
     for name, text in _DOCS.items():
         assert "stdlib `logging`" in text, (
             f"{name} no longer credits the stdlib logging module for the structured logs"
