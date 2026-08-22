@@ -186,9 +186,33 @@ def _git(*args: str) -> str:
     ).stdout.strip()
 
 
-def read_commits(*, tag: str, previous_tag: str | None) -> list[Commit]:
+def ref_exists(ref: str) -> bool:
+    """Whether ``ref`` resolves to a commit in this repository.
+
+    Needed because **the tag being released does not always exist yet**. A dry run
+    (``workflow_dispatch``) names a tag nobody has created, and the first version of this tool ran
+    ``git log v0.0.0-rc.1`` against it and died with exit 128 — found by AC-6's dry run on its very
+    first execution, which is the whole argument for having AC-6 at all.
+    """
+    try:
+        _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def resolve_endpoint(tag: str) -> str:
+    """The ref to read history up to: the tag if it exists, otherwise ``HEAD``.
+
+    On a real tag push the tag is the endpoint and the notes describe exactly what it points at.
+    On a dry run it does not exist, and ``HEAD`` is both the honest answer and the useful one.
+    """
+    return tag if ref_exists(tag) else "HEAD"
+
+
+def read_commits(*, endpoint: str, previous_tag: str | None) -> list[Commit]:
     """The one function here that touches git."""
-    span = f"{previous_tag}..{tag}" if previous_tag else tag
+    span = f"{previous_tag}..{endpoint}" if previous_tag else endpoint
     output = _git("log", span, "--no-merges", "--format=%h%x1f%s")
     return [
         Commit(sha=sha, subject=subject)
@@ -198,16 +222,16 @@ def read_commits(*, tag: str, previous_tag: str | None) -> list[Commit]:
     ]
 
 
-def previous_tag_of(tag: str) -> str | None:
-    """The tag before ``tag``, or ``None`` if this is the first.
+def previous_tag_of(endpoint: str) -> str | None:
+    """The most recent tag before ``endpoint``, or ``None`` if there is none.
 
-    ``git describe --abbrev=0 --tags <tag>^`` answers "the most recent tag reachable from the
-    commit before this one", which is the right question — it follows history rather than
-    sorting names, so `v0.M10.0` after `v0.M8.0` needs no version parsing and a missing
-    milestone tag (there is no `v0.M9.0`) cannot confuse it.
+    ``git describe --abbrev=0 --tags <endpoint>^`` answers "the most recent tag reachable from
+    the commit before this one", which is the right question — it follows history rather than
+    sorting names, so `v0.M10.0` after `v0.M8.0` needs no version parsing and a missing milestone
+    tag (there is no `v0.M9.0`) cannot confuse it.
     """
     try:
-        return _git("describe", "--abbrev=0", "--tags", f"{tag}^") or None
+        return _git("describe", "--abbrev=0", "--tags", f"{endpoint}^") or None
     except subprocess.CalledProcessError:
         return None
 
@@ -224,9 +248,19 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--out", help="write here instead of stdout")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    previous = args.previous or previous_tag_of(args.tag)
+    endpoint = resolve_endpoint(args.tag)
+    if endpoint != args.tag:
+        # Said out loud, on stderr, so a dry run's log records that the notes describe HEAD and
+        # not a tag that does not exist. Silence here would be a report describing something
+        # other than the run (CLAUDE.md §7.1).
+        print(
+            f"note: {args.tag} is not a ref in this repository; "
+            f"generating notes from {endpoint}",
+            file=sys.stderr,
+        )
+    previous = args.previous or previous_tag_of(endpoint)
     notes = render_notes(
-        read_commits(tag=args.tag, previous_tag=previous),
+        read_commits(endpoint=endpoint, previous_tag=previous),
         tag=args.tag,
         previous_tag=previous,
         repo=args.repo,
