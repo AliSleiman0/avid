@@ -107,6 +107,7 @@ def _args(samples: str, robot_db: str, **over: Any) -> argparse.Namespace:
         gap_factor=3.0,
         min_coverage=0.99,
         bar=0.99,
+        interventions=str(Path(samples).parent / "interventions.jsonl"),
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -340,3 +341,126 @@ def test_the_window_is_the_since_until_span_not_the_sample_span(
     )
     ac2 = _by_ac(soak._grade(args))["AC-2"]
     assert (ac2.verdict == "pass") == (days == 1), f"{days}d: {ac2.detail}"
+
+
+# ── the intervention log (#389) — §12.6 promised it and nothing implemented it ────────────────
+
+
+def _interventions(tmp_path: Path, lines: list[str]) -> None:
+    (tmp_path / "interventions.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _unclean_boots(end: int) -> list[dict[str, Any]]:
+    return [
+        {"boot_id": "aaaaaaaa-1", "started_at": _SINCE, "last_seen_at": end},
+        {"boot_id": "bbbbbbbb-2", "started_at": end + 30, "last_seen_at": _UNTIL},
+    ]
+
+
+def test_an_intervention_explains_an_unclean_stop_without_excusing_it(
+    tmp_path: Path,
+) -> None:
+    """⚠️ The property that keeps this honest.
+
+    A power cut and a crash leave byte-identical records — both `stopped_at` NULL, and journald is
+    volatile (#381) so the kernel log is gone too. The operator's note is the only thing that can
+    tell them apart, and §12.6 says so.
+
+    But a human typing *"that one was me"* is **not a measurement**, so it must not turn AC-3b
+    green. §7.1: widening to fit is a last resort *with the diagnosis attached*, and the original
+    verdict stays visible. This asserts both halves — the stop is marked explained, **and** AC-3b
+    still fails.
+    """
+    end = _SINCE + 10 * _DAY
+    _interventions(
+        tmp_path,
+        [
+            '{"at": %d, "kind": "power_cut", "note": "unplugged the bench strip"}'
+            % (end + 60)
+        ],
+    )
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _dense()),
+                _robot_db(tmp_path, _unclean_boots(end)),
+            )
+        )
+    )
+    assert graded["INTV"].verdict == "recorded", "an operator note must never grade"
+    assert "1 of 1 unclean stop(s) have a matching note" in graded["INTV"].detail
+    assert graded["AC-3b"].verdict == "fail", (
+        "a note explained the stop and must NOT have excused it — AC-3b keeps its verdict"
+    )
+
+
+def test_an_unclean_stop_with_no_note_is_marked_unexplained(tmp_path: Path) -> None:
+    """The distinction the log exists to create. Without it every stop looks the same."""
+    end = _SINCE + 10 * _DAY
+    _interventions(tmp_path, [])
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _dense()),
+                _robot_db(tmp_path, _unclean_boots(end)),
+            )
+        )
+    )
+    assert any("UNEXPLAINED" in r for r in graded["INTV"].rows), graded["INTV"].rows
+
+
+def test_an_absent_log_says_so_rather_than_implying_nobody_touched_it(
+    tmp_path: Path,
+) -> None:
+    """⚠️ Absent is not zero, applied to a hand-written record.
+
+    An empty log and an unlogged power cut are indistinguishable, and the report must say that
+    rather than presenting silence as a clean bill of health."""
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _dense()),
+                _robot_db(tmp_path, _unclean_boots(_SINCE + _DAY)),
+            )
+        )
+    )
+    assert graded["INTV"].verdict == "recorded"
+    assert "not the same as" in graded["INTV"].detail
+
+
+def test_a_malformed_line_is_counted_not_fatal(tmp_path: Path) -> None:
+    """An operator's typo at 2 a.m. must not take down a thirty-day report."""
+    _interventions(
+        tmp_path,
+        ['{"at": 1, "kind": "ok"}', "this is not json", '{"no_at_field": true}'],
+    )
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _dense()),
+                _robot_db(tmp_path, _unclean_boots(_SINCE + _DAY)),
+            )
+        )
+    )
+    assert graded["INTV"].verdict == "recorded"
+    assert any("unreadable" in r for r in graded["INTV"].rows), graded["INTV"].rows
+
+
+def test_interventions_outside_the_window_are_ignored(tmp_path: Path) -> None:
+    """A note from last month's window is not evidence about this one."""
+    _interventions(
+        tmp_path,
+        [
+            '{"at": %d, "kind": "power_cut", "note": "previous window"}'
+            % (_SINCE - _DAY)
+        ],
+    )
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _dense()),
+                _robot_db(tmp_path, _unclean_boots(_SINCE + _DAY)),
+            )
+        )
+    )
+    assert "no interventions logged" in graded["INTV"].detail
