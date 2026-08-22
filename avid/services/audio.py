@@ -503,8 +503,21 @@ class AudioService:
         the buffer length it replaced, and bounded. It does **not** drive a transition: the
         ``SPEAKING → LISTENING`` move is the ``speech_started`` origin's (see :meth:`_begin_speech`).
         """
-        await self._speaker.stop()
+        # ⚠️ Order matters, and the obvious order is wrong (#414). `stop()` both releases the
+        # in-flight `play()` (it sets the flag `_write_all` polls) and yields (it hops a thread).
+        # Bumping the epoch after it therefore leaves a window in which the released writer
+        # resumes, finds `_playback_epoch` unchanged, and reports its short write as the DEVICE
+        # dropping audio — five such WARNINGs on the bench, and zero of the DEBUG lines that
+        # exist to catch exactly this. Taking the playback first is synchronous, so nothing can
+        # interleave, and the writer always observes the bumped epoch.
+        #
+        # The cost is that `played_ms` no longer includes the final partial chunk, making the
+        # `audio_end_ms` the model is told (#104) slightly more conservative. That is the safe
+        # direction — under-reporting what the user heard cannot cause content they already heard
+        # to be repeated — and it matches what the epoch branch does anyway: a write that loses
+        # the race has always skipped `self._playing_ms += accepted_ms`.
         episode = self._take_playback()
+        await self._speaker.stop()
         if episode is None:
             return 0
         await self._publish_finished(episode, truncated=True)

@@ -1462,3 +1462,95 @@ async def test_a_healthy_microphone_is_never_reported_stalled() -> None:
             await _spin()
 
         assert watcher.stalled == []
+
+
+class _RealisticStopSpeaker(_ParkingSpeaker):
+    """A ``_ParkingSpeaker`` whose ``stop()`` behaves like ``AlsaSpeaker.stop()`` (#414).
+
+    ``_ParkingSpeaker.stop`` only *marks* that it was stopped; the test then releases the parked
+    write by hand, which puts the release **after** ``interrupt`` has finished. The real adapter
+    does both halves itself and in the other order:
+
+    * it sets a flag that ``_write_all`` checks, so the in-flight write **returns immediately** —
+      here, releasing the park; and
+    * it hops a thread (``await asyncio.to_thread``), so ``stop()`` **yields the loop**.
+
+    Both matter, and together they open a window ``_ParkingSpeaker`` cannot express: the writer can
+    resume, run its epoch check and log, all while ``interrupt`` is still suspended inside its own
+    first line. That window is #414.
+    """
+
+    async def stop(self) -> None:
+        await super().stop()
+        self.release.set()  # the real flag: the in-flight write returns at once
+        await asyncio.sleep(0)  # the real thread hop: interrupt yields here
+
+
+async def test_a_barge_in_is_not_reported_as_the_device_dropping_audio(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#414: five WARNINGs on the bench that said the speaker dropped audio. It had not.
+
+    ``AudioService._play_chunk`` distinguishes the two causes of a short write by epoch::
+
+        accepted_ms = await self._speaker.play(chunk)
+        if self._playback_epoch != epoch:
+            _log.debug("barge-in truncated the write: ...")   # expected, benign
+            return
+        if accepted_ms < submitted_ms:
+            _log.warning("speaker accepted %d of %d ms ...")  # the device really dropped it
+
+    and ``interrupt`` bumps that epoch — but only on its **second** line::
+
+        await self._speaker.stop()        # yields, and releases the in-flight write
+        episode = self._take_playback()   # the epoch is bumped here
+
+    So a writer released by ``stop()`` can resume, see an unbumped epoch, and take the WARNING
+    branch: a barge-in reported as a hardware fault. On the bench this produced **5 WARNINGs and 0
+    DEBUG lines** — the branch built to catch it never ran once.
+
+    ⚠️ **What makes it worth fixing is not the noise.** It is that the WARNING is the only signal
+    that would show a *genuine* device drop, and it currently cries wolf on ordinary interruption.
+    The 432-play differential on #414 found zero real drops precisely because none of those runs
+    called ``stop()`` mid-write.
+    """
+    speaker = _RealisticStopSpeaker()
+    with caplog.at_level(logging.DEBUG, logger="avid.services.audio"):
+        async with _rig(
+            vad_script=[False],
+            initial=RobotState.THINKING,
+            speaker_factory=lambda _state: speaker,
+        ) as rig:
+            rig.service._turn_id = uuid4()
+            playing = asyncio.create_task(
+                rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0"),
+                name="test.play",
+            )
+            try:
+                await speaker.entered.wait()  # the write is parked, mid-flight
+                await rig.service._begin_speech()  # the barge-in, on the other task
+                await playing
+            finally:
+                speaker.release.set()
+                if not playing.done():
+                    playing.cancel()
+
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "speaker accepted" in r.getMessage()
+    ]
+    debugs = [
+        r.getMessage()
+        for r in caplog.records
+        if "barge-in truncated the write" in r.getMessage()
+    ]
+    assert not warnings, (
+        "a barge-in was reported as the device dropping audio (#414): "
+        f"{warnings}. The epoch must be bumped before interrupt() awaits anything, "
+        "or the released writer resumes while the guard still says 'live episode'."
+    )
+    assert debugs, (
+        "the truncated write was neither warned about nor recorded as a barge-in — "
+        "the epoch check did not fire and nothing else reported the shortfall"
+    )
