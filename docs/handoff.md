@@ -6,163 +6,163 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-22 (late) · `main = f2e8e74` + this commit · `v0.M10.0` tagged · gh `AliSleiman0`.
+**As of:** 2026-08-22 · `main = 5b29d49` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
 
-## ⭐ Next session — M9 is 8/12 and the soak is blocked on two laptop jobs
+## ⭐ Next session — ⏱️ THE SOAK IS RUNNING. Do not deploy to the Pi.
 
-⚠️ **This section replaces the previous one entirely.** The previous baton said *"the clock can
-start."* **It cannot yet**, and the reason is new: the soak's own build-change guard is inert. Two
-laptop-only issues stand between here and starting the 30 days.
+⚠️ **This replaces the previous section entirely.** It said #388 and #410 blocked the clock. Both
+landed; the clock started at **2026-08-22T13:18:08Z** and closes **2026-09-21T13:18:08Z**.
 
-### The one-line state
+### ⛔ The one rule for the next 30 days
 
-The robot **moves under its own service for the first time** — that had never worked. #207 is
-8 of 12, held by three items that need the bench and one that needs a decision. `v1.0.0` is the
-30-day soak, and the soak should not open until **#388** and **#410** land.
+**Do not `git pull` + restart on `/opt/avid`.** §12.6 makes a mid-window build change a *split
+window*, that guard is real now (#388) and its criterion is proven to fire (#410). Working on
+`main` is fine — **deploying is not**, until 21 September.
 
-### 🔑 Reaching the Pi
+If something genuinely must ship, that is a decision to **restart the window**, and it is recorded
+in `docs/demos/m11_evidence/window.json` as such. Restarting is not a disaster (it was done once
+deliberately today); *silently* restarting is.
+
+### The window
+
+| | |
+|---|---|
+| `--since` | **`1787404688`** |
+| closes | `1789996688` — 2026-09-21T13:18:08Z |
+| build under test | **`v0.M10.0-47-g8d03690`** |
+| durable record | `docs/demos/m11_evidence/window.json` + issue #389 |
 
 ```sh
-ssh alisleiman0@avid.local           # worked most reliably this session
-ssh alisleiman0@100.127.197.112      # Tailscale IP — also fine
+sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
+    --mode grade --since 1787404688 --config /etc/robot/config.toml
 ```
 
-⚠️ **`avid-pico` fails host-key verification** — the Tailscale *name* is not in `known_hosts`, only
-`avid`, `avid.local` and `100.127.197.112`. ⚠️ **All three dropped simultaneously for ~10 minutes**
-mid-session and came back untouched; Tailscale reported the node offline while it was demonstrably
-up. Try all three before concluding anything.
+⚠️ **Run that in a few days, not on day 29.** It works — smoke-tested against the live window, all
+nine criteria reporting — but a multi-day window is the first time AC-0's coverage figure means
+anything. Non-zero exit on **fail or inconclusive**; inconclusive is not a pass.
 
-### ⛔ The two things blocking the soak clock — both laptop work
+### What a power cut costs — measured today, not guessed
 
-**#388 — `build` is `"0.0.0"` for every commit, so §12.6's build-change guard CAN NEVER FIRE.**
-Verified on the rig: `/metrics` reported `0.0.0` before *and* after a pull that moved HEAD five
-commits. `soak_pi.py`'s criterion is `pass if len({builds}) <= 1`, so with a constant string it is
-**inert** — delete the check and no report changes (#264's test). `core/banner.py` already knew and
-even names #388 as the fix: *"said here so nobody grades a soak window on it prematurely."*
-Something does. Thirty days is long enough that someone deploys mid-window, and the guard would
-wave it through. **#377 files this under Group B; it belongs in Group A.**
+The Pi was rebooted before the window opened, deliberately, to find out. **It survives**: both
+units are `enabled` and came back unattended, `samples.db` persisted, the sampler resumed on the
+same file.
 
-**#410 — `soak_pi.py` has no gate test.** M3, M4, M5, M7 and M9 harnesses each have one; the
-harness that decides `v1.0.0` does not, and it is the only one whose defects cannot be found by
-re-running it — they surface on day thirty. `tests/demos/test_soak_memory_column.py` covers only
-the memory column #404 added.
+| | records | fails |
+|---|---|---|
+| graceful `reboot` | `stop_reason=signal` — a **clean** stop | **AC-3** (manual restart) — *part of O5* |
+| power cut / crash | `stopped_at` NULL | **AC-3b** — reported, not part of O5's definition |
 
-### #207 — what is left, and which needs the bench
+Either way it also costs uptime (7h12m slack at the 99% bar) and AC-0 coverage.
+
+**If it happens, write it down** — `/var/lib/soak/interventions.jsonl`, one JSON object per line:
+
+```json
+{"at": 1787404800, "kind": "power_cut", "note": "unplugged the bench strip"}
+```
+
+⚠️ It **explains** an event, it does not **excuse** one — AC-3/AC-3b keep their verdicts. It exists
+because a power cut and a crash leave byte-identical records and journald is volatile (#381), so
+nothing else will remember which was which.
+
+### Group B — the work that runs alongside the clock, all laptop-only
 
 | | | |
 |---|---|---|
-| **AC-5** | ⚠️ decision | *"confirmed in the enclosure, where airflow and cable strain differ."* #206 measured a **bench** rig. There is no enclosure. Either the criterion drops that clause or it stays open against hardware that does not exist. |
-| **AC-9** | half done | PMP's R-04 line is updated (`b405fb5`). **`PI_OPERATIONS.md` still owes this session's traps** — the `LG_WD`/`i2c` unit fix, the disconnected-supply diagnosis, the register read-back technique. **Laptop work.** |
-| **AC-10** | ⛔ bench | Pin #200's **provisional** `min_deg`/`max_deg` to each linkage's *measured* safe reach and delete the provisional comment. Worth doing while the servos are proven good. |
-| **AC-11** | ⏸ | tag `v0.M9.0`, close the milestone. |
+| **#387** | the runbook, symptom-first | `prio:must` |
+| **#21** | SDS §13, Security & Privacy | `prio:must` |
+| **#385** | `GET /state` + the SSE tap | |
+| **#386** | `GET /facts` — §7.10's privacy audit | |
+| **#388** | AC-1…AC-6, the release artifact | only AC-7 landed |
 
-Passed and recorded with evidence on the issue: **AC-0, 1, 2, 3, 4, 6, 7, 8.**
+### #207 is 8 of 12, and waiting on decisions rather than code
 
-### 🔥 The find of the session: servo motion had NEVER worked under systemd
+| | |
+|---|---|
+| **AC-5** | *"confirmed in the enclosure"* — #206 measured a **bench** rig and there is no enclosure. A wording call. |
+| **AC-9** | half done. PMP's R-04 line is updated; **`PI_OPERATIONS.md` still owes** the servo/systemd traps. Laptop work. |
+| **AC-10** | ⛔ bench — pin #200's **provisional** `min_deg`/`max_deg` to measured safe reach. Worth doing while the servos are proven good. |
+| **AC-11** | the `v0.M9.0` tag |
 
-Two causes in `robot.service`, both fixed in **#413**, both invisible on the bench:
+Passed with evidence on the issue: AC-0, 1, 2, 3, 4, 6, 7, 8.
 
-1. **`lgpio` writes `.lgd-nfy-N` into the current working directory** — reached via
-   `adafruit_blinka` under `adafruit_servokit` under `Pca9685Servo`. `WorkingDirectory=/opt/avid`
-   is read-only under `ProtectSystem=strict`. → `Environment=LG_WD=/var/lib/robot`.
-2. **`i2c` was missing from `SupplementaryGroups`** (`video gpio audio`). `/dev/i2c-1` is
-   `root:i2c crw-rw----` and the PCA9685 is an I²C device.
+### 🔥 What today actually found
 
-⚠️ **Third instance of one family, and the unit's own comment describes the second:** *"`audio` is
-not optional either, and its absence was invisible for two milestones… M4 and M5 both passed
-because their benches run as the login user."* Identical here — every harness drove both axes
-perfectly as `alisleiman0` while the service could not move at all. **A gate run by hand would have
-passed while the product was motionless.**
+**The robot could not move under its own service, and never had.** Two causes in `robot.service`
+(#413): `lgpio` writing `.lgd-nfy-N` into a read-only `WorkingDirectory`, and `i2c` missing from
+`SupplementaryGroups`. **Every bench run passed as the login user while the service was dead.**
 
-Two CI assertions guard it now, each proven to bite. The `LG_WD` one checks the value points
-**inside `StateDirectory`**, not merely that it is set — an `LG_WD` aimed at another read-only path
-would satisfy a presence check and fail identically on the Pi.
+⚠️ **That pattern hit FOUR times in one session** — the `i2c` group, `LG_WD`, the disconnected 5 V
+supply, and then `git`'s `safe.directory` refusing because `/opt/avid` is owned by `alisleiman0`
+while the service runs as `robot` (#419). The unit's own comment already described a fifth instance
+from M7. **When something works by hand and not under systemd, suspect user/permission/environment
+before logic.**
 
-### #414 — five "the speaker dropped audio" WARNINGs were barge-ins, misattributed
+⚠️ **And #418 was merged, CI-green, fully tested, and inert in production** — because I did not
+verify on the Pi before merging. That is the habit the pattern feeds on.
 
-**No audio was ever lost.** `interrupt()` awaited `stop()` *before* bumping the playback epoch, and
-`stop()` both releases the in-flight write and yields — so the released writer resumed while the
-guard still read "live episode" and logged a hardware fault. Bench signature: **5 WARNINGs, 0 DEBUG
-lines.** Fixed in **#416**, deployed.
+### #414 — five "the speaker dropped audio" warnings were barge-ins
 
-Four hypotheses were eliminated by measurement *before* the log pointed here — **432 chunk plays**
-across servo motion, chunk size, arrival jitter and concurrent capture, all clean, precisely
-because none of those runs called `stop()` mid-write.
+**No audio was ever lost.** `interrupt()` awaited `stop()` before bumping the playback epoch, and
+`stop()` both releases the in-flight write *and* yields, so the writer resumed while the guard
+still read "live episode". Fixed (#416), deployed.
 
-⚠️ **#414 stays open for one outlier**: `accepted 140 of 150` sat at the *start* of a playback, not
-against an interruption. One counter-example in five is enough not to close on a sweep.
+⚠️ **Still open for one outlier**: `accepted 140 of 150` sat at the *start* of a playback, not
+against an interruption. And ⚠️ **the fix has not been re-observed on the rig** — the next live
+conversation should show DEBUG `"barge-in truncated the write"` where WARNINGs used to be. If it
+shows WARNINGs, #207's AC-8 pass is wrong and should be reversed rather than explained.
 
-⚠️ **And the fix has not been re-observed on the rig.** It is deployed and the service is active,
-but no conversation has run against it. **The next live conversation should show DEBUG "barge-in
-truncated the write" where WARNINGs used to be.** If it shows WARNINGs, AC-8's pass is wrong and
-should be reversed rather than explained.
+### Closed and filed today
 
-### Two harnesses now committed, and one earned its keep immediately
-
-- **`docs/demos/did_it_move_pi.py`** — "did the head actually move?", from the camera, against a
-  still-camera noise floor re-derived each run. **It caught what two human observations missed**:
-  both axes were reported motionless on a rig whose fault was a disconnected 5 V supply. Its
-  conclusion is asymmetric by design — a large difference is conclusive, a small one is not proof
-  of stillness — and it prints frame brightness so a dark room stays distinguishable from a dead
-  servo. **#207's remaining bench work should use it rather than eyes.**
-- **`docs/demos/brownout_pi.py`** — records; the human induces. It never drives a servo into a hard
-  stop, and it refuses to claim a result the stimulus may not have earned: **two runs produced
-  identical clean output with nobody touching the horns**, and its own report is what marked them
-  no-result rather than pass.
-
-### Everything closed and filed this session
-
-**Closed:** #401 (spec named a Pi 5; the rig is a Pi 4B 2 GB) · #384 (SDS §11 authored) · #404
-(memory metrics, verified on the Pi) · #206 (SPK-4: two-servo stall, no brown-out, **margin
-unmeasured**).
-
-**Filed:** #406 (O1 stale — last measured 2026-08-01, #194 landed 08-16, ceiling still pinned to
-the pre-fix run) · #407 (five modules say "ReSpeaker"; the rig has a USB PnP mic) · #410 · #414 ·
-#415 (`response_cancel_not_active`).
-
-**Merged:** #405, #408, #409, #411, #412, #413, #416 — seven PRs, `main = f2e8e74`.
+**Closed:** #401 · #384 · #404 · #206 · #410.
+**Filed:** #406 (O1 stale — measured 2026-08-01, #194 landed 08-16, ceiling still pinned to the
+pre-fix run) · #407 (five modules say "ReSpeaker") · #414 · #415.
+**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423.
 
 ---
 
 ## Current state
 
-- **`main = f2e8e74`, zero open PRs.** Suite **1734 passed / 67 skipped** on 3.11 and 3.13.
-- **The Pi is up, healthy, and moving.** `robot.service` active and enabled, running `f2e8e74`,
-  `[adapters] servo = "pca9685"` (flipped during #206 and **kept** — #207 could not be graded while
-  it was `"fake"`). `/metrics`: rss ~232 MiB, available ~1.5 GiB, `absent: []`, `throttled=0x0`.
-- **M9 is 8/12 and not sealed.** M10 sealed (`v0.M10.0`). Nine of eleven milestones tagged.
-- ⚠️ **The soak clock has NOT started and should not until #388 and #410 land.** #382 (USB SSD) is
-  optional since #381 moved logs to RAM.
+- **`main = 5b29d49`**, zero open PRs. Suite **1771 passed / 67 skipped** on 3.11 and 3.13.
+- ⏱️ **The M11 soak is RUNNING** — opened 2026-08-22T13:18:08Z, closes 2026-09-21T13:18:08Z, build
+  `v0.M10.0-47-g8d03690`. `robot` and `soak-sampler` both `active` + `enabled`.
+- **The robot moves under its own service** — that had never worked before today.
+- **M9 is 8/12, not sealed.** M10 sealed (`v0.M10.0`). Nine of eleven milestones tagged.
+- ⚠️ **`build` is now the deployed commit**, not `0.0.0`. `git describe --always --dirty --tags`,
+  resolved once at startup. **`-dirty` means someone edited files on the machine.** A `0.0.0` on a
+  checkout means the resolver has regressed and §12.6's guard is inert again.
 - ⚠️ **The two config copies that are deliberately different** — the machine's quiet window is
   `02:00→09:00` and `session_idle_close_s = 300`, against `config/pi.toml`'s `22:00→07:30` and
-  `30`. **Do not reconcile in either direction.** Every *other* key that differs was checked this
-  session and resolves to the same value via schema defaults.
-- ⚠️ **`/etc/systemd/system/robot.service` is now installed FROM the repo** (`diff` verified
-  identical) rather than hand-edited. Backups exist at `.pre206.bak` and `.pre207.bak`.
-- ⚠️ **`mypy` cannot run bare locally** — numpy's stubs use 3.12 `type` syntax against the 3.11
-  target. **`uv run --frozen --exact mypy avid` reproduces CI exactly.** (This session used
-  `--python-version 3.13` as a workaround before noticing the documented recipe; use the recipe.)
-- ⚠️ **A docs-only PR shows an EMPTY check list, not a green one** — `paths-ignore` skips
-  `**/*.md` and `docs/**`. The workflow's own comment says so. Verify locally and say which.
+  `30`. **Do not reconcile in either direction.** Every other differing key resolves to the same
+  value via schema defaults (checked).
+- ⚠️ **Both units are installed FROM the repo** and diff-verified identical, not hand-edited.
+  Backups at `robot.service.pre206.bak` / `.pre207.bak`.
 
-### Gotchas this session paid for
+### Gotchas — the ones that cost something
 
+- ⚠️ **`uv run --frozen --exact mypy avid` reproduces CI exactly — AND UNINSTALLS 13 PACKAGES**,
+  numpy included, turning the suite **78 red**. Restore with
+  `uv sync --extra memory --extra openai` (name every extra). The previous baton recorded the
+  recipe without its cost.
 - ⚠️ **`git checkout -- <file>` reverts to HEAD, not to your uncommitted edits.** Neutering a guard
   to prove a test bites destroyed the fix it was proving. **Commit first, then neuter, then
-  restore** — which is the discipline already written down, ignored once and immediately punished.
+  restore.**
+- ⚠️ **A test can pass while the property it names is violated.** The P8 "must not re-derive per
+  scrape" test asserted object identity — CPython interns short strings, so a deliberately
+  re-deriving provider stayed green. **The neuter step is what caught it.** Assert something the
+  bug cannot satisfy: break `subprocess.run` and scrape.
+- ⚠️ **Backticks inside a double-quoted `git commit -m` run as command substitution** and silently
+  gut the message. Use a heredoc.
 - ⚠️ **Git Bash `/tmp` and Windows `C:\tmp` are different directories.** A shell redirect wrote one,
-  Python read the other, and `gh issue edit --body-file` then re-posted an unmodified body. It
-  looked like success. **Use the scratchpad path both agree on**, and verify after editing an issue
-  body — check the length and the checkbox counts.
-- ⚠️ **Python 3.11 rejects same-quote nesting inside f-strings** (a 3.12 feature). Bit twice on
-  one-liners run over SSH. Ship a file instead of fighting quoting; ADR-008 is not only about
-  `avid/`.
-- ⚠️ **`pgrep -f <pattern>` matches the shell running it.** A wait-loop on `pgrep -f brownout.py`
-  never exited because its own command line contained the pattern.
-- ⚠️ **Piping to `tail` hides the exit code**, and a traceback scrolled past reads as success — a
-  probe "completed" while having died on its first line, and the operator watched a still robot.
-  **Smoke-test anything a human is asked to observe, before asking them to observe it.** This cost
-  two wasted observation windows.
+  Python read the other, and `gh issue edit --body-file` then re-posted an unmodified body while
+  looking like success. Verify after editing an issue body.
+- ⚠️ **Python 3.11 rejects same-quote nesting inside f-strings.** Bit twice over SSH. Ship a file.
+- ⚠️ **`pgrep -f <pattern>` matches the shell running it** — a wait-loop never exited.
+- ⚠️ **Piping to `tail` hides the exit code**; a traceback scrolls past and reads as success. A
+  probe "completed" having died on line one, and the operator watched a still robot. **Smoke-test
+  anything a human is asked to observe, before asking them to observe it.**
+- ⚠️ **`avid-pico` fails host-key verification** — only `avid`, `avid.local` and `100.127.197.112`
+  are in `known_hosts`, and all three dropped for ~10 minutes mid-session while Tailscale wrongly
+  reported the node offline. Try all three before concluding anything.
 
 ## What shipped earlier (2026-08-20, M9)
 
