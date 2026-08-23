@@ -1,0 +1,55 @@
+{
+  "mode": "mutations",
+  "snapshot": null,
+  "criteria": [
+    {
+      "ac": "AC-4",
+      "name": "the superseded row carries its pointer (superseded_by + superseded_at)",
+      "verdict": "fail",
+      "detail": "id=3 superseded_by=None",
+      "rows": []
+    },
+    {
+      "ac": "AC-4",
+      "name": "the new row is live (not itself superseded)",
+      "verdict": "pass",
+      "detail": "id=7",
+      "rows": []
+    },
+    {
+      "ac": "AC-4",
+      "name": "the present is uncontaminated: 'what do I drink in the morning?' returns the new fact",
+      "verdict": "pass",
+      "detail": "expected a row matching ['tea']",
+      "rows": []
+    },
+    {
+      "ac": "AC-4",
+      "name": "history is still queryable \u2014 the superseded row was not deleted",
+      "verdict": "pass",
+      "detail": "supersession is an epistemics operation; only AC-5's forget removes data (\u00a77.8/\u00a77.10)",
+      "rows": []
+    },
+    {
+      "ac": "AC-5",
+      "name": "the forgotten row is gone from `facts` ('dog')",
+      "verdict": "pass",
+      "detail": "hard cascading DELETE, not supersession \u2014 a rights operation (\u00a77.10)",
+      "rows": []
+    },
+    {
+      "ac": "AC-5",
+      "name": "no FTS5 index entry survives the deleted row",
+      "verdict": "pass",
+      "detail": "the FTS5 index returns only live rows for '\"biscuit\"'",
+      "rows": []
+    },
+    {
+      "ac": "AC-5",
+      "name": "it never reappears in retrieval",
+      "verdict": "pass",
+      "detail": "probe \"what is the neighbour's dog called?\" returns nothing matching the forgotten fact",
+      "rows": []
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "mode": "recall",
+  "snapshot": {
+    "name": 18,
+    "city": 15,
+    "job": 18,
+    "birthday": 17,
+    "coffee": 3,
+    "music": 3,
+    "spicy": 4,
+    "window": 4,
+    "run": 5,
+    "read": 6,
+    "groceries": 6,
+    "standup": null,
+    "sister": 8,
+    "manager": 9,
+    "dog": 10,
+    "friend": 11,
+    "flight": 12,
+    "guitar": 13,
+    "move": 14,
+    "marathon": 16
+  },
+  "criteria": [
+    {
+      "ac": "AC-1",
+      "name": "extraction: 19/20 declared facts landed as rows",
+      "verdict": "recorded",
+      "detail": "recorded, not graded (settled on #129: extraction rate is AC-2's to grade)",
+      "rows": [
+        "no row for 'standup': My team standup is at nine every weekday"
+      ]
+    },
+    {
+      "ac": "AC-1",
+      "name": "extraction was silent \u2014 no write announced in the transcript",
+      "verdict": "fail",
+      "detail": "announced: noted",
+      "rows": []
+    },
+    {
+      "ac": "AC-2",
+      "name": "recall of stated facts: 18/20 = 90%",
+      "verdict": "fail",
+      "detail": "O2 bar is \u226595% of the 20 STATED facts \u2014 an extraction miss counts as a recall miss",
+      "rows": [
+        "missed 'standup'",
+        "missed 'dog'"
+      ]
+    },
+    {
+      "ac": "AC-3",
+      "name": "query returns the right fact: 'what did I say about my sister?'",
+      "verdict": "pass",
+      "detail": "expected 'sister', 193 ms \u2014 judged at the returned fact, not at the phrasing",
+      "rows": []
+    },
+    {
+      "ac": "AC-3",
+      "name": "proper-noun query returns the right fact: 'tell me about Biscuit'",
+      "verdict": "fail",
+      "detail": "expected 'dog', 193 ms \u2014 judged at the returned fact, not at the phrasing",
+      "rows": []
+    },
+    {
+      "ac": "AC-3",
+      "name": "proper-noun query returns the right fact: 'what do I know about Karim?'",
+      "verdict": "pass",
+      "detail": "expected 'friend', 193 ms \u2014 judged at the returned fact, not at the phrasing",
+      "rows": []
+    }
+  ]
+}

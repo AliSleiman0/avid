@@ -861,8 +861,11 @@ async def test_the_real_embedder_ranks_the_proper_noun_first_with_or_without_the
       ``memory_pi._probe`` returns False when the fact was never stored — *"never stored ⇒ cannot
       be recalled ⇒ a miss, per AC-2"* — so an absent fact is **indistinguishable** from a
       retrieval failure in that harness, and it would explain both probes failing on the same fact
-      from two angles while the corpus's other probes passed. ⚠️ Unprovable now: that run's
-      ``recall_result.json`` was never committed, only ``facts.json`` was.
+      from two angles while the corpus's other probes passed. ✅ **Confirmed 2026-08-24 (#447).**
+      That run's ``recall_result.json`` was believed uncommitted; it was sitting untracked on the
+      rig and is now in ``docs/demos/m7_evidence/``. It records ``"no row for 'standup'"`` — an
+      extraction miss, as hypothesised — and ``missed 'dog'``, which is #264's retrieval one. Two
+      misses, two different causes, one number.
 
     This test therefore asserts the measured truth rather than the expected one. It is a live
     detector: if a change to the embedder or the ranking ever makes δ load-bearing here, this flips
