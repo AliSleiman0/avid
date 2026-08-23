@@ -55,10 +55,27 @@ nothing before 13:40:53; both units `ActiveEnter` 13:40:53/13:41:13 with `NResta
 `boot_log.started_mono` is **48.7 s** for `b566ffd9` against **15726 s** for the run before the
 deliberate reboot.
 
-⚠️ **The cause is not established and probably never will be** — journald is volatile here (#381),
-and a power cut and a kernel panic leave byte-identical records. That gap is the entire reason
-`/var/lib/soak/interventions.jsonl` exists, and it was **empty**. `vcgencmd get_throttled` reads
-`0x0`, but it resets at boot, so it covers only the run since.
+**The cause is now established by elimination — a hard power loss or hardware reset, not
+software.** `/var/log/wtmp` persists across reboots where journald does not, and it has **no
+`shutdown system down` record for this boot** while *every other reboot in the machine's history
+has one*. Every remaining software route is excluded independently: `kernel.panic = 0` (a panic
+**hangs** this board, it does not reboot), `RuntimeWatchdogUSec=0`, `robot.service` `NRestarts=0`,
+no timer within 17 minutes, no `dpkg` activity that day. `EXT4-fs: orphan cleanup` on mount
+corroborates. The robot was **healthy at the instant** — RSS flat at 234.0 MiB, 1524 MiB available,
+zero bus drops, `/health` answering. Instantaneous is what a power loss looks like and what almost
+nothing else does.
+
+⚠️ **Why power was lost is still unknown.** One hypothesis worth eliminating before #400: #413
+landed the same day, so **2026-08-22 is the first day the robot drove servos under its own
+service**, and the servo rail is a plausible brownout source. A hypothesis, not a finding.
+
+⚠️ **The clock runs backwards inside the soak's own evidence.** Ordered by **rowid** (write order)
+rather than by `at`, row 24 was written *before* row 25 and is stamped one second *later* —
+`13:41:08` then `13:41:07` — and row 24 carries `uptime_s = 1492`, exactly `1432 + 60`, i.e. **the
+old process still alive and counting**. Rows 23–24 are in the pre-reboot clock frame, rows 25+ in
+the post-reboot one, and they are not the same timeline. **So AC-0's "209 s gap" and AC-2's "78 s
+down" are subtractions across two clocks, not measurements.** It does not move O5 — tens of seconds
+against a 7h12m budget — but the harness reports them as measurements. Tracked as #439 AC-4.
 
 ⚠️ **The clock is not trustworthy across a reboot on this board.** That boot came up reading
 **2026-04-27** — 118 days stale — before `fake-hwclock` and then `systemd-timesyncd` stepped it
@@ -393,6 +410,13 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **On a no-RTC Pi, two boots' wall clocks are not the same timeline, and subtracting across
+  them looks exactly like a measurement.** The M11 soak's `samples` table has consecutive rowids
+  whose `at` goes *backwards*. When something spans a reboot, order by **rowid** or reason from
+  **monotonic** (`boot_log.started_mono`), never from `at`. Corollary: `/var/log/wtmp` survives a
+  reboot when journald here does not — and a missing `shutdown system down` record is the cleanest
+  proof you will get that a machine went down without being asked to.
 
 - ⚠️ **A test that arms a task and asserts immediately is testing the scheduler.** `perform()`
   spawns and returns, so an assertion made straight afterwards runs *before the coroutine has

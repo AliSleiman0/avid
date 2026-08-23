@@ -82,10 +82,14 @@ machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for t
 window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
 full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
 
-The cause is **not established**, and the honest reason is that nothing recorded it: journald had
-already lost the pre-reboot boot by the time anyone looked. That is exactly the hole this log
-covers, and an empty log is indistinguishable from "nobody touched it". **Write the note at the
-time; you cannot reconstruct it later.**
+The cause is now **established by elimination** — a hard power loss or hardware reset; `wtmp` has
+no `shutdown` record for that boot while every other reboot in the machine's history does, and
+every software route (panic, watchdogs, OOM, timers) is independently excluded. **Why** power was
+lost is still unknown. Full evidence in #439 and in `window.json`.
+
+⚠️ But note *how* that was recovered: from `wtmp`, `boot_log.started_mono` and sampler **rowids** —
+never from a note, because nobody wrote one. Reconstruction happened to be possible here and will
+not always be. **Write the note at the time.**
 
 ## What is being measured
 
