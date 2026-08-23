@@ -169,7 +169,14 @@ def test_recency_is_strictly_decreasing_in_age() -> None:
 
 # ── rank_candidates (§7.7, AC-3/AC-5/AC-6) ──────────────────────────────────
 
-_EQUAL = ScoreWeights()  # α=β=γ=1
+# ⚠️ Spelled out, not inherited from the default. These tests are about the *mechanism* at equal
+# weights, and they say so in their names — so the reference has to be fixed. It used to read
+# `ScoreWeights()` with a comment claiming α=β=γ=1, which was true only while δ also happened to be
+# 1.0; when #447 measured δ down to 0.5 the name quietly became false and three tests failed on
+# arithmetic that was never the point. Restating a value the test depends on is exactly what
+# CLAUDE.md §7.1 warns about — except here the fix is to state it, because the constant belongs to
+# the test rather than to the robot.
+_EQUAL = ScoreWeights(recency=1.0, importance=1.0, relevance=1.0, keyword=1.0)
 
 
 def _cand(

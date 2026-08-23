@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -126,8 +127,33 @@ class _Criterion:
     rows: list[str] = field(default_factory=list)
 
 
+# Punctuation is DELETED, not spaced, before matching: "stand-up" has to become "standup", and
+# folding to a space would only turn it into "stand up" -- still not the declared needle. Deleting
+# joins an intra-word break and leaves genuine word boundaries alone, because whitespace survives
+# separately (AVID-450).
+_PUNCTUATION = re.compile(r"[^\w\s]", re.UNICODE)
+
+
 def _norm(text: str) -> str:
-    return " ".join(text.lower().split())
+    """Lowercase, fold punctuation to spaces, collapse whitespace.
+
+    ⚠️ **The punctuation fold is not cosmetic — it is the difference between a defect report and a
+    typo (AVID-450).** The model stored ``"Ali's team stand-up is at 9 AM every weekday"``; the
+    declared needle is ``"standup"``. Without folding, `"standup" not in "...stand-up..."` and a
+    correctly-stored fact is reported as a **recall miss** — and because :func:`_probe` counts a
+    fact it cannot find as a miss *"per AC-2"*, that reads identically to an extraction failure and
+    to a retrieval failure. Three defects, one symptom, in the single number O2 is graded on.
+
+    This was visible at the M7 seal — the ``v0.M7.0`` tag says *"standup is a scoring artifact"* —
+    and it stayed in the instrument for nine days because it was never filed.
+
+    ⚠️ **Folding must not fold away "strict on content"**, which is the property that makes this
+    matcher worth anything: ``"I drink tea"`` must never score as the coffee fact. It does not,
+    because folding only *separates* — it never joins two words into one, and every needle must
+    still appear in full. ``tests/demos/test_memory_gate_matching.py`` asserts that rather than
+    trusting it.
+    """
+    return " ".join(_PUNCTUATION.sub("", text.lower()).split())
 
 
 def _matches(row_text: str, needles: list[str]) -> bool:
@@ -209,7 +235,12 @@ def _inventory(
             for r in conn.execute("SELECT transcript FROM episodes").fetchall()
         ]
     blob = _norm(" ".join(transcripts))
-    heard = [phrase for phrase in _ANNOUNCEMENTS if phrase in blob]
+    # ⚠️ Both sides through `_norm`, or the comparison is the AVID-450 defect in reverse: the
+    # haystack is normalised and the needles are not, so "i'll remember" stops matching a
+    # transcript that says exactly that. Caught by
+    # `test_an_announced_write_fails_the_silence_criterion` when the punctuation fold landed —
+    # which is what that test is for.
+    heard = [phrase for phrase in _ANNOUNCEMENTS if _norm(phrase) in blob]
     out.append(
         _Criterion(
             "AC-1",

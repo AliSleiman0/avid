@@ -535,15 +535,37 @@ class CuesConfig(_Section):
 class WeightsConfig(_Section):
     """Retrieval scoring weights — recency/importance/relevance/keyword (SDS §7.7).
 
-    The first three are Park et al.'s equal-weight baseline. ``keyword`` (δ) is #264's addition
+    The first three are Park et al.'s equal-weight baseline. ``keyword`` is δ = 0.5, MEASURED 2026-08-23 against `assets/eval/retrieval.json` (50 queries) with the
+    real MiniLM, `tools/eval_recall.py --model-dir ./models --keyword <δ>`:
+
+    ====  ==========  ==========  ==========
+    δ     recall@5    paraphrase  temporal
+    ====  ==========  ==========  ==========
+    1.0   0.66        0.20        0.75
+    0.5   **0.86**    **1.00**    1.00
+    0.25  0.86        1.00        1.00
+    0.0   0.84        1.00        0.88
+    ====  ==========  ==========  ==========
+
+    ⚠️ **δ = 1.0 made the real embedder score exactly like the fake** — 0.66 / 0.20 on both. The
+    keyword term dominated so completely that the vector branch could not change a result, so every
+    recall figure this project had recorded was measuring FTS5 and not the model. `_fts_match` ORs
+    *every* query token including stopwords, bm25 picks `top_k` rows, and each of those took a full
+    +1.0 that outranked facts the vector branch put **first**.
+
+    0.5 rather than 0: the keyword term still earns its place (0.86 vs 0.84, and temporal 1.00 vs
+    0.88) — it was the *weight* that was wrong, not the idea. 0.25 ties 0.5 here; 0.5 is kept as the
+    less aggressive move away from the equal-weight baseline.
+
+    ``keyword`` (δ) is #264's addition
     and has no published baseline behind it — see :class:`~avid.domain.ScoreWeights`. It is
-    **unmeasured**; `tools/eval_recall.py` is what would settle it.
+    **measured at AVID-447**: δ=1.0 made the real embedder score identically to the fake (recall@5 0.66, paraphrase 0.20), δ=0.5 gives 0.86/1.00, so it is 0.5 — `tools/eval_recall.py --model-dir ./models --keyword <δ>` reproduces it.
     """
 
     recency: float = 1.0
     importance: float = 1.0
     relevance: float = 1.0
-    keyword: float = 1.0
+    keyword: float = 0.5
 
 
 class MemoryConfig(_Section):

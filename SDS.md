@@ -1945,7 +1945,42 @@ Vector search alone fails on proper nouns — "Maya" embeds to something generic
 
 > ⚠️ **The union alone is not enough, and believing it was cost us #264.** Taking the ∪ fixes *candidate generation* — but candidate generation is not the binding constraint at the scale this robot runs at. `HybridRetriever` draws a vector pool of **50**, so any store with fewer than 50 live facts has **every fact already in the candidate set**, and the keyword branch contributes nothing. Ranking was the constraint, and until #264 it had no keyword term: a proper-noun fact with a mushy embedding lost on recency and importance exactly as if FTS5 did not exist. Demonstrated by deleting the keyword branch outright and observing byte-identical results at 3 and at 18 facts. **A hybrid retriever whose two halves do not both reach the score is a vector retriever.** Mem0's stack fuses semantic + keyword + entity matching in parallel passes and reports **92.5 on LoCoMo / 94.4 on LongMemEval at <7,000 tokens per retrieval** — an order of magnitude under full-context stuffing. The lesson we take is not their numbers; it's that *hybrid beats pure-vector, and small retrieval beats large*.
 
-> **As built (#120).** `HybridRetriever` (`avid/adapters/retrieval.py`) is exactly this: it embeds the query, does one matmul over the pre-normalised §8.5 matrix, unions those ids with `FactRepository.keyword_search`'s FTS5/bm25 hits, ranks the union with §7.7's `rank_candidates`, and publishes `memory.recall_completed` (§9.1.3). The retrieval eval set (#115) scored the wired retriever at **recall@5 = 0.54** — strong on proper-noun (0.80) and direct (0.80) queries, weak on paraphrase (0.10) and negatives (0.00). That split is honest: the CI-side `FakeEmbedder` is bag-of-words (real semantic recall is `LocalMiniLmEmbedder`'s job, #119, proven on the Pi), and the **relevance floor is deliberately deferred** — `n_returned` currently returns the top-k without a hard cosine cutoff, so a negative query still returns its best-but-irrelevant matches. Setting that floor is a tuning decision left for a measured pass, not guessed now.
+> **As built (#120).** `HybridRetriever` (`avid/adapters/retrieval.py`) is exactly this: it embeds the query, does one matmul over the pre-normalised §8.5 matrix, unions those ids with `FactRepository.keyword_search`'s FTS5/bm25 hits, ranks the union with §7.7's `rank_candidates`, and publishes `memory.recall_completed` (§9.1.3). ⚠️ **The 0.54 below was superseded on 2026-08-23 — see the measured pass that follows; the number was right and the reason given for it was wrong.** The retrieval eval set (#115) scored the wired retriever at **recall@5 = 0.54** — strong on proper-noun (0.80) and direct (0.80) queries, weak on paraphrase (0.10) and negatives (0.00). That split is honest: the CI-side `FakeEmbedder` is bag-of-words (real semantic recall is `LocalMiniLmEmbedder`'s job, #119, proven on the Pi), and the **relevance floor is deliberately deferred** — `n_returned` currently returns the top-k without a hard cosine cutoff, so a negative query still returns its best-but-irrelevant matches. Setting that floor is a tuning decision left for a measured pass, not guessed now.
+
+#### The measured pass, 2026-08-23 (AVID-447)
+
+`tools/eval_recall.py` gained `--model-dir` and was run against **real MiniLM** for the first time —
+the instrument this document names as what would settle δ, never previously run with a real
+embedder. 50 queries, `top_k = 5`:
+
+| δ | recall@5 | direct | proper_noun | paraphrase | temporal | negative |
+|---|---|---|---|---|---|---|
+| **1.0** (was shipped) | 0.66 | 1.00 | 1.00 | **0.20** | 0.75 | 0.00 |
+| **0.5** (now shipped) | **0.86** | 1.00 | 1.00 | **1.00** | 1.00 | 0.00 |
+| 0.25 | 0.86 | 1.00 | 1.00 | 1.00 | 1.00 | 0.00 |
+| 0.0 | 0.84 | 1.00 | 1.00 | 1.00 | 0.88 | 0.00 |
+
+⚠️ **The comparison that names the defect: the FAKE embedder scores 0.66 / paraphrase 0.20 at
+*every* δ.** At the shipped δ = 1.0 the real model scored **identically to bag-of-words**. The
+keyword term decided the top-5 by itself and the vector branch could not change a result — so the
+0.54 above, and every recall figure this project had recorded, was a measurement of **FTS5 rather
+than of the model**. `_fts_match` ORs *every* query token including stopwords, bm25 returns `top_k`
+rows, and each took a full `+1.0` — enough to outrank facts the vector branch ranked **first**.
+Verified directly: two facts rank 1 by cosine and miss the top-5 entirely.
+
+**δ is 0.5 now, measured rather than assumed.** Not 0 — the keyword term still earns its place
+(0.86 vs 0.84 overall, temporal 1.00 vs 0.88). It was the *weight* that was wrong, not the idea.
+0.25 ties 0.5 here; 0.5 is the smaller move from the equal-weight baseline, and the tie is recorded
+rather than hidden behind a chosen number.
+
+⚠️ **`negative` stays 0.00 at every δ**, and δ cannot help it: that category asks the retriever to
+return *nothing*, which needs the relevance floor deferred above. Still deferred — now with a number
+beside it.
+
+⚠️ **The robot on the bench still runs δ = 1.0** until the M11 window closes on 2026-09-21.
+`config/pi.toml` is the template, not the machine (`deploy/PI_OPERATIONS.md` §3), and deploying
+mid-window would split the window.
+
 
 ### Vector storage — ADR-005, confirmed
 
@@ -3540,7 +3575,7 @@ entry leaves this table by being measured or by being decided, not by being forg
 | **Acoustic echo cancellation** | half-duplex uplink | AVID-163 | Would remove the AVID-159 energy margin and un-mute the uplink during playback. Real work, not a tuning pass. |
 | **Cold DNS** | ~5.1 s, once per process | AVID-157 | `systemd-resolved` is inactive on this Pi, so nothing caches locally and every process pays a fresh lookup. Non-fatal while the router's cache is warm; it sits in front of the first conversation after a boot. |
 | **MiniLM at 2 threads** | unmeasured | §7.4 | Only the 1-thread figure (340 ms/embed) exists. The **shipped** setting has never been timed, and this document declines to invent a number for it. |
-| **§7.7's δ weight** | unmeasured | §7.7 | Applied at 1 for consistency with the equal-weight baseline, not because anything measured it. `tools/eval_recall.py` is the instrument. |
+| ~~**§7.7's δ weight**~~ | **measured** | §7.7 | **Resolved 2026-08-23 (AVID-447).** δ=1.0 made the real embedder score identically to the fake — 0.66 overall, paraphrase 0.20; δ=0.5 gives 0.86 / 1.00. Now 0.5. Kept as a row because what it was really recording is that `tools/eval_recall.py` had never been run with a real embedder, and that is the part worth remembering. |
 
 ⚠️ **Nothing in this table is scheduled by being in it.** It exists so that a slow path is a
 *known* slow path with a reason attached, rather than a surprise rediscovered at the next bench.
