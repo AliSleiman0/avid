@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WINDOW_PATH = _REPO_ROOT / "docs" / "demos" / "m11_evidence" / "window.json"
@@ -118,8 +118,14 @@ def test_the_cd_is_still_load_bearing_for_the_reason_the_docs_give() -> None:
         "command must cd into the WorkingDirectory may no longer hold. Re-read the note."
     )
 
+    # ⚠️ `PurePosixPath`, not `Path`. These are the *Pi's* paths, and this suite also runs on a
+    # Windows dev box where `Path("/opt/avid").is_absolute()` is **False** — a rooted path with no
+    # drive letter is not absolute to `WindowsPath`. Written with `Path`, this assertion stayed
+    # green through a neuter that made the personality path absolute: a guard that could not fail
+    # on the machine it was written on, and would have failed only in CI, for a reason nobody
+    # would have connected to this. The neuter step is what caught it (CLAUDE.md §7.1).
     personality = tomllib.loads(_PI_CONFIG_PATH.read_text(encoding="utf-8"))["ai"]["personality"]
-    assert not Path(personality).is_absolute(), (
+    assert not PurePosixPath(personality).is_absolute(), (
         f"[ai] personality is now absolute ({personality!r}); SDS §6.5's relative-path resolution "
         "is no longer what makes the working directory matter. Re-read the note beside the "
         "grade command."
