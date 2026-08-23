@@ -115,8 +115,10 @@ asyncio_mode = "auto"
 # only on the Pi (SDS §14.4) and is skipped off-hardware via tests/contract/_hardware.py's
 # on_pi(). Registered here so `-m "not hardware"` / `-m hardware` are first-class and the
 # mark raises no unknown-marker warning.
+addopts = "-m 'not real_embedder'"
 markers = [
     "hardware: the real-adapter half of a port contract; runs only on the Pi (SDS §14.4), skipped off-hardware via on_pi().",
+    "real_embedder: needs the real MiniLM ONNX blobs and onnxruntime, so it is DESELECTED by default and skipped when they are absent (#264). The fake embedder is bag-of-words, which gives a proper noun a clean vector and makes the miss structurally unreproducible -- so this is the only place AC-2/AC-3 can be judged. Run: python tools/fetch_minilm.py --dest ./models && uv run --frozen --with onnxruntime --with tokenizers pytest -m real_embedder.",
     "p8_load: this test's own body IS the load — its coroutine is the stimulus, not the robot (#328). The P8 gate exempts slow callbacks attributed to a marked test's frame and prints them; everything the test then asserts stays fully gated. Apply deliberately, never to quiet a red.",
 ]
 
