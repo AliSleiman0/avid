@@ -59,18 +59,27 @@ non-interactive SSH shell can't see it.
 `eth0` is **UP with no IP address** — the LAN cable carries nothing. Everything runs over `wlan0`
 (`192.168.10.172`). Don't design around the cable without configuring it first.
 
-### ⚠️ The Pi cannot fetch from GitHub — push to it, don't pull from it
+### The push route, kept as the fallback — and the trap that outlives it
 
-`/opt/avid`'s `origin` is an **HTTPS** URL with no stored credentials, so on the Pi:
+⚠️ **This section used to be a rule with the opposite sense** — *"the Pi cannot fetch from GitHub,
+push to it"* — and it sat seventeen lines below the correction that repealed it, so the next reader
+followed whichever they reached first. It is now a *fallback*, because the failure it was written
+for is one credential away from returning:
 
 ```
 $ git fetch origin
 fatal: could not read Username for 'https://github.com': No such device or address
 ```
 
-Worse than the error is what follows it: in a `cmd && cmd && cmd` chain the failure **silently
-skips every later step**, so a "reset the Pi to `main`" one-liner reports nothing alarming and
-leaves the machine on whatever branch the last gate used. Code reaches the Pi from the **laptop**:
+⚠️ **Worse than the error is what follows it:** in a `cmd && cmd && cmd` chain the failure
+**silently skips every later step**, so a "reset the Pi to `main`" one-liner reports nothing
+alarming and leaves the machine on whatever branch the last gate used. That is why every deploy
+step below is verified on its own before the next one runs, and why the pull is always followed by
+`git rev-parse --short HEAD`. **This trap is about chaining, not about credentials — it survives
+the fix above.**
+
+If the token is ever cleared, revoked, or deliberately removed (it must never ship on a sold unit),
+code reaches the Pi from the **laptop**:
 
 ```sh
 git push ssh://alisleiman0@192.168.10.172/opt/avid <branch> --follow-tags

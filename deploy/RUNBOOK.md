@@ -53,8 +53,14 @@ therefore interesting.
 ### 1.2 What is actually running — the startup banner
 
 ```sh
-journalctl -u robot -b | grep -m1 'build='
+journalctl -u robot -b | grep 'build=' | tail -1
 ```
+
+⚠️ **`tail -1`, not `grep -m1`, and this cost a deploy verification on 2026-08-24.** `-b` is *this
+machine boot*, not this service start — and `Restart=always` plus every manual restart means a boot
+usually holds several banners. `-m1` returns the **first**, which after a deploy is the build you
+just replaced: it reports the old SHA over a correctly updated robot, and reads exactly like a
+deploy that silently did nothing.
 
 One line, and it settles most of §3 before you read any of it:
 
@@ -175,7 +181,7 @@ That is a deliberate trade — see
 **Confirm.** In this order, because each check is cheaper than the next:
 
 ```sh
-journalctl -u robot -b | grep -m1 'build='          # openai_key= and adapters=speaker=
+journalctl -u robot -b | grep 'build=' | tail -1          # openai_key= and adapters=speaker=
 sudo -u robot /opt/avid/.venv/bin/python -c "import openai; print(openai.__version__)"
 sudo -u robot speaker-test -D default -c 1 -t sine -f 440 -l 1
 ```
@@ -289,7 +295,7 @@ the event loop (P8), not for a bug in startup.
 
 ```sh
 curl -s 127.0.0.1:8787/health                        # ok? then the loop is alive
-journalctl -u robot -b | grep -m1 'build='           # adapters=...
+journalctl -u robot -b | grep 'build=' | tail -1           # adapters=...
 ```
 
 **Fix.** `Type=notify` means `active (running)` is claimed only after the app sends `READY=1`, so
@@ -333,7 +339,7 @@ while the Pi profile has pinned the flagship since 2026-08-01 (F-9). A refusal t
 **Confirm.** The banner, then a real diff — never an eyeball:
 
 ```sh
-journalctl -u robot -b | grep -m1 'build='
+journalctl -u robot -b | grep 'build=' | tail -1
 diff <(ssh alisleiman0@AVID cat /etc/robot/config.toml) config/pi.toml
 ```
 

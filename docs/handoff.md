@@ -122,11 +122,22 @@ is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — whic
   question itself is owed on the production board, per O5's amendment.
 
 **3. 🔴 THIS IS THE NEXT JOB — run the 72-hour endurance window** on the rig, with the robot
-**actually doing something**, on a build carrying #455 **and** #457. Deploy first; then confirm the
-sampler is recording the new columns (`sqlite3 /var/lib/soak/samples.db "select state, transitions
-from samples order by id desc limit 5"`) **before** the clock starts, because a window whose
-liveness column is NULL grades INCONCLUSIVE for its whole length — the #404 lesson, one release
-later.
+**actually doing something**. ✅ **The deploy is done** (2026-08-24): `/opt/avid` is on
+`v0.M10.0-77-gf1009a3`, carrying #455 and #457, config validated through the loader with every
+provisioning flip intact, `/state` answering, `absent: []`, and **zero illegal transitions since the
+restart**. The sampler's new columns were confirmed writing against the real 1560-row database —
+old rows NULL, new rows `state='IDLE'`, `transitions=1` — then `soak-sampler` was stopped and left
+disabled, because the window is a decision and not a side effect of a deploy.
+
+⚠️ Re-check the columns are non-NULL **before** the clock starts anyway: a window whose liveness
+column is NULL grades INCONCLUSIVE for its whole length, which is #404's lesson one release later.
+And note **there is no `sqlite3` CLI on that machine** — the check has to go through the venv:
+
+```sh
+sudo /opt/avid/.venv/bin/python -c "
+import sqlite3; c = sqlite3.connect('file:/var/lib/soak/samples.db?mode=ro', uri=True)
+print(c.execute('select id, build, state, transitions from samples order by id desc limit 3').fetchall())"
+```
 
 ⚠️ **The ~26 hours already run does NOT count**, and this is the one thing not to wave through. The
 robot was wedged for all but the first three minutes, so nothing exercised the paths a soak exists
@@ -291,6 +302,17 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **The M11 wedge ended the way #452 said it would have to: a human spoke.** Read off the rig
+  before deploying over it (2026-08-24), the whole 32-hour boot held **eight** legal transitions and
+  **153** rejected ones — `PRESENCE_LOST_TIMEOUT in THINKING` **135 times** (the 10-minute nap timer,
+  every ten minutes, for a day), `VISION_PRESENCE_GAINED in THINKING` 17 times, and the documented
+  benign `VISION_PRESENCE_GAINED in IDLE` **once**. It left THINKING only when
+  `THINKING + audio.speech_started → LISTENING` fired — the one escape #452 lists as *requiring the
+  human to act*. **No timer freed it, because none was armed.** That is the defect's own mechanism,
+  observed rather than reasoned, and it is also the argument for #456's shape: one pair at 135 beside
+  a benign pair at 1 is a wedge that names itself, and a single scalar counter could not tell them
+  apart.
 
 - ⚠️ **A criterion that can only fail is worth less than one that can also refuse to.** `LIVE`
   (#457) grades whether the robot was doing anything, and most of its design is the four cases it
