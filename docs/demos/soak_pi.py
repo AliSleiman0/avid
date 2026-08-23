@@ -47,6 +47,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -437,6 +438,286 @@ def _memory_criterion(samples: list[sqlite3.Row]) -> _Criterion:
     )
 
 
+# ── the clock every other number here is written in (#439) ───────────────────────────────────
+#
+# Every figure this harness prints is a subtraction between two readings of the Pi's wall clock,
+# and this board has no RTC. An offline boot restores a stale time and NTP steps it later —
+# observed 2026-08-22, twice inside one boot, the first from a clock reading 2026-04-27. The
+# soak's own evidence caught it: ordered by ROWID, two consecutive samples read 13:41:08 then
+# 13:41:07, and the earlier-written row carried the OLD robot process's uptime still counting.
+#
+# ⚠️ Reported, never corrected and never graded. The observed disagreement is seconds against a
+# 7h12m budget, and a harness that repaired `at` would be inventing the measurement it exists to
+# take. What it can honestly do is say the arithmetic spans more than one clock, and stop calling
+# the result a measurement.
+
+# How far past the window's edge the detector reads, expressed in seconds and converted with the
+# sampler's OWN cadence rather than a row count, so it means the same thing at any interval.
+_CLOCK_EDGE_S = 3600.0
+
+
+@dataclass(frozen=True, slots=True)
+class _ClockStep:
+    """One place ``at`` went BACKWARDS between two consecutive WRITES (rowid order).
+
+    Rowid is the only ordering that survives here: it is assigned by the insert, so it records the
+    order the sampler actually wrote in, whatever the clock said at the time.
+    """
+
+    row_id: int
+    before_at: int
+    after_at: int
+    uptime_before: int | None
+    uptime_after: int | None
+
+    @property
+    def backwards_s(self) -> int:
+        """How far back the clock jumped.
+
+        ⚠️ **Not a duration.** It is the disagreement between two readings of an untrusted clock;
+        no real time is being measured. Printed with a unit only because the reading has one.
+        """
+        return self.before_at - self.after_at
+
+    @property
+    def robot_restarted(self) -> bool | None:
+        """Did a NEW robot process begin across this step? ``None`` when it cannot be told.
+
+        ``uptime_s`` is the robot's own count, so it is immune to the wall clock: a *fall* means a
+        new process, a *rise* means the same process lived through the step and the machine's
+        clock moved underneath it. An absent reading on either side answers neither question, and
+        `int(x or 0)` here would manufacture a restart out of a missing number (#380).
+        """
+        if self.uptime_before is None or self.uptime_after is None:
+            return None
+        return self.uptime_after < self.uptime_before
+
+
+def _read_in_write_order(
+    conn: sqlite3.Connection, *, since: int, until: int, interval: float
+) -> list[sqlite3.Row]:
+    """Re-read the samples in WRITE order, deliberately not filtered by the clock under audit.
+
+    ``_grade``'s own read cannot be reused for this, for two independent reasons:
+
+    * it is ``ORDER BY at``, which sorts a backwards step back into ascending order — the defect
+      becomes invisible in the act of reading it; and
+    * it is ``WHERE at >= ? AND at < ?``, which filters by *the very clock being audited*, so a
+      row whose stale ``at`` fell outside the window is dropped before anything can notice.
+
+    So the anchors are taken once (the only place the untrusted clock is consulted, and only at
+    the two edges), and the rows are then fetched **by rowid with no ``at`` predicate at all**.
+    Everything written *between* two in-window rows is therefore captured however wrong its
+    timestamp is — that is the blind spot closed. Rows written before the first or after the last
+    in-window row could only be attributed to this window by trusting the clock under audit, so
+    the reach past each edge is bounded at :data:`_CLOCK_EDGE_S`, and the criterion prints how
+    many rows it actually looked at rather than implying it saw everything.
+    """
+    edge = max(1, int(_CLOCK_EDGE_S // max(interval, 1.0)))
+    anchors = conn.execute(
+        "SELECT MIN(id) AS lo, MAX(id) AS hi FROM samples WHERE at >= ? AND at < ?",
+        (since, until),
+    ).fetchone()
+    if anchors is None or anchors["lo"] is None:
+        # No sample's `at` lands in the window at all. That is not "no data" — it is exactly what
+        # a clock stale by months looks like through a `WHERE at` filter, so fall back to the most
+        # recent rows by write order and let the criterion say what it is looking at.
+        rows = conn.execute(
+            "SELECT id, at, reachable, build, uptime_s FROM samples ORDER BY id DESC LIMIT ?",
+            (edge,),
+        ).fetchall()
+        return list(reversed(rows))
+    return list(
+        conn.execute(
+            "SELECT id, at, reachable, build, uptime_s FROM samples "
+            "WHERE id >= ? AND id <= ? ORDER BY id",
+            (int(anchors["lo"]) - edge, int(anchors["hi"]) + edge),
+        ).fetchall()
+    )
+
+
+def _clock_steps(rows: Sequence[sqlite3.Row]) -> list[_ClockStep]:
+    """Every place the clock went backwards between consecutive writes.
+
+    Strictly backwards. Two samples stamped the same second are not a step — the sampler can write
+    twice inside one second and that says nothing about the clock. Forward jumps are **not**
+    collected: an NTP correction forward and a sampler that simply stopped for a while are not
+    separable without a monotonic reading in ``samples``, which the schema does not have. AC-0
+    already surfaces those as gaps, and guessing between the two here would be inventing a fact.
+    """
+    steps: list[_ClockStep] = []
+    for previous, row in zip(rows, rows[1:]):
+        if int(row["at"]) < int(previous["at"]):
+            steps.append(
+                _ClockStep(
+                    row_id=int(row["id"]),
+                    before_at=int(previous["at"]),
+                    after_at=int(row["at"]),
+                    uptime_before=(
+                        None
+                        if previous["uptime_s"] is None
+                        else int(previous["uptime_s"])
+                    ),
+                    uptime_after=(
+                        None if row["uptime_s"] is None else int(row["uptime_s"])
+                    ),
+                )
+            )
+    return steps
+
+
+def _boot_mono_starts(db_path: str) -> list[tuple[str, int]]:
+    """``(boot_id, started_mono)`` for every recorded run, in WRITE order.
+
+    ``started_mono`` is ``time.monotonic_ns()`` taken at process start, and it is the one column
+    in the whole record that a clock step cannot touch. It has been written since #379 and read by
+    nothing until now.
+
+    ⚠️ **Never raises.** A report *about* the instrument must not die with the instrument: a
+    missing or unreadable ``robot.db`` yields no evidence, not no report. ``_boot_records`` still
+    fails loudly where it always did — this is a second, additive read.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT boot_id, started_mono FROM boot_log ORDER BY rowid"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return [(str(row[0]), int(row[1])) for row in rows]
+
+
+def _mono_reboots(
+    starts: Sequence[tuple[str, int]],
+) -> list[tuple[str, str, int, int]]:
+    """Consecutive runs whose ``started_mono`` DECREASED — i.e. a new monotonic origin.
+
+    Monotonic time only grows within one machine boot, so a decrease is **proof** the machine
+    rebooted between the two runs. This is what distinguished a reboot from a service restart in
+    #439: 48.7 s against the previous run's 15726 s.
+
+    ⚠️ The converse is not true and this must never be read as one. An increase is consistent with
+    a service restart on a machine that stayed up, but a reboot whose successor happened to start
+    later on the new clock than its predecessor did on the old one looks identical. Absence of
+    proof, and the criterion says so in those words.
+
+    Strict ``<``: equal values prove nothing, and a row written before the column meant anything
+    reads as 0.
+    """
+    reboots: list[tuple[str, str, int, int]] = []
+    for (previous_id, previous_mono), (this_id, this_mono) in zip(starts, starts[1:]):
+        if this_mono < previous_mono:
+            reboots.append((previous_id, this_id, previous_mono, this_mono))
+    return reboots
+
+
+def _clock_criterion(
+    rows: Sequence[sqlite3.Row],
+    steps: Sequence[_ClockStep],
+    reboots: Sequence[tuple[str, str, int, int]],
+    *,
+    window: tuple[int, int],
+) -> _Criterion:
+    """The clock's own continuity, reported so the figures above can be read honestly."""
+    since, until = window
+    outside = sum(1 for row in rows if not (since <= int(row["at"]) < until))
+    frames = len(steps) + 1
+    lines: list[str] = []
+    for step in steps:
+        restarted = step.robot_restarted
+        if restarted is None:
+            verdict = "robot uptime absent on one side - CANNOT TELL whether the robot restarted"
+        elif restarted:
+            verdict = (
+                f"robot uptime {step.uptime_before}s -> {step.uptime_after}s = "
+                "a NEW ROBOT PROCESS began in this interval"
+            )
+        else:
+            verdict = (
+                f"robot uptime {step.uptime_before}s -> {step.uptime_after}s = the robot "
+                "process SURVIVED (the machine's clock moved under a running robot)"
+            )
+        lines.append(
+            f"step at rowid {step.row_id}: at {step.before_at} -> {step.after_at} "
+            f"({step.backwards_s}s backwards); {verdict}"
+        )
+    for previous_id, this_id, previous_mono, this_mono in reboots:
+        lines.append(
+            f"boot {this_id[:8]} started_mono {this_mono / 1e9:.1f}s after {previous_id[:8]}'s "
+            f"{previous_mono / 1e9:.1f}s - a DECREASE, so a new monotonic origin: the MACHINE "
+            "REBOOTED between these two runs"
+        )
+    if not steps:
+        detail = (
+            f"no backwards step in {len(rows)} row(s) read in write order ({outside} of them "
+            f"outside the graded `at` range); the window is ONE clock frame. "
+            "!! this compares `at` against WRITE order only - a step FORWARD is indistinguishable "
+            "from a sampler gap without a monotonic column in `samples`, and shows up above as an "
+            "AC-0 gap instead"
+        )
+    else:
+        detail = (
+            f"{len(steps)} backwards step(s) in write order; the window spans {frames} clock "
+            f"frames. Read {len(rows)} row(s) by rowid, {outside} of them outside the graded "
+            "`at` range and therefore invisible to every other criterion here. Reported, never "
+            "graded and never corrected - AC-0 and AC-2 keep their verdicts and carry a caveat "
+            "row. !! epoch arithmetic across a frame boundary is not a duration (AVID-345, #439)"
+        )
+    if reboots and not steps:
+        detail += (
+            f" - but {len(reboots)} machine reboot(s) are PROVEN by started_mono, so the runs "
+            "AC-2 sums still span a clock discontinuity"
+        )
+    return _Criterion(
+        "CLOCK",
+        "wall-clock continuity across the window (reported, not graded)",
+        "recorded",
+        detail,
+        rows=lines[:12],
+    )
+
+
+def _clock_caveat_rows(
+    steps: Sequence[_ClockStep],
+    reboots: Sequence[tuple[str, str, int, int]],
+    *,
+    criterion: Literal["AC-0", "AC-2"],
+) -> list[str]:
+    """The caveat AC-0 and AC-2 carry when their arithmetic crossed a clock frame.
+
+    Empty when the window is one frame and no reboot is proven — the caveat has to *discriminate*,
+    or it is decoration that would read as a warning on a clean run and teach a reader to skip it.
+
+    The trigger is deliberately a superset of ``frames > 1``: a proven machine reboot means AC-2
+    summed ``started_at``/``last_seen_at`` spans across a discontinuity even if no sample happened
+    to straddle it.
+    """
+    if not steps and not reboots:
+        return []
+    moved = (
+        f"the wall clock moved BACKWARDS {len(steps)} time(s)"
+        if steps
+        else "the machine rebooted"
+    )
+    if criterion == "AC-0":
+        return [
+            f"!! {moved} in this window (see CLOCK): every gap above is a subtraction between "
+            "two readings of that clock, so a gap spanning a frame boundary is not a duration "
+            "and the unobserved total is an estimate, not a measurement"
+        ]
+    return [
+        f"!! {moved} / {len(reboots)} machine reboot(s) are proven by started_mono (see CLOCK): "
+        "this figure sums boot_log's wall-clock started_at and last_seen_at, so any run spanning "
+        f"a frame boundary contributes a span the clock cannot vouch for. S12.6's arithmetic "
+        f"assumes ONE clock frame; this window had {len(steps) + 1}"
+    ]
+
+
 def _grade(args: argparse.Namespace) -> list[_Criterion]:
     """Compute every criterion. Decides no verdict about the run as a whole — that is `_report`."""
     config = load_config(args.config)
@@ -453,8 +734,18 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
         samples = conn.execute(
             "SELECT * FROM samples WHERE at >= ? AND at < ? ORDER BY at", (since, until)
         ).fetchall()
+        # ⚠️ A second read, and it must be a second read: the query above is ordered and filtered
+        # by the clock this one audits, so it can neither show a backwards step nor see a row the
+        # step pushed outside the window (#439).
+        written = _read_in_write_order(
+            conn, since=since, until=until, interval=args.interval
+        )
     finally:
         conn.close()
+
+    steps = _clock_steps(written)
+    reboots = _mono_reboots(_boot_mono_starts(args.robot_db))
+    clock = _clock_criterion(written, steps, reboots, window=(since, until))
 
     # ── AC-0: was this window observed at all? ────────────────────────────────────────────────
     #
@@ -470,6 +761,11 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
                 f"no samples between {since} and {until} — this run measured nothing",
             )
         )
+        # ⚠️ Before the return, not after it. "No sample's `at` lands in the window" is precisely
+        # what a clock stale by months looks like through a `WHERE at` filter, so this is the one
+        # branch where the clock line is most likely to be the explanation — and hiding it behind
+        # an unrelated inconclusive is the defect §7.1 names.
+        criteria.append(clock)
         return criteria
 
     gaps: list[tuple[int, int]] = []
@@ -491,9 +787,11 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
             f"{coverage:.4%} of the window covered by {len(samples)} samples "
             f"(n={len(samples)}); {len(gaps)} gap(s) longer than {bound:.0f}s, "
             f"{blind}s unobserved in total",
-            rows=[f"gap {start} -> {end} ({end - start}s)" for start, end in gaps[:10]],
+            rows=[f"gap {start} -> {end} ({end - start}s)" for start, end in gaps[:10]]
+            + _clock_caveat_rows(steps, reboots, criterion="AC-0"),
         )
     )
+    criteria.append(clock)
 
     # ── AC-4: one window, one build (#373) ────────────────────────────────────────────────────
     #
@@ -547,7 +845,8 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
             rows=[
                 f"⚠️ known only to within one heartbeat ({heartbeat_s:.0f}s): an unclean run is "
                 f"credited to its last beat, so this UNDERSTATES availability, never the reverse",
-            ],
+            ]
+            + _clock_caveat_rows(steps, reboots, criterion="AC-2"),
         )
     )
 
