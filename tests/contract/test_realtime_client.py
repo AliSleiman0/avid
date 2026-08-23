@@ -1650,6 +1650,42 @@ async def test_a_new_response_after_a_cancel_is_cancellable_again(
     assert [p["type"] for p in ws.sent] == ["response.cancel", "response.cancel"]
 
 
+async def test_a_second_UNNAMED_response_is_cancellable_after_the_first_was_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠️ The case where clearing the dedupe on ``response.created`` is actually load-bearing.
+
+    Found by a neuter that came back **green**: with distinct ids the id-keying alone already lets
+    a new response be cancelled, so removing the reset changed nothing and the test above proved
+    nothing about it. The reset earns its place only here — when the API names no id, *both*
+    responses collapse onto the ``_UNKNOWN_RESPONSE`` sentinel, the dedupe key matches across a
+    turn boundary, and the second response's cancel is suppressed. That is the silent direction:
+    barge-in quietly stops working, with no error and no log.
+
+    Whether the API ever omits the id is `tools/probe_overlap.py`'s Q1 and that probe has never
+    been run — which is exactly why the sentinel path must be defended rather than assumed unused.
+    """
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+
+    client._ws = _FakeWs([{"type": "response.created"}])  # type: ignore[assignment]
+    await _drain_events(client)
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [{"type": "response.done"}, {"type": "response.created"}]
+    )
+    await _drain_events(client)
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == ["response.cancel", "response.cancel"], (
+        "the second unnamed response was not cancellable — the dedupe key leaked across turns"
+    )
+
+
 async def test_a_cancel_rejection_we_can_attribute_to_our_own_race_is_a_warning_not_an_error(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
