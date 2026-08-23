@@ -60,5 +60,13 @@
     "but_it_is_not_free": "Permitted downtime is 7h12m across the WHOLE thirty days, and RUNBOOK §4.0 is right that the costs are cumulative and unrecoverable. Each stop spends uptime and AC-0 coverage. A handful of them fails this window on AC-2 - honestly, on a bar agreed in advance, which is the only kind of failure worth having.",
     "what_WOULD_restart_the_window": "A deploy. That is the only restart trigger anywhere in this repo (§12.6's split-window rule), it is an explicit operator decision, and it must be recorded here rather than absorbed. Reliability events are reported; build changes invalidate.",
     "_decided_in_advance_on_purpose": "Deciding this after a second stop is how a window gets quietly restarted to make a number look better. The reasoning is committed so day 29 inherits it rather than re-litigating it under pressure."
+  },
+  "_the_robot_was_wedged_the_whole_time": {
+    "issue": "#452 - found 2026-08-23, 1 day into the window.",
+    "what": "The robot entered THINKING at 13:41:13 on 2026-08-22 - minute 3 of the window - and never left. Three state transitions in 24 hours. 147 of its 175 log lines are 'ignored illegal transition ... in state THINKING'.",
+    "cause": "A spurious audio.speech_started in an empty room drove it LISTENING then THINKING; the Realtime session open then timed out on the handshake. The 10s THINK_TIMEOUT that exists for exactly this (domain/state.py, (THINKING, THINK_TIMEOUT) -> DEGRADED) never armed, because the arming call sits in the turn path that the failed open aborted. Entering THINKING is driven by a BUS FACT; leaving it needs a SERVICE. One happened without the other.",
+    "what_it_means_for_this_window": "!! READ THIS BEFORE QUOTING ANY FIGURE FROM THIS WINDOW. The uptime arithmetic is not wrong - it is measuring the PROCESS, which is genuinely healthy: heartbeating, RSS flat, zero bus drops, watchdog satisfied. But O5 means to describe a robot that works unattended for thirty days, and this one has done nothing since minute 3. AC-2's 99.89% is true and it is not evidence for O5.",
+    "the_gate_cannot_see_it": "soak_pi.py has NO liveness criterion. Nothing asserts the robot ever changed state, took a turn, or moved. That is #452 AC-4, and it is the second defect: the M8 lesson verbatim - every automated gate passed while the robot was blind.",
+    "decision_still_open": "Whether to restart the window is NOT decided here. Restarting is an operator decision recorded in this file (see _second_occurrence_policy for what does and does not restart a window). Note that #452 cannot be fixed on the rig without a deploy, and a deploy splits the window anyway - so the two decisions are one decision."
   }
 }

@@ -8,6 +8,30 @@
 
 **As of:** 2026-08-23 · `main = dd3fba4` + this branch · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · 🔴 **AC-3b already failed on day 1 — the window continues, see below** · gh `AliSleiman0`.
 
+## 🔴 STOP — the M11 window has been measuring a wedged robot (#452)
+
+Found 2026-08-23 while gathering evidence for #439 AC-6. **The robot entered `THINKING` at minute 3
+of the window (2026-08-22 13:41:13) and has never left.** Three state transitions in 24 hours; 147
+of its 175 log lines are `ignored illegal transition ... in state THINKING`.
+
+A spurious `audio.speech_started` in an empty room drove it LISTENING → THINKING; the Realtime
+session open then timed out on the handshake. The **10-second `THINK_TIMEOUT`** that exists for
+exactly this — `(THINKING, THINK_TIMEOUT) → DEGRADED` in `domain/state.py` — **never armed**,
+because the arming call sits in the turn path the failed open aborted. *Entering* THINKING is driven
+by a bus fact; *leaving* it needs a service. One happened without the other.
+
+⚠️ **AC-2's 99.89% is true and is not evidence for O5.** The process is genuinely healthy —
+heartbeating, RSS flat, zero drops, watchdog satisfied. The robot has done nothing. And `soak_pi.py`
+has **no liveness criterion**, so the gate cannot see it: the M8 lesson verbatim.
+
+**Two decisions, which are really one decision, and both are the operator's:**
+1. Restarting the window. It has thirteen days' less value than the clock suggests.
+2. Fixing #452 — which needs a deploy, and a deploy splits the window anyway.
+
+⛔ Do not restart the robot casually to "unstick" it: that is a clean stop, which fails **AC-3**,
+and it destroys the only live instance of the defect.
+
+
 ## ⭐ Next session — the clock is the only thing on the critical path
 
 ⚠️ **This section replaces the previous one entirely.** It was written when Group B still had five

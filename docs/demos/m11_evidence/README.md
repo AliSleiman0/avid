@@ -28,6 +28,22 @@ Working on `main` is fine. Deploying to `/opt/avid` is not, until 2026-09-21.
 If something must be deployed, that is a decision to restart the window, and it should be recorded
 here as such rather than absorbed.
 
+## 🔴 Read this before quoting any figure here — the robot was wedged (#452)
+
+Found 2026-08-23, one day in. **The robot entered `THINKING` at minute 3 of this window and never
+left.** Three state transitions in 24 hours; 147 of its 175 log lines are `ignored illegal
+transition ... in state THINKING`. A spurious `audio.speech_started` in an empty room drove it
+there, the Realtime session open timed out, and the 10-second `THINK_TIMEOUT` that exists for
+exactly this never armed — the arming call lives in the turn path the failed open aborted.
+
+⚠️ **The uptime arithmetic is not wrong; what it describes is not what O5 means.** The *process* is
+genuinely healthy — heartbeating, RSS flat, zero bus drops, watchdog satisfied — so AC-2's **99.89%
+is true and is not evidence for O5.** A thirty-day window that cannot distinguish a working robot
+from a catatonic one is not a soak.
+
+⚠️ And `soak_pi.py` **has no liveness criterion** — nothing here asserts the robot ever changed
+state, took a turn or moved. That is the M8 lesson verbatim, and it is #452 AC-4.
+
 ## Grading it
 
 ```sh
