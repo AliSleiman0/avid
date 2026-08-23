@@ -191,13 +191,14 @@ class ScoreWeights:
     recency: float = 1.0
     importance: float = 1.0
     relevance: float = 1.0
-    # δ, the keyword term (#264). Park et al. have no keyword component, so unlike the three
+    # δ, the keyword term (#264), MEASURED at #447 — see ScoreWeights.keyword below.
+    # Park et al. have no keyword component, so unlike the three
     # above this default is NOT a published baseline — it is the same equal weight applied for
     # consistency, and it is **unmeasured**. `tools/eval_recall.py` is the instrument that would
     # settle it; until it has been run against a real-MiniLM store, treat 1.0 as a starting point
     # rather than a result. Said plainly here because an invented number that looks like the
     # three beside it is how a guess becomes a fact.
-    keyword: float = 1.0
+    keyword: float = 0.5
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

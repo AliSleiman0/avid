@@ -882,3 +882,60 @@ async def _probe_one(
     finally:
         await repo.aclose()
         await bus.stop()
+
+
+@pytest.mark.real_embedder
+async def test_the_keyword_weight_does_not_drown_the_vector_branch(
+    tmp_path: Path,
+) -> None:
+    """⚠️ #447's root cause, pinned: δ = 1.0 made the real embedder score exactly like the fake.
+
+    Measured 2026-08-23 over `assets/eval/retrieval.json` (50 queries) with real MiniLM:
+
+    ====  ==========  ==========
+    δ     recall@5    paraphrase
+    ====  ==========  ==========
+    1.0   0.66        0.20
+    0.5   **0.86**    **1.00**
+    0.0   0.84        1.00
+    ====  ==========  ==========
+
+    The mechanism: `_fts_match` ORs **every** query token, stopwords included, bm25 picks `top_k`
+    rows, and each took a full `+1.0` — enough to outrank facts the vector branch put **first**. So
+    the keyword term decided the top-5 on its own and the embedder could not change a result. Every
+    recall figure this project had recorded was measuring FTS5, not the model.
+
+    This test does not re-run the eval set (that is `tools/eval_recall.py`, Tier-5, never a gate).
+    It pins the one property that made the difference: **a fact the vector branch ranks first is
+    not pushed out of the top-k by keyword hits on stopwords.** Neuter δ back to 1.0 and it fails.
+    """
+    embedder = _real_embedder()
+    spec, facts = _full_corpus()
+    db = await _store(
+        tmp_path, facts=facts, supersede=None, forget=None, embedder=embedder
+    )
+
+    config = _config(db)
+    clock = SystemClock()
+    bus = AsyncioEventBus(clock=clock)
+    repo = SqliteFactRepo(db_path=db, clock=clock)
+    await bus.start()
+    try:
+        from avid.main import _build_retriever
+
+        live = list(await repo.fetch_live())
+        # "what did I start learning?" -> "I started guitar lessons in June": no shared content
+        # word beyond a stem, so the vector branch is the only thing that can reach it.
+        target = next(f for f in live if "guitar" in f.text.lower())
+        retriever = _build_retriever(
+            config, repo=repo, embedder=embedder, bus=bus, clock=clock
+        )
+        await retriever.rebuild()
+        ids = tuple(await retriever.retrieve("what did I start learning?"))
+        assert target.id in ids, (
+            "a fact the vector branch ranks FIRST was pushed out of the top-5 by keyword hits "
+            "on stopwords - this is #447, and the shipped keyword weight is why"
+        )
+    finally:
+        await repo.aclose()
+        await bus.stop()
