@@ -1,4 +1,17 @@
-# M11 — the 30-day soak window
+# M11 soak evidence — ⛔ WINDOW STOPPED 2026-08-23, VOID as O5 evidence
+
+> **This window ran ~26 hours of a planned 30 days and was stopped deliberately.** It is **not**
+> evidence for O5. The robot was wedged in `THINKING` from minute 3 (#452), so the window measured
+> a catatonic robot at 99.89% uptime with every graded criterion passing.
+>
+> O5 is amended (#389): the 30-day **hardware** soak moves to the production board, because the
+> board under test here is an MVP prototype and the board-specific half of a soak — thermals, SD
+> wear, brownout, the no-RTC clock — is evidence about hardware nobody will own. The
+> **software-endurance** half stays, as a 72-hour run, once #452 is fixed and the harness has a
+> liveness criterion and a thermal series.
+>
+> ⚠️ Everything below is kept because the *findings* were real and front-loaded. The numbers are
+> not.
 
 `window.json` is the **window-start epoch**, written the moment the clock started.
 
@@ -6,9 +19,10 @@ It is committed for one reason: an epoch held only on the Pi is one SD-card fail
 making thirty days of data ungradeable. `--since` is not recoverable by inspection afterwards —
 the sampler's earliest row tells you when *sampling* began, not what window was claimed.
 
-## Opened
+## Opened — and stopped
 
-**2026-08-22T13:18:08Z** (epoch `1787404688`), closing **2026-09-21T13:18:08Z**.
+**2026-08-22T13:18:08Z** (epoch `1787404688`). Planned close **2026-09-21T13:18:08Z**;
+⛔ **actually stopped 2026-08-23T15:18Z, ~26 hours in.** 1560 samples.
 
 Build under test: **`v0.M10.0-47-g8d03690`**.
 
@@ -16,14 +30,18 @@ Build under test: **`v0.M10.0-47-g8d03690`**.
 that the soak survives a reboot and to land the intervention log before the window rather than
 during it. Recorded in `window.json` rather than quietly overwritten.
 
-## ⚠️ Do not deploy to the Pi during the window
+## ⚠️ Do not deploy to the Pi during a window — HISTORICAL, this window is closed
 
 §12.6's first bullet: *a window whose build identifier changes mid-flight is not graded as one
 window.* That guard is real now — `build` became the deployed commit at #388, and #410's tests
 prove the criterion fires — so a `git pull && systemctl restart robot` on the rig **will** split
 this window and the split **will** be reported.
 
-Working on `main` is fine. Deploying to `/opt/avid` is not, until 2026-09-21.
+Working on `main` is fine. Deploying to `/opt/avid` is not, while a window is open.
+
+⛔ **This window is closed, so the freeze is lifted.** Kept because it applies again to the next
+one — and because the deploy freeze is what made this window expensive: it blocked the fix for the
+very defect that made the window meaningless.
 
 If something must be deployed, that is a decision to restart the window, and it should be recorded
 here as such rather than absorbed.

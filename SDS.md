@@ -3711,6 +3711,44 @@ external-content and a naive `SELECT` reads through to a deleted row.
 O5 is *"30-day soak, ≥99% uptime, zero manual restarts."* Those words are not gradeable as written.
 For M11's gate (AVID-389) they mean:
 
+> ## ⛔ AMENDED 2026-08-23 — the 30-day hardware soak moves to the production board
+>
+> **The original wording is above and stays above.** What follows is an amendment made *before* a
+> window completed, with its reasoning, not a target moved to fit a number already taken.
+>
+> **The board under test is an MVP prototype and is not the hardware that will ship.** Split what a
+> soak measures and most of it does not survive that fact:
+>
+> | measures | transfers to different hardware? |
+> |---|---|
+> | thermals and throttling (R-09), SD wear (R-05), servo brownout margin (R-04), the no-RTC clock behaviour | ❌ properties of *this* board |
+> | memory growth, state-machine wedges, unbounded queues, reconnection decay | ✅ properties of the *software* |
+>
+> So O5 splits the same way:
+>
+> * **The 30-day hardware soak is deferred to the production board**, which is the only board on
+>   which thermals, wear and brownout are worth thirty days.
+> * **The software-endurance half stays here**, as a **72-hour run** with the robot actually
+>   working — after AVID-452 is fixed and after `soak_pi.py` has a **liveness** criterion and a
+>   **thermal** series.
+>
+> ⚠️ **The first window is why.** It ran ~26 hours and was void: the robot was wedged in `THINKING`
+> from minute 3 (AVID-452), so it measured a catatonic robot at 99.89% uptime with **every graded
+> criterion passing**. The value it produced — the unplanned stop, the two clock frames, a grade
+> command that could not run, the wedge — arrived in the first 48 hours and came from *looking*.
+> The soak's own criteria found none of it.
+>
+> ⚠️ **And the binding cost was never calendar — it was the deploy freeze.** Thirty days of not
+> touching `/opt/avid` blocked most of the open board *including the fix for the defect that made
+> the window meaningless*. A gate that forbids repairing the thing it is measuring is not buying
+> confidence.
+>
+> ⚠️ **Knowingly deferred, so it is not a surprise later:** §12.6.1 argues a slow leak is visible
+> only over thirty days, and that on 2 GB it is *the* failure mode. **A 72-hour run does not
+> discharge that**, and the ~26 hours already run discharges nothing at all — the robot was idle,
+> so the flat RSS curve is the *absence* of a test rather than a passing one. This is owed on the
+> production board, and it is the first thing that window is for.
+
 - **Denominator** — wall-clock seconds in the measurement window, from the first boot record after
   the window opens to the window's close. A window whose build identifier changes mid-flight
   (AVID-373) is **not graded as one window**; it is reported as two, or as a failure to hold the

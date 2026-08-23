@@ -6,379 +6,161 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-23 · `main = dd3fba4` + this branch · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · 🔴 **AC-3b already failed on day 1 — the window continues, see below** · gh `AliSleiman0`.
+**As of:** 2026-08-23 · `main` · `v0.M10.0` tagged · ⛔ **M11 soak STOPPED after ~26 h and O5 amended — the rig is UNFROZEN, deploying is allowed again** · gh `AliSleiman0`.
 
-## 🔴 STOP — the M11 window has been measuring a wedged robot (#452)
+## ⭐ Next session — the soak is STOPPED and the rig is UNFROZEN
 
-Found 2026-08-23 while gathering evidence for #439 AC-6. **The robot entered `THINKING` at minute 3
-of the window (2026-08-22 13:41:13) and has never left.** Three state transitions in 24 hours; 147
-of its 175 log lines are `ignored illegal transition ... in state THINKING`.
+**The M11 30-day window was stopped on 2026-08-23 after ~26 hours, deliberately, and O5 is
+amended.** The reasoning is below and on #389. This is the single most important thing to
+understand before touching anything.
 
-A spurious `audio.speech_started` in an empty room drove it LISTENING → THINKING; the Realtime
-session open then timed out on the handshake. The **10-second `THINK_TIMEOUT`** that exists for
-exactly this — `(THINKING, THINK_TIMEOUT) → DEGRADED` in `domain/state.py` — **never armed**,
-because the arming call sits in the turn path the failed open aborted. *Entering* THINKING is driven
-by a bus fact; *leaving* it needs a service. One happened without the other.
+### Why it was stopped
 
-⚠️ **AC-2's 99.89% is true and is not evidence for O5.** The process is genuinely healthy —
-heartbeating, RSS flat, zero drops, watchdog satisfied. The robot has done nothing. And `soak_pi.py`
-has **no liveness criterion**, so the gate cannot see it: the M8 lesson verbatim.
+Three findings, in the order they matter:
 
-**Two decisions, which are really one decision, and both are the operator's:**
-1. Restarting the window. It has thirteen days' less value than the clock suggests.
-2. Fixing #452 — which needs a deploy, and a deploy splits the window anyway.
+1. **The robot was wedged the whole time (#452).** It entered `THINKING` at minute 3 and never
+   left. 147 of its 175 log lines are `ignored illegal transition ... in state THINKING`. **The
+   window was measuring a catatonic robot at 99.89% uptime**, and every graded criterion passed.
+2. **The hardware under test is not the hardware that ships.** This is an MVP; the product board
+   will be cheaper and different. So the board-specific half of a soak — thermals, SD wear, brownout
+   margin, the whole no-RTC clock saga — is evidence about a prototype nobody will own.
+3. **The real cost was never calendar, it was the deploy freeze.** Thirty days of not touching
+   `/opt/avid` blocks #406, #400, #382, #414, #428, #310, #207's seal — and **#452's own fix**. You
+   could not repair the defect that made the window meaningless without invalidating the window.
 
-⛔ Do not restart the robot casually to "unstick" it: that is a clean stop, which fails **AC-3**,
-and it destroys the only live instance of the defect.
+⚠️ **The value the soak did deliver was front-loaded and came from *looking*, not from waiting.**
+Every finding — the AC-3b stop, the clock frames, the broken grade command, the wedge — landed in
+the first 48 hours, by inspection. The soak's own criteria found none of them and would have
+reported success for thirty days.
 
+### ⛔ The old rule is GONE. Deploying is allowed again.
 
-## ⭐ Next session — the clock is the only thing on the critical path
+The "do not `git pull` + restart on `/opt/avid`" freeze is **lifted**. `soak-sampler` is `inactive`
+**and `disabled`; `robot.service` is still running** and is the live repro of #452 — worth one look
+before you redeploy over it.
 
-⚠️ **This section replaces the previous one entirely.** It was written when Group B still had five
-open items. All five shipped; the laptop-only lane inside M11 is empty, and what is left divides
-cleanly into *"needs the rig"* and *"does not advance a milestone"*.
+### 🔴 Do these three, in this order
 
-### ⛔ The one rule, unchanged
+**1. Fix #452 — the wedge.** The defect: *entering* `THINKING` is driven by a bus fact
+(`audio.speech_ended`, from `AudioService`), but the only exit that does not need a working session
+is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — which a failed
+`open()` aborts before reaching. One happens without the other.
 
-**Do not `git pull` + restart on `/opt/avid`.** §12.6 makes a mid-window build change a *split
-window*; the guard is real (#388) and its criterion is proven to fire (#410). Working on `main` is
-fine — **deploying is not**, until 21 September.
+> ⚠️ Fix the **invariant**, not the site. `_think_timer`'s own docstring already enumerates
+> *"reachable arcs that leave this timer armed"*; this is its mirror image, a reachable arc that
+> leaves it **un**armed. Adding a fourth cancel site would be treating the symptom.
+> ⚠️ The replay fake cannot express a failed `open()` — check that before trusting a green.
 
-If something genuinely must ship, that is a decision to **restart the window**, recorded as such in
-`docs/demos/m11_evidence/window.json`. Restarting is not a disaster; *silently* restarting is.
+**2. Add the two criteria the soak was missing** (`docs/demos/soak_pi.py`):
 
-### ✅ Done, and it found something: the first soak grade pass
+- **Liveness** — the robot changed state at least N times / no single state held longer than X.
+  ⚠️ **This is the whole lesson.** A window that cannot tell a working robot from a catatonic one is
+  not a soak at any duration, and this one could not. Reported at minimum; graded if you can defend
+  the bar.
+- **Thermal** — the sampler records **no temperature at all** today. On a board whose R-09 risk *is*
+  thermal throttling, a soak with no thermal series is a gap. `vcgencmd measure_temp` /
+  `/sys/class/thermal/thermal_zone0/temp`; report `first/last/min/max`, like `MEM` does.
 
-**Run 2026-08-23T09:14Z, 0.83 days in. `4 passed, 1 failed, 0 inconclusive` — exit 1.**
-It found a real defect on its first outing, which is the argument for having run it on day 1
-rather than day 29.
+**3. Then run a 72-hour endurance run** — on the rig, with the robot **actually doing something**.
 
-| | |
-|---|---|
-| AC-0 coverage | 99.6420%, 1195 samples, one 209 s gap |
-| AC-2 uptime | **99.8914%** (78 s down; 717 s permitted at the 99% bar) ✅ |
-| AC-3 manual restarts | **0** ✅ |
-| AC-4 build | single, `v0.M10.0-47-g8d03690` ✅ |
-| **AC-3b unplanned stops** | **1 — ❌ FAIL.** Boot `c7c6c3d5`, last seen `1787406043` |
+⚠️ **The ~26 hours already run does NOT count**, and this is the one thing not to wave through. The
+robot was wedged for all but the first three minutes, so nothing exercised the paths a soak exists
+to stress. The memory series looks perfect —
 
-⚠️ **This does NOT end the window, and the reasoning is on the record so nobody re-litigates it on
-day 29.** O5 is *"30-day soak, ≥99% uptime, zero manual restarts"*, and §12.6 is explicit that an
-unclean stop is **not manual**: *"a crash or watchdog kill … but it is a defect, counted and
-reported separately."* Both of O5's own bars pass. §12.6 then says *"zero is the expectation; any
-occurrence is a finding with its own issue"* — so it is **filed, not absorbed**, and the clock
-keeps running.
-
-⚠️ **Do not read the non-zero exit code as "O5 failed".** AC-3b failing is enough to make the
-harness exit 1. Read the per-criterion lines, not `$?`.
-
-**What the failure actually was** — the *machine* rebooted ≈22.5 min into the window. It is **not**
-the deliberate reboot: that one is earlier and *clean* (`5e1009ea`, `e5e1d1ee`, both
-`stop_reason=signal` at 13:15/13:16), which proves the graceful path records a signal on this
-machine, so the 13:40:43 stop was not graceful. Evidence it was a machine reboot: journald holds
-nothing before 13:40:53; both units `ActiveEnter` 13:40:53/13:41:13 with `NRestarts=0`;
-`boot_log.started_mono` is **48.7 s** for `b566ffd9` against **15726 s** for the run before the
-deliberate reboot.
-
-**The cause is now established by elimination — a hard power loss or hardware reset, not
-software.** `/var/log/wtmp` persists across reboots where journald does not, and it has **no
-`shutdown system down` record for this boot** while *every other reboot in the machine's history
-has one*. Every remaining software route is excluded independently: `kernel.panic = 0` (a panic
-**hangs** this board, it does not reboot), `RuntimeWatchdogUSec=0`, `robot.service` `NRestarts=0`,
-no timer within 17 minutes, no `dpkg` activity that day. `EXT4-fs: orphan cleanup` on mount
-corroborates. The robot was **healthy at the instant** — RSS flat at 234.0 MiB, 1524 MiB available,
-zero bus drops, `/health` answering. Instantaneous is what a power loss looks like and what almost
-nothing else does.
-
-⚠️ **Why power was lost is still unknown.** One hypothesis worth eliminating before #400: #413
-landed the same day, so **2026-08-22 is the first day the robot drove servos under its own
-service**, and the servo rail is a plausible brownout source. A hypothesis, not a finding.
-
-⚠️ **The clock runs backwards inside the soak's own evidence.** Ordered by **rowid** (write order)
-rather than by `at`, row 24 was written *before* row 25 and is stamped one second *later* —
-`13:41:08` then `13:41:07` — and row 24 carries `uptime_s = 1492`, exactly `1432 + 60`, i.e. **the
-old process still alive and counting**. Rows 23–24 are in the pre-reboot clock frame, rows 25+ in
-the post-reboot one, and they are not the same timeline. **So AC-0's "209 s gap" and AC-2's "78 s
-down" are subtractions across two clocks, not measurements.** It does not move O5 — tens of seconds
-against a 7h12m budget — but the harness reports them as measurements. Tracked as #439 AC-4.
-
-⚠️ **The clock is not trustworthy across a reboot on this board.** That boot came up reading
-**2026-04-27** — 118 days stale — before `fake-hwclock` and then `systemd-timesyncd` stepped it
-(`13:17:20 → 13:40:47`, *"restoring from recorded timestamp"*). Epoch arithmetic **across** a
-reboot here is sand; `boot_log.started_mono` is the column that survives it. That is AVID-345, and
-it is why that column exists.
-
-### Re-running it
-
-
-```sh
-cd /opt/avid && sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
-    --mode grade --since 1787404688 --config /etc/robot/config.toml
+```
+h 0  235.24 MiB   h 4  236.52   h 8  236.47   h 24  236.48   <- flat for 20+ h
 ```
 
-⚠️ **The `cd` is load-bearing, not tidiness.** `[ai] personality` is a *relative* path, and
-SDS §6.5 resolves relative paths against the **process working directory** — which for
-`robot.service` is `WorkingDirectory=/opt/avid`. Run this from anywhere else and `load_config`
-raises `FileNotFoundError` before a single criterion is graded. The command recorded here from
-2026-08-22 until 2026-08-23 omitted it, and **could not run as written**.
+— and it is **worthless**: a leak shows under *work*, and there was none. Flat RSS on an idle
+process is not evidence of no leak; it is the absence of a test.
 
-| | |
-|---|---|
-| `--since` | **`1787404688`** |
-| closes | `1789996688` — 2026-09-21T13:18:08Z |
-| build under test | **`v0.M10.0-47-g8d03690`** |
-| durable record | `docs/demos/m11_evidence/window.json` + issue #389 |
+### What O5 now means
 
-Non-zero exit on **fail or inconclusive** — and inconclusive is not a pass. Read-only over the
-loopback API; it does **not** count as an intervention, so re-run it as often as you like.
+Amended on #389 with the original wording kept visible. The 30-day hardware soak moves to **the
+production board, when it exists** — that is the only board where thermals, wear and brownout are
+worth measuring. What stays here is the **software-endurance half**, which is what transfers across
+hardware: leaks, wedges, unbounded growth, reconnection decay.
 
-⚠️ **AC-3b will keep failing for the rest of this window.** The stop is inside it and cannot leave.
-Expect exit 1 every run from now until 21 September.
+⚠️ **Knowingly deferred, written down so it is not a surprise later:** SDS §12.6.1 argues a slow
+leak is visible only over thirty days and that on 2 GB it is *the* failure mode. A 72-hour run does
+not discharge that. The honest position is that it is cheaper to test under synthetic load than by
+waiting a month — but it **is** untested, and it is owed on the production board.
 
-**And a second stop would not end the window either** — decided in advance (#439 AC-5, SDS §12.6):
-the window continues, AC-3b reports the **count**, each occurrence gets its own issue. ⚠️ Not
-because it is free: downtime is capped at **7 h 12 m for the whole thirty days** and the costs are
-cumulative, so repeated stops fail this on **AC-2** — a bar agreed before the run rather than
-invented after it. **Only a deploy restarts a window.** What you are watching is the AC-2 figure,
-AC-0 coverage drift, and the `MEM` trend.
+### After that, the board is wide open again
 
-### What is actually left, and what each one costs
+With the freeze lifted, the rig work is unblocked and most of it is `must`: **#406** (re-measure
+O1), **#207** AC-10/AC-11 (seal M9 — it needed the service stopped, which no longer costs
+anything), **#400**, **#382**, **#414**, **#428**, **#310**. Laptop-side: **#447**'s O2 verdict and
+**#402**.
 
-**Nothing left in the M11 laptop lane.** Group B is done. The remaining work is one of four kinds,
-and it is worth picking deliberately rather than by issue number:
+## What shipped, 2026-08-23 (this session)
 
-| | Issue | Cost / blocker |
-|---|---|---|
-| **Wait** | **#389** — the M11 gate | ⏱️ the clock. Grade pass above; nothing else advances it |
-| **Bench, and it charges the soak** | **#207** AC-10 → AC-11 | see below — it stops `robot.service` |
-| **Laptop, off the milestone path** | **#407** `XS`, **#415** `S`, **#264** `M`, **#402** `XL` epic | free of the rig; none of them seals anything |
-| **Blocked on the rig** | #406 `must`, #400 `must`, #382 `must`, #310, #414, #428, #265, #267 | ⛔ all need hardware, most need a deploy |
-
-The four laptop-doable ones, in the order I would take them:
-
-- **#407** (`XS`, `conf:H`) — five modules name a **ReSpeaker** the rig does not have. Pure
-  documentation-in-code drift, cheap, and the kind of thing that misleads a future bring-up.
-- **#415** (`S`) — `response_cancel_not_active`: barge-in cancels a response the server already
-  finished. SDS §6.2.4 step 5 already describes the conditional fix; this is the code catching up.
-- **#264** (`M`) — ⚠️ **AC-1 is merged** (`2777b1a`); AC-2 and AC-3 need the two gate probes run
-  against a **real-MiniLM store**, which is a model download rather than a rig. Genuinely
-  off-hardware, and the issue says so.
-- **#402** (`XL`, epic, `conf:L`) — M12's fleet epic. A planning artefact, not an afternoon.
-
-### #207 is 10 of 12 — and finishing it charges the soak
-
-| | |
-|---|---|
-| **AC-10** | ⛔ bench — pin #200's **provisional** `min_deg`/`max_deg` to measured safe reach. The **procedure is written down** now (`PI_OPERATIONS.md` §5c), so this is execution, not design |
-| **AC-11** | tag `v0.M9.0`, once AC-10 lands |
-
-Passed with evidence on the issue: AC-0 … AC-9.
-
-⚠️ **AC-10 needs no deploy, but it does need `robot.service` stopped**, and that is an
-**intervention against the running window**: it fails **AC-3** (a clean stop *is* a manual restart),
-and it spends uptime against the 99% bar. Log it to `/var/lib/soak/interventions.jsonl` *before*
-acting. **This is a deliberate trade — M9's seal against M11's evidence — and it should be decided
-at a desk, not at the bench with a servo in hand.** Waiting until 21 September costs nothing but
-time.
-
-### What a power cut costs — measured, not guessed
-
-The Pi was rebooted before the window opened, deliberately, to find out. **It survives**: both
-units are `enabled` and came back unattended, `samples.db` persisted, the sampler resumed on the
-same file.
-
-| | records | fails |
-|---|---|---|
-| graceful `reboot` | `stop_reason=signal` — a **clean** stop | **AC-3** (manual restart) — *part of O5* |
-| power cut / crash | `stopped_at` NULL | **AC-3b** — reported, not part of O5's definition |
-
-Either way it also costs uptime (7h12m slack at the 99% bar) and AC-0 coverage.
-
-**If it happens, write it down** — `/var/lib/soak/interventions.jsonl`, one JSON object per line:
-
-```json
-{"at": 1787404800, "kind": "power_cut", "note": "unplugged the bench strip"}
-```
-
-⚠️ It **explains** an event, it does not **excuse** one — AC-3/AC-3b keep their verdicts. It exists
-because a power cut and a crash leave byte-identical records and journald is volatile (#381), so
-nothing else will remember which was which.
-
-### ⚠️ It stopped being hypothetical on day 1
-
-**It happened, 22.5 minutes into this window** — and the log above was empty when it did. The
-machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for the whole
-window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
-full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
-
-The cause **is** established — a hard power loss or hardware reset, by elimination: `wtmp` has no
-`shutdown` record for that boot while every other reboot in the machine's history does, and every
-software route (panic, watchdogs, OOM, timers) is independently excluded. **Why** power was lost is
-still unknown. Full evidence in #439 and `window.json`.
-
-⚠️ But note *how* that was recovered: from `wtmp`, `boot_log.started_mono` and sampler **rowids** —
-never from a note, because nobody wrote one. Reconstruction happened to be possible and will not
-always be. **Write the note at the time.**
-
----
-
-## What shipped, 2026-08-22 → 23
-
-Twelve PRs across two days. The five M11 Group B items, plus #207's two laptop-doable criteria.
+Nine PRs. The M11 lane was emptied, then M11 itself was stopped.
 
 ### The deliverables
 
-- **`deploy/RUNBOOK.md`** (#387 → #425) — symptom-first, thirteen entries, each **Confirm / Fix /
-  Not-to-be-confused-with**. The third part is the one that earns its place: nearly every fault in
-  this project's history has a twin that presents identically.
-- **`SDS.md` §13** (#21 → #427) — threat model, secrets, data at rest, data in transit, camera and
-  microphone, update integrity, and §13.7's guard. **§13 is now the security authority**;
-  `SECURITY.md` is the operator summary that defers to it.
-- **The release path** (#388 → #430, #431) — `git push origin vX` runs build → verify → publish,
-  and **publish `needs:` verify**. Rehearse it any time:
-  `gh workflow run release.yml -f tag=v0.0.0-rc.1` builds and verifies and does *not* publish.
-  `docs/RELEASE.md` carries the decisions, including **no retroactive artifacts**.
-- **The control API is complete** (#385 → #433, #386 → #434) — `/health`, `/metrics`, `/state`,
-  `/facts`, `/events/stream`, `POST /quiet`. Every route SDS §9.5 has specified since M0 now
-  exists.
-- **`PI_OPERATIONS.md` §5c** (#207 AC-9 → #436) — the servo rig, which the document had never
-  covered.
+- **The first soak grade pass was run** (#440) — and the command recorded for it **could not run**.
+  Every path absolute, so it looked location-independent; `_grade` loads config, `[ai] personality`
+  is relative, and SDS §6.5 resolves against the *process* working directory. Fixed in three places
+  with a guard.
+- **`CLOCK`, and the wall clock is not one timeline** (#444, #439 AC-4) — ordered by **rowid**, two
+  consecutive samples read `13:41:08` then `13:41:07`, with the earlier-*written* row carrying the
+  old process's uptime. AC-0's gap and AC-2's downtime were subtractions across two clocks. Detected
+  in write order, reported, **never corrected and never graded**.
+- **The second-stop policy** (#449, #439 AC-5) — decided *before* a second stop could occur.
+- **#415 rescoped and fixed** (#446) — the guard it proposed was already shipped; what remained was
+  an irreducible wire race (now *attributed by `event_id`*, never suppressed by code) and a
+  single-slot tracker that was **silently skipping** cancels.
+- **#407** (#445) — five modules named a ReSpeaker the rig does not have.
+- **δ measured at last** (#451) — see below. The single biggest finding of the session.
+- **#439 closed**, all six criteria answered. AC-6 eliminated the servo rail.
+- **The M11 window stopped and O5 amended** (this PR).
 
-### The five findings worth more than the deliverables
+### The findings worth more than the deliverables
 
-⚠️ **1. A correction can land in one document and not its sibling, for months.** Writing §13 found
-three false claims in `SECURITY.md` — a model the project stopped using on 2026-08-01, `structlog`
-(imported nowhere, and **SDS §3.12.2 had already corrected the identical sentence in #378**), and
-`GET /facts` described as the audit when the route did not exist. None was a typo. Each was a
-literal that was right when written and never revisited.
+⚠️ **1. The robot was wedged in `THINKING` for 24 hours, and the soak could not see it (#452).**
+Three state transitions in a day; 147 of 175 log lines were `ignored illegal transition`. **Every
+graded criterion passed.** Found by reading logs while checking something else — the gate would
+have reported success for thirty days. *Uptime is satisfiable by a robot that does nothing*, which
+is M8's lesson in a new costume.
 
-⚠️ **2. The same scoping defect appeared three times in the doc guards.** Asking *"does this phrase
-appear anywhere in the file"* rather than *"is this claim right"*. Correct only while every subject
-is in the same state; the moment one route shipped and another had not, a surviving sentence about
-the second made the guard accuse the first. **Scope to the claim block** — paragraph, then bullet,
-then table row. Two of the three were caught only by neutering.
+⚠️ **2. The shipped keyword weight made the real embedder score exactly like the fake (#447).** At
+δ = 1.0, real MiniLM scored **0.66 / paraphrase 0.20** — identical to bag-of-words at every δ.
+`_fts_match` ORs every query token *including stopwords*, bm25 returns `top_k`, and each took a full
+`+1.0`, outranking facts the vector branch ranked **first**. At δ = 0.5: **0.86 / 1.00**. So every
+recall figure this project had ever recorded was measuring FTS5 and not the model. δ was labelled
+UNMEASURED in five places, each naming the tool that would settle it — and **that tool had never
+been run with a real embedder.**
 
-⚠️ **3. Across the session, 6 of ~42 neuters exposed guards of mine that could not fail.** A
-`uses:` regex that matched nothing so a third-party action could be inserted unnoticed; a
-"raises on a missing file" assertion `tarfile` satisfied by itself; an ordering test whose fixture
-made both orderings identical; a route check that searched the whole document. **Every one looked
-right when written.** The neuter step is not a formality, and when one comes back green the first
-suspect is the test.
+⚠️ **3. A hyphen had been costing a milestone criterion since the M7 seal (#450).** The model stored
+`"stand-up"`, the needle said `"standup"`, `_norm` folded whitespace but not punctuation — so a
+*correctly stored fact* scored as a recall miss. The `v0.M7.0` tag called it "a scoring artifact"
+and nobody filed it. **A measurement taken with a known-faulty instrument is not a measurement.**
 
-⚠️ **4. The `git checkout --` trap recurred with the memory already written.** A neuter harness
-restored a file to HEAD and destroyed the *uncommitted* fix it was proving. Knowing the rule was
-not enough — the harness now **refuses to start unless `git status --porcelain` is empty**, which
-is the only state in which its own restore is safe. Make the rule mechanical, not remembered.
+⚠️ **4. Fixing that broke the silence detector, and its own test caught it.** The announcement
+patterns contain apostrophes and were compared **un-normalised** against a normalised transcript —
+the same needle/haystack asymmetry, in reverse.
 
-⚠️ **5. A spec estimate can be wrong for a *good* reason.** §9.5 called the SSE tap "ten lines of
-code". It is not: dispatch is by **exact runtime type with no subclass fan-out** (§9.1.5) and
-**subscription is static** (§3.5.2), so a wildcard tap is impossible and the shape is forced — one
-tap, subscribed at composition time to every event type. Both decisions should stay. Say so in the
-PR rather than quietly shipping 200 lines against a line that says ten.
+⚠️ **5. Two neuters came back green, and both were real.** A `Path(...).is_absolute()` that cannot
+fail on Windows (rooted, no drive letter — it would have failed only in CI, for a reason nobody
+would have connected to it), and a corpus-consistency test that passes without the punctuation fix
+because `facts.json` never contained the hyphen — only what the *model* stored did. Both kept, both
+scoped honestly.
 
-### And one pattern that is now precedent
-
-**#207's AC-5 asked for the stall test "in the enclosure". There is no enclosure** — SDS §4.8 is an
-unwritten ToC entry, no WBS package, no issue, nothing planned. The criterion was **unsatisfiable,
-not unmet**, and left literal it would have blocked AC-11 forever on an artefact nobody is
-building.
-
-The resolution, which `PI_OPERATIONS.md` §7 already prescribed and nobody had applied: **amend on
-the issue, keep the original wording visible above the amendment, and give the deferred half a real
-owner** — here PMP's R-04 row, which already owns *"re-measure with a meter before #400 lands"*. Not
-a new issue for a phantom artefact; that is an owner in name only.
+⚠️ **6. I filed an issue that was wrong and closed it (#442).** I claimed `config/pi.toml` had
+drifted because `[adapters] embedder` was missing. It is missing **on purpose** —
+`PI_OPERATIONS.md` §3 says the template ships every device `"fake"` and that selecting real
+hardware is a provisioning act. **Read §3 before filing "the repo has drifted from the machine".**
+What survived was the real cause of my misreading: two keys named `embedder`, in one file, answering
+different questions.
 
 ### Closed, filed, merged
 
-**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21** · **#388** · **#385** · **#386**.
-**Filed:** **#428** (no capture indicator — out of §13.5) · #406 (O1 stale) · #407 (five modules say
-"ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**,
-**#427**, **#430**, **#431**, **#433**, **#434**, **#436**.
-
----
-
-## Current state
-
-- **`main = 7cd2238`**, zero open PRs. Suite **1866 passed / 67 skipped** on 3.11 and 3.13.
-- 📕 **`PI_OPERATIONS.md` §5c is the servo rig** — channel map, the four faults that all look like
-  success, the PCA9685 register read-back that locates one downstream of the chip, and why the
-  reach limits are still provisional.
-- 🔌 **The control API is complete** (#385, #386): `/health`, `/metrics`, `/state`,
-  `/facts`, `/events/stream`, `POST /quiet`. `curl -N 127.0.0.1:8787/events/stream` is the live
-  event feed — the fastest answer to *"is anything happening at all"* on a robot that looks stuck.
-  `GET /facts` is §7.10's audit; `?include_superseded=1` adds the history.
-- 📦 **A tag now builds a verified artifact** (#388 → #430/#431). `git push origin vX` runs
-  build → verify → publish, and **publish `needs:` verify**. Dry-run it any time with
-  `gh workflow run release.yml -f tag=v0.0.0-rc.1` — it builds and verifies and does **not**
-  publish. `docs/RELEASE.md` carries the decisions.
-- 🔐 **`SDS.md` §13 is now the security authority** (#21/#427) and `SECURITY.md` is the
-  operator-facing summary that defers to it. Do not add a rule to `SECURITY.md` without §13.
-- 📕 **`deploy/RUNBOOK.md` exists** (#387/#425) — symptom-first, thirteen entries, each Confirm /
-  Fix / **Not-to-be-confused-with**. Read it before diagnosing anything on the rig; it is now the
-  first stop and `PI_OPERATIONS.md` is the second. `tests/docs/test_runbook.py` keeps it honest.
-- ⏱️ **The M11 soak is RUNNING** — opened 2026-08-22T13:18:08Z, closes 2026-09-21T13:18:08Z, build
-  `v0.M10.0-47-g8d03690`. `robot` and `soak-sampler` both `active` + `enabled`.
-- **The robot moves under its own service** — that had never worked before 2026-08-22 (#413).
-- **M9 is 10/12, not sealed** — AC-10 (bench) then AC-11 (the tag). M10 sealed (`v0.M10.0`). Nine
-  of eleven milestones tagged.
-- ⚠️ **The two `tests/docs/` guards are load-bearing now.** They hold `RUNBOOK.md`, `SECURITY.md`
-  and SDS §9.5/§13 against the code — models against `config/pi.toml`, routes against `health.py`
-  **in both directions**, retention and deletion constants against the schema, the API key
-  unwrapped only at the composition root. **If you change a route or a constant, expect them to go
-  red; that is them working.**
-- ⚠️ **`build` is now the deployed commit**, not `0.0.0`. `git describe --always --dirty --tags`,
-  resolved once at startup. **`-dirty` means someone edited files on the machine.** A `0.0.0` on a
-  checkout means the resolver has regressed and §12.6's guard is inert again.
-- ⚠️ **The two config copies that are deliberately different** — the machine's quiet window is
-  `02:00→09:00` and `session_idle_close_s = 300`, against `config/pi.toml`'s `22:00→07:30` and
-  `30`. **Do not reconcile in either direction.** Every other differing key resolves to the same
-  value via schema defaults (checked).
-- ⚠️ **Both units are installed FROM the repo** and diff-verified identical, not hand-edited.
-  Backups at `robot.service.pre206.bak` / `.pre207.bak`.
-
-### Gotchas — the ones that cost something
-
-- ⚠️ **`uv run --frozen --exact mypy avid` reproduces CI exactly — AND UNINSTALLS 13 PACKAGES**,
-  numpy included, turning the suite **78 red**. Restore with
-  `uv sync --extra memory --extra openai` (name every extra). The previous baton recorded the
-  recipe without its cost.
-- ⚠️ **`git checkout -- <file>` reverts to HEAD, not to your uncommitted edits.** Neutering a guard
-  to prove a test bites destroyed the fix it was proving. **Commit first, then neuter, then
-  restore.**
-- ⚠️ **A test can pass while the property it names is violated.** The P8 "must not re-derive per
-  scrape" test asserted object identity — CPython interns short strings, so a deliberately
-  re-deriving provider stayed green. **The neuter step is what caught it.** Assert something the
-  bug cannot satisfy: break `subprocess.run` and scrape.
-- ⚠️ **Backticks inside a double-quoted `git commit -m` run as command substitution** and silently
-  gut the message. Use a heredoc.
-- ⚠️ **Git Bash `/tmp` and Windows `C:\tmp` are different directories.** A shell redirect wrote one,
-  Python read the other, and `gh issue edit --body-file` then re-posted an unmodified body while
-  looking like success. Verify after editing an issue body.
-- ⚠️ **Python 3.11 rejects same-quote nesting inside f-strings.** Bit twice over SSH. Ship a file.
-- ⚠️ **`pgrep -f <pattern>` matches the shell running it** — a wait-loop never exited.
-- ⚠️ **Piping to `tail` hides the exit code**; a traceback scrolls past and reads as success. A
-  probe "completed" having died on line one, and the operator watched a still robot. **Smoke-test
-  anything a human is asked to observe, before asking them to observe it.**
-- ⚠️ **`uv run --python 3.11` REBUILDS the main venv without the extras** and turns the suite
-  **79 red** in untouched files (`ModuleNotFoundError: numpy`). Run the second interpreter in a
-  throwaway environment and delete it:
-  `UV_PROJECT_ENVIRONMENT=.venv311 uv sync --dev --frozen --extra memory --python 3.11`.
-- ⚠️ **A neuter harness must refuse to run on a dirty tree.** Its own `git checkout --` is safe
-  only when `git status --porcelain` is empty — and it ate an uncommitted fix mid-proof here,
-  *with the rule already written down two lines above*.
-- ⚠️ **`mypy` reporting `numpy/__init__.pyi: Type statement is only supported in 3.12+` is a LOCAL
-  artifact**, not a failure: it appears when numpy is installed under a 3.11 target. CI's lint job
-  syncs with no extras, so numpy is absent there. Reproduce CI's answer (`uv sync --dev --frozen`)
-  before believing a mypy red.
-- ⚠️ **A docs-only PR shows NO checks, not green ones** — `ci.yml`'s `paths-ignore` skips
-  `**/*.md`. That is a **skip, not a pass**; run the suite locally and say so.
-- ⚠️ **`setsid` does not exist in Git Bash**, and a background app started from one Bash call is
-  not reachable as a job from the next. Start it in the same call you use it from, and stop it with
-  `taskkill //PID <pid> //F` — Windows will not deliver a graceful SIGTERM from here, so
-  `system.shutting_down` cannot be triggered this way.
-- ⚠️ **`avid-pico` fails host-key verification** — only `avid`, `avid.local` and `100.127.197.112`
-  are in `known_hosts`, and all three dropped for ~10 minutes mid-session while Tailscale wrongly
-  reported the node offline. Try all three before concluding anything.
+**Closed:** #439 (all six ACs) · #407 · #450 · #442 (invalid, mine).
+**Filed:** **#452** (the wedge — `prio:must`) · **#447** (90% recall) · **#450** · #443 · #442.
+**Merged:** #440, #441, #444, #445, #446, #448, #449, #451, #453 + this one.
+**Still open deliberately:** #415 (AC-3 needs the rig) · #264 (what the 2026-08-14 miss actually
+was) · #447 (O2's verdict — never met, and the bar was **not** widened).
 
 ## What shipped earlier (2026-08-20, M9)
 
@@ -444,6 +226,24 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A green gate can mean the instrument never looked.** The M11 soak passed every graded
+  criterion for 26 hours while the robot was wedged and doing nothing. Before trusting a gate, ask
+  what it asserts the *subject* did — not what it asserts about the process running it.
+- ⚠️ **`gh issue comment` / `pr create` with an inline `--body "..."` runs backticks as command
+  substitution** and silently guts the text. Bit **three times in one session** despite the
+  git-commit version of the rule being written down. **Always `--body-file`.**
+- ⚠️ **The Bash tool's heredoc eats backslash sequences even when quoted (`<<'PY'`).** A Python
+  script written that way gets `\n` collapsed, so string matches silently fail. Use the Write
+  tool for anything containing backslashes, or anchor on backslash-free substrings.
+- ⚠️ **Copying a live SQLite DB with `cat` gives a stale snapshot** — the WAL is a separate file.
+  Use `sqlite3.backup()` over SSH for a consistent copy.
+- ⚠️ **`ssh alisleiman0@AVID` and `avid.local` both stopped resolving mid-session.**
+  `100.127.197.112` (Tailscale) kept working. Try all three before concluding the Pi is down.
+- ⚠️ **Restating a default and calling it a name is drift.** `_EQUAL = ScoreWeights()  # α=β=γ=1`
+  inherited the shipped weights and called them "equal"; when δ moved to 0.5 the name became false
+  and three tests failed on arithmetic that was never the point. A test's reference constant
+  belongs to the test — spell it out.
 
 - ⚠️ **On a no-RTC Pi, two boots' wall clocks are not the same timeline, and subtracting across
   them looks exactly like a measurement.** The M11 soak's `samples` table has consecutive rowids
