@@ -72,7 +72,13 @@ dir = "assets/cues"             # committed 24 kHz mono clips (#88)
 
 [memory]
 db_path                = ".artifacts/sim.db"    # on-device SQLite; local, never synced
-embedder               = "local_minilm"
+embedder               = "local_minilm"   # WHICH real model -- NOT the fake-vs-real switch.
+# ^ That switch is `[adapters] embedder`, which is absent from this file ON PURPOSE: this template
+#   ships every device "fake" and selecting real hardware is a provisioning-time act
+#   (deploy/PI_OPERATIONS.md S3). So this line does NOT mean the robot embeds with MiniLM -- with
+#   `[adapters] embedder` unset it falls back to the schema default "fake" and this key is inert.
+#   The two axes are documented at avid/core/config.py:83-85; they are named identically and sit in
+#   one file, which is enough to misread and has been.
 dimensions             = 384
 top_k                  = 5
 recency_half_life_days = 14.0                    # §7.7

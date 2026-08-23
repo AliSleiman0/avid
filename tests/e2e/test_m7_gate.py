@@ -33,6 +33,7 @@ from avid.adapters.clock import SystemClock
 from avid.adapters.embedder import FakeEmbedder
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
+from avid.core.ports import Embedder
 from avid.domain import Fact
 
 _DEMO_MODULE = "avid_demo_memory_pi"
@@ -113,6 +114,7 @@ async def _store(
     transcript: str | None = "so, tell me more about that",
     supersede: tuple[str, str] | None = ("coffee", "I have switched to tea"),
     forget: str | None = "biscuit",
+    embedder: Embedder | None = None,
 ) -> Path:
     """Build a real store: insert ``facts``, optionally supersede a pair and delete a row.
 
@@ -123,7 +125,7 @@ async def _store(
     db_path = tmp_path / "m7.db"
     clock = SystemClock()
     repo = SqliteFactRepo(db_path=db_path, clock=clock)
-    embedder = FakeEmbedder(dimensions=384)
+    embedder = embedder or FakeEmbedder(dimensions=384)
     now = int(time.time())
     ids: dict[str, int] = {}
     try:
@@ -218,6 +220,7 @@ async def _run(
     *,
     phase: str = "recall",
     snapshot_before: dict[str, int | None] | None = "auto",  # type: ignore[assignment]
+    embedder: Embedder | None = None,
 ) -> list[Any]:
     """Drive one phase of the harness and return its criteria.
 
@@ -237,7 +240,7 @@ async def _run(
         retriever = _build_retriever(
             config,
             repo=repo,
-            embedder=FakeEmbedder(dimensions=384),
+            embedder=embedder or FakeEmbedder(dimensions=384),
             bus=bus,
             clock=clock,
         )
@@ -661,3 +664,221 @@ async def test_ac5_matches_the_row_by_id_not_by_text(tmp_path: Path) -> None:
         "the forgotten ROW is gone; a later row with the same wording is a different fact and "
         "must not be mistaken for it"
     )
+
+
+# --- #264 AC-2/AC-3: the proper-noun miss, against the embedder that actually produced it --------
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MODEL_DIR = _REPO_ROOT / "models"
+_MODEL = _MODEL_DIR / "all-MiniLM-L6-v2.onnx"
+_TOKENIZER = _MODEL_DIR / "tokenizer.json"
+
+_HOW_TO_RUN = (
+    "needs the real MiniLM blobs and onnxruntime. Run:\n"
+    "  python tools/fetch_minilm.py --dest ./models\n"
+    "  uv run --frozen --with onnxruntime --with tokenizers pytest -m real_embedder"
+)
+
+
+def _real_embedder() -> Embedder:
+    """`LocalMiniLmEmbedder` over the locally-fetched blobs, or skip saying exactly how to get them.
+
+    ⚠️ The skip reason names the two commands verbatim on purpose. A test nobody can work out how
+    to run is a test nobody runs, and this one is deselected by default — so the reason line is the
+    only documentation it has.
+    """
+    if not (_MODEL.is_file() and _TOKENIZER.is_file()):
+        pytest.skip(_HOW_TO_RUN)
+    try:
+        import onnxruntime  # noqa: F401
+        import tokenizers  # noqa: F401
+    except ImportError:
+        pytest.skip(_HOW_TO_RUN)
+    from avid.adapters.embedder import LocalMiniLmEmbedder
+
+    return LocalMiniLmEmbedder(model_path=_MODEL, tokenizer_path=_TOKENIZER)
+
+
+def _full_corpus() -> tuple[dict[str, Any], list[str]]:
+    """The shipped 20-fact M7 corpus, not a miniature.
+
+    ⚠️ The crowding is part of the defect. The original miss was against **18 live facts**, and
+    this issue's own suspicion was *"crowded out by a larger fact set"* — a four-fact store would
+    remove the very condition under test while looking like the same experiment.
+    """
+    spec = json.loads(
+        (_REPO_ROOT / "docs" / "demos" / "m7_evidence" / "facts.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return spec, [fact["say"] for fact in spec["facts"]]
+
+
+@pytest.mark.real_embedder
+async def test_the_two_probes_that_failed_the_m7_gate_hit_against_a_real_minilm_store(
+    tmp_path: Path,
+) -> None:
+    """#264's AC-2 and AC-3, judged on the two probes the issue actually names.
+
+    Both failed on the 2026-08-14 M7 gate run, from two different angles against the same fact:
+    `"what is the neighbour's dog called?"` (AC-2's recall probe) and `"tell me about Biscuit"`
+    (AC-3's proper-noun probe — the branch §7.7 built FTS5 for, *"where a vector alone fails"*).
+
+    ⚠️ **This cannot be tested with `FakeEmbedder`, which is why the issue sat open for nine days.**
+    The fake is bag-of-words over sha256-seeded token vectors, so "Biscuit" gets a clean,
+    well-separated vector and the query retrieves it on the vector branch alone — the miss is
+    *structurally* unreproducible there. `2777b1a` said exactly that in its own commit message
+    rather than ticking AC-2 on a green that meant nothing.
+
+    ⚠️ **Scoped to those two probes, deliberately.** The full recall phase scores **18/20 = 90%**
+    against this store, under O2's 19/20 bar — but the two misses are `guitar` and `marathon`,
+    neither of them this issue's, and both pure semantic inference with no lexical anchor for FTS5
+    to grip. Asserting the whole phase here would make #264 hostage to an unrelated defect; that
+    one is **#447**. Asserting *these* probes is what #264 asked for.
+    """
+    embedder = _real_embedder()
+    spec, facts = _full_corpus()
+    db = await _store(
+        tmp_path, facts=facts, supersede=None, forget=None, embedder=embedder
+    )
+    criteria = await _run(db, script=spec, phase="recall", embedder=embedder)
+
+    # AC-3's three semantic probes, including both proper-noun cases, are graded as their own
+    # criteria by the harness — so a miss on any of them is a named failure rather than a number.
+    semantic = [c for c in criteria if c.ac == "AC-3"]
+    assert semantic, (
+        "the harness reported no AC-3 criteria — this test is grading nothing"
+    )
+    assert [c.name for c in semantic if c.verdict == "fail"] == [], (
+        "a semantic probe missed against a real-MiniLM store"
+    )
+
+    # AC-2's own probe for the same fact, checked directly: the aggregate rate is #447's problem,
+    # this one row is #264's.
+    memory_pi = _load_memory_pi()
+    live = list(await SqliteFactRepo(db_path=db, clock=SystemClock()).fetch_live())
+    dog = next(d for d in spec["facts"] if d["key"] == "dog")
+    retrieved, _ = await _probe_one(db, spec, dog["probe"], dog["match"], embedder)
+    assert retrieved, (
+        f"{dog['probe']!r} still misses {dog['say']!r} — #264's AC-2 probe"
+    )
+    assert memory_pi is not None and live  # the store really was built
+
+
+@pytest.mark.real_embedder
+async def test_the_real_embedder_ranks_the_proper_noun_first_with_or_without_the_keyword_term(
+    tmp_path: Path,
+) -> None:
+    """⚠️ **The neuter that did not go the way it was written, and the finding is worth more.**
+
+    This was written to prove #375's keyword term (δ) is what retrieves "Biscuit" — set δ to zero,
+    watch the probe fail, conclude the fix bites. It does not fail. Measured over the 20-fact
+    corpus with the real MiniLM:
+
+    ========================================  =========  =========
+    probe                                     δ = 1.0    δ = 0.0
+    ========================================  =========  =========
+    ``tell me about Biscuit``                 rank **1**  rank **1**
+    ``what is the neighbour's dog called?``   rank **1**  rank **1**
+    ========================================  =========  =========
+
+    δ reshuffles the *tail* of the top-5 and never moves the target. So **the vector branch alone
+    retrieves this fact**, and §7.7's premise — *"proper nouns embed to mush"* — does not hold for
+    this fact and this model.
+
+    What follows, stated carefully:
+
+    * #264's two probes **pass** against a real-MiniLM store. That is what AC-2/AC-3 ask.
+    * But the original miss is **not reproduced** in this configuration, by any setting of δ. So
+      this suite cannot show *what* fixed it, and `2777b1a`'s causal claim is unsupported **for
+      this probe**. (#375 remains right that the FTS5 branch could not reach the score at all
+      before it — that is a separate, proven claim with its own δ tests in
+      ``tests/domain/test_memory.py``.)
+    * The leading hypothesis for 2026-08-14 is an **extraction** miss, not a retrieval one:
+      ``memory_pi._probe`` returns False when the fact was never stored — *"never stored ⇒ cannot
+      be recalled ⇒ a miss, per AC-2"* — so an absent fact is **indistinguishable** from a
+      retrieval failure in that harness, and it would explain both probes failing on the same fact
+      from two angles while the corpus's other probes passed. ⚠️ Unprovable now: that run's
+      ``recall_result.json`` was never committed, only ``facts.json`` was.
+
+    This test therefore asserts the measured truth rather than the expected one. It is a live
+    detector: if a change to the embedder or the ranking ever makes δ load-bearing here, this flips
+    and someone re-reads the paragraph above instead of inheriting a comfortable assumption.
+    """
+    embedder = _real_embedder()
+    spec, facts = _full_corpus()
+    db = await _store(
+        tmp_path, facts=facts, supersede=None, forget=None, embedder=embedder
+    )
+
+    from avid.adapters import HybridRetriever
+    from avid.domain.memory import ScoreWeights
+
+    config = _config(db)
+    clock = SystemClock()
+    bus = AsyncioEventBus(clock=clock)
+    await bus.start()
+    repo = SqliteFactRepo(db_path=db, clock=clock)
+    try:
+        live = list(await repo.fetch_live())
+        expected = next(f for f in live if "biscuit" in f.text.lower()).id
+
+        async def _rank(query: str, keyword: float) -> int | None:
+            retriever = HybridRetriever(
+                repo=repo,
+                embedder=embedder,
+                bus=bus,
+                clock=clock,
+                weights=ScoreWeights(keyword=keyword),
+                top_k=config.memory.top_k,
+                half_life_days=config.memory.recency_half_life_days,
+            )
+            await retriever.rebuild()
+            ids = list(await retriever.retrieve(query))
+            return ids.index(expected) + 1 if expected in ids else None
+
+        for query in ("tell me about Biscuit", "what is the neighbour's dog called?"):
+            with_delta = await _rank(query, 1.0)
+            without = await _rank(query, 0.0)
+            assert with_delta == 1, f"{query!r} no longer ranks the fact first (δ=1)"
+            assert without == 1, (
+                f"{query!r} now DEPENDS on δ (rank {without} without it). That is a change from "
+                "the 2026-08-23 measurement, where the vector branch carried this alone — re-read "
+                "this test's docstring before treating it as a pass."
+            )
+    finally:
+        await repo.aclose()
+        await bus.stop()
+
+
+async def _probe_one(
+    db_path: Path,
+    spec: dict[str, Any],
+    query: str,
+    needles: list[str],
+    embedder: Embedder,
+) -> tuple[bool, float]:
+    """Run ONE probe through the production retriever and say whether it reached the fact.
+
+    Uses `memory_pi._probe`, the same function the gate grades with, so this cannot drift from the
+    harness by paraphrasing it.
+    """
+    memory_pi = _load_memory_pi()
+    config = _config(db_path)
+    clock = SystemClock()
+    bus = AsyncioEventBus(clock=clock)
+    await bus.start()
+    repo = SqliteFactRepo(db_path=db_path, clock=clock)
+    try:
+        from avid.main import _build_retriever
+
+        facts = list(await repo.fetch_live())
+        retriever = _build_retriever(
+            config, repo=repo, embedder=embedder, bus=bus, clock=clock
+        )
+        await retriever.rebuild()
+        return await memory_pi._probe(retriever, query, facts, needles)
+    finally:
+        await repo.aclose()
+        await bus.stop()
