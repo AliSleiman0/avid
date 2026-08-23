@@ -94,7 +94,9 @@ def test_every_recorded_grade_command_enters_the_working_directory() -> None:
         recorded.extend((f"{path.name}:{i}", b) for i, b in enumerate(blocks))
 
     for where, command in recorded:
-        assert _GRADE_CALL.search(command), f"{where} is not the grade invocation any more"
+        assert _GRADE_CALL.search(command), (
+            f"{where} is not the grade invocation any more"
+        )
         prefix = command.split("soak_pi.py")[0]
         assert f"cd {workdir}" in prefix, (
             f"{where} invokes soak_pi.py --mode grade without first entering {workdir}.\n"
@@ -124,7 +126,9 @@ def test_the_cd_is_still_load_bearing_for_the_reason_the_docs_give() -> None:
     # green through a neuter that made the personality path absolute: a guard that could not fail
     # on the machine it was written on, and would have failed only in CI, for a reason nobody
     # would have connected to this. The neuter step is what caught it (CLAUDE.md §7.1).
-    personality = tomllib.loads(_PI_CONFIG_PATH.read_text(encoding="utf-8"))["ai"]["personality"]
+    personality = tomllib.loads(_PI_CONFIG_PATH.read_text(encoding="utf-8"))["ai"][
+        "personality"
+    ]
     assert not PurePosixPath(personality).is_absolute(), (
         f"[ai] personality is now absolute ({personality!r}); SDS §6.5's relative-path resolution "
         "is no longer what makes the working directory matter. Re-read the note beside the "
@@ -141,11 +145,15 @@ def test_the_recorded_command_grades_the_window_the_record_declares() -> None:
     window = json.loads(_WINDOW_PATH.read_text(encoding="utf-8"))
     declared = int(window["window_start_epoch"])
 
-    sources: list[tuple[str, str]] = [("window.json:grade_command", window["grade_command"])]
+    sources: list[tuple[str, str]] = [
+        ("window.json:grade_command", window["grade_command"])
+    ]
     for path in (_README_PATH, _HANDOFF_PATH):
         sources.extend(
             (f"{path.name}:{i}", b)
-            for i, b in enumerate(_fenced_grade_blocks(path.read_text(encoding="utf-8")))
+            for i, b in enumerate(
+                _fenced_grade_blocks(path.read_text(encoding="utf-8"))
+            )
         )
 
     for where, command in sources:
@@ -160,5 +168,12 @@ def test_the_recorded_command_grades_the_window_the_record_declares() -> None:
 def test_the_durable_record_is_readable() -> None:
     """It is committed to be read by whoever inherits this, possibly without the Pi."""
     window = json.loads(_WINDOW_PATH.read_text(encoding="utf-8"))
-    for key in ("window_start_epoch", "window_end_epoch", "build_under_test", "grade_command"):
-        assert key in window, f"window.json lost {key}, which the gate cannot be reconstructed without"
+    for key in (
+        "window_start_epoch",
+        "window_end_epoch",
+        "build_under_test",
+        "grade_command",
+    ):
+        assert key in window, (
+            f"window.json lost {key}, which the gate cannot be reconstructed without"
+        )
