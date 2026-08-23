@@ -125,6 +125,12 @@ _ADDED_COLUMNS = {
     # report them, which is a different fact from zero (#380) and stays distinguishable here.
     "rss_bytes": "INTEGER",
     "mem_available_bytes": "INTEGER",
+    # What the robot was DOING, not merely whether it was up (#452). `state` is `GET /state`'s
+    # RobotState name; `transitions` is the cumulative count from `GET /metrics`, which is
+    # process-scoped and therefore resets on restart — see `_liveness_criterion` for why the pair
+    # is needed and neither alone is enough.
+    "state": "TEXT",
+    "transitions": "INTEGER",
 }
 
 
@@ -170,6 +176,8 @@ def _probe(base: str, timeout: float) -> dict[str, Any]:
             "dropped": None,
             "rss_bytes": None,
             "mem_available_bytes": None,
+            "state": None,
+            "transitions": None,
             "payload": None,
         }
 
@@ -180,10 +188,26 @@ def _probe(base: str, timeout: float) -> dict[str, Any]:
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
         payload = None
 
+    # #452: the third route, and the one that says whether the robot is doing anything. A build
+    # too old to serve `/state` — or one whose provider landed in `absent` — records NULL, which
+    # `_liveness_criterion` reports as ABSENT rather than reading as a robot that never moved.
+    # Its own try/except because a route that 404s must not cost us `/metrics`.
+    reading: dict[str, Any] | None = None
+    try:
+        with urllib.request.urlopen(f"{base}/state", timeout=timeout) as response:
+            reading = json.loads(response.read())
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        reading = None
+
     metrics = (payload or {}).get("metrics", {})
     queues = metrics.get("bus_queues") or {}
     return {
         "reachable": reachable,
+        # `.get` on both: `/state` names an unreadable field in `absent` rather than defaulting it,
+        # so a missing key here is the robot saying it could not answer — which is a different
+        # fact from IDLE, and the whole reason `/state` was built that way.
+        "state": (reading or {}).get("state"),
+        "transitions": metrics.get("transitions"),
         "build": metrics.get("build"),
         "uptime_s": metrics.get("uptime_s"),
         # Absent stays absent: if the robot did not report queues, this is None and not 0 (#380).
@@ -204,8 +228,9 @@ def _sample_once(conn: sqlite3.Connection, base: str, timeout: float) -> dict[st
     with conn:
         conn.execute(
             "INSERT INTO samples "
-            "(at, reachable, build, uptime_s, dropped, rss_bytes, mem_available_bytes, payload) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "(at, reachable, build, uptime_s, dropped, rss_bytes, mem_available_bytes, "
+            "state, transitions, payload) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 int(time.time()),
                 1 if observation["reachable"] else 0,
@@ -214,6 +239,8 @@ def _sample_once(conn: sqlite3.Connection, base: str, timeout: float) -> dict[st
                 observation["dropped"],
                 observation["rss_bytes"],
                 observation["mem_available_bytes"],
+                observation["state"],
+                observation["transitions"],
                 observation["payload"],
             ),
         )
@@ -231,8 +258,13 @@ def _run_sampler(args: argparse.Namespace) -> int:
         while deadline is None or time.monotonic() < deadline:
             observation = _sample_once(conn, base, args.timeout)
             mark = "up  " if observation["reachable"] else "DOWN"
+            # The state rides the live line too (#452). Not because the grade pass needs it — it
+            # reads the database — but because the wedge that voided the first window was found
+            # by a human reading logs, and `up up up up` for an hour looks identical whether the
+            # robot is conversing or catatonic.
             _say(
-                f"  {time.strftime('%Y-%m-%d %H:%M:%S')}  {mark}  build={observation['build']}"
+                f"  {time.strftime('%Y-%m-%d %H:%M:%S')}  {mark}  "
+                f"build={observation['build']}  state={observation['state'] or '?'}"
             )
             time.sleep(args.interval)
     except KeyboardInterrupt:  # pragma: no cover - operator stop
@@ -441,6 +473,312 @@ def _memory_criterion(samples: list[sqlite3.Row]) -> _Criterion:
         "recorded",
         "a rising delta is not by itself a leak - lazy model loads, page cache and glibc "
         "arenas all move it. Look for a trend that never flattens.",
+        rows=rows,
+    )
+
+
+# ── LIVE: was the robot DOING anything (#452 AC-4) ───────────────────────────────────────────
+#
+# The criterion this harness was missing, and the reason its first window was void. For ~26 hours
+# it graded a robot that entered THINKING at minute 3 and never left: 147 of the process's 175 log
+# lines were `ignored illegal transition ... in state THINKING`, and AC-2 read **99.89% uptime**
+# with every graded criterion passing. Every instrument here measured the *process* — heartbeat,
+# RSS, watchdog, queue drops — and all of those are satisfied by a robot doing nothing at all.
+# That is M8's lesson in a new costume (a vision gate passed while blind), and a window that
+# cannot tell a working robot from a catatonic one is not evidence for O5 at any duration.
+#
+# ⚠️ **Neither available signal is sufficient alone, and the reason is worth keeping.**
+#
+# * `GET /state` gives the state at each sample. But identical readings 60 s apart do NOT prove
+#   the state was *held*: a talking robot cycles THINKING -> SPEAKING -> IDLE -> LISTENING ->
+#   THINKING between two samples and looks exactly like a wedged one.
+# * `/metrics`' `transitions` counter proves movement. But it is cumulative and process-scoped, so
+#   it resets on restart, and a low count is ambiguous on its own — an empty house at 3 a.m.
+#   legitimately produces none.
+#
+# Together they are conclusive: a run of consecutive samples reading the same state **with the
+# transitions counter unchanged across the whole run** proves the machine did not move for the
+# span of that run. That conjunction is what this grades.
+
+# The states the design says are TRANSIENT, and what bounds each. A value of None means "no bound
+# exists to grade against" — reported, never graded, because inventing a bar here would be a bar
+# nobody agreed to (and §12.6's own rule is that this file computes O5's terms, it does not
+# re-decide them).
+#
+# ⚠️ LISTENING is None for a reason worth printing rather than hiding: SDS §3.10.3 documents a
+# 30 s listen timeout and `Trigger.LISTEN_TIMEOUT` is **unwired** — the row exists and nothing
+# drives it, which is the exact shape #452 was (a row that existed, reachable from one arc only).
+# When it gains a driver and a config key, it belongs in this table.
+_TRANSIENT_STATES: dict[str, str | None] = {
+    # The §6.9 first-token deadline. Read from config, never restated (§7.1).
+    "THINKING": "think_timeout_s",
+    "LISTENING": None,  # Trigger.LISTEN_TIMEOUT is unwired — see above
+    "SPEAKING": None,  # bounded by the reply's own length, which is not a config value
+    "BOOTING": None,  # bounded by adapter start-up, which nothing states as a number
+}
+
+# Not transient, and not a fault: SDS §12.6 is explicit that **a SLEEPING robot is UP**, and IDLE
+# is where a companion spends most of a quiet night. Held for hours legitimately, so held-time is
+# reported for them and never graded. DEGRADED is neither — recovery is rising-edge driven (§6.9),
+# so a robot alone in a room stays degraded until someone speaks, and that can honestly be hours.
+_RESTING_STATES = ("IDLE", "SLEEPING", "DEGRADED")
+
+
+@dataclass(frozen=True, slots=True)
+class _StateRun:
+    """A stretch of consecutive samples that read the same state and PROVABLY did not move.
+
+    ``proven`` is the whole point. A run is proven only when every consecutive pair inside it
+    reported the ``transitions`` counter and reported it **unchanged** — that is what separates
+    "the machine sat here" from "the machine cycled between our samples". An unproven run is still
+    printed; it simply cannot fail anything, because it does not establish what it would fail on.
+    """
+
+    state: str
+    first_at: int
+    last_at: int
+    samples: int
+    proven: bool
+    # The robot's own uptime delta across the run, when it reported uptime at both ends. Preferred
+    # over the `at` delta because it is immune to the wall clock this board cannot be trusted with
+    # (#439) — within one process it only ever counts forward.
+    held_by_uptime_s: int | None
+
+    @property
+    def held_s(self) -> int:
+        """How long the state was held, by the most trustworthy reading available."""
+        if self.held_by_uptime_s is not None:
+            return self.held_by_uptime_s
+        return self.last_at - self.first_at
+
+    @property
+    def from_wall_clock(self) -> bool:
+        """Did :attr:`held_s` come from the untrusted wall clock? Then say so beside the number."""
+        return self.held_by_uptime_s is None
+
+
+def _state_runs(samples: Sequence[sqlite3.Row], *, gap_bound: float) -> list[_StateRun]:
+    """Split the window into maximal runs of "the same state, provably not moving".
+
+    A run is broken by anything that makes "it stayed here" unsafe to claim:
+
+    * the state changed, or a sample did not report one;
+    * the ``transitions`` counter moved — the robot cycled through other states between two
+      samples, which is a *working* robot and must never be graded as a stuck one;
+    * the process restarted (``build`` changed, or ``uptime_s`` fell) — a new process is a new
+      subject, and its counter starts again from zero;
+    * the sampler was not looking (a gap wider than AC-0's own bound). Anything could have
+      happened in a hole, so a run cannot be claimed across one. ⚠️ This direction matters: not
+      splitting would *overstate* held time and could fail a healthy robot on the sampler's outage.
+    """
+    runs: list[_StateRun] = []
+    start: sqlite3.Row | None = None
+    previous: sqlite3.Row | None = None
+    count = 0
+    proven = True
+
+    def _flush() -> None:
+        if start is None or previous is None or count < 2:
+            # A single sample is a reading, not a duration: it establishes no held time at all.
+            return
+        held: int | None = None
+        if start["uptime_s"] is not None and previous["uptime_s"] is not None:
+            held = int(previous["uptime_s"]) - int(start["uptime_s"])
+        runs.append(
+            _StateRun(
+                state=str(start["state"]),
+                first_at=int(start["at"]),
+                last_at=int(previous["at"]),
+                samples=count,
+                proven=proven,
+                held_by_uptime_s=held,
+            )
+        )
+
+    for row in samples:
+        state = row["state"]
+        if state is None:
+            _flush()
+            start = previous = None
+            count = 0
+            proven = True
+            continue
+        if previous is not None and _continues(previous, row, gap_bound=gap_bound):
+            count += 1
+            proven = proven and _proves_stillness(previous, row)
+            previous = row
+            continue
+        _flush()
+        start = previous = row
+        count = 1
+        proven = True
+    _flush()
+    return runs
+
+
+def _continues(previous: sqlite3.Row, row: sqlite3.Row, *, gap_bound: float) -> bool:
+    """Can *row* extend a run that *previous* is in? Same state, same process, no unobserved hole."""
+    if previous["state"] != row["state"]:
+        return False
+    if previous["build"] != row["build"]:
+        return False
+    if previous["uptime_s"] is not None and row["uptime_s"] is not None:
+        # A fall means a new process. A rise means the same one lived through the step — the same
+        # reading `_ClockStep.robot_restarted` uses, and for the same reason (#439).
+        elapsed = int(row["uptime_s"]) - int(previous["uptime_s"])
+        if elapsed < 0:
+            return False
+        # ⚠️ The gap test runs on the ROBOT's clock when it can. `at` is the column #439 caught
+        # going backwards between consecutive writes, and a backwards step followed by a forward
+        # one would chop a real run in half — under-reporting exactly the held time this grades.
+        # `uptime_s` measures the same elapsed seconds and cannot do that within one process.
+        return elapsed <= gap_bound
+    return int(row["at"]) - int(previous["at"]) <= gap_bound
+
+
+def _proves_stillness(previous: sqlite3.Row, row: sqlite3.Row) -> bool:
+    """Did the machine demonstrably NOT move between these two samples?
+
+    Only when both reported ``transitions`` and the count is identical. An absent counter proves
+    nothing either way — and reading absent as "unchanged" would manufacture a wedge out of a
+    build too old to report it, which is #380's rule pointed at the grader instead of the sampler.
+    """
+    if previous["transitions"] is None or row["transitions"] is None:
+        return False
+    return int(previous["transitions"]) == int(row["transitions"])
+
+
+def _transition_total(samples: Sequence[sqlite3.Row]) -> int | None:
+    """How many state changes the window saw, summed across processes. ``None`` if never reported.
+
+    The counter is process-scoped, so a restart resets it: the window's total is the sum of the
+    per-process *rises*, and a fall is a new process rather than a negative count.
+    """
+    counts = [int(r["transitions"]) for r in samples if r["transitions"] is not None]
+    if not counts:
+        return None
+    total = counts[0]
+    for before, after in zip(counts, counts[1:]):
+        total += after - before if after >= before else after
+    return total
+
+
+def _liveness_criterion(
+    samples: Sequence[sqlite3.Row],
+    *,
+    bounds: dict[str, float],
+    interval: float,
+    gap_bound: float,
+) -> _Criterion:
+    """LIVE — did the robot ever do anything, and did it hold a state it promises it cannot (#452).
+
+    **Graded**, unlike MEM and CLOCK, and the bar is defensible precisely because it is not
+    invented here: a transient state has a bound the design already states, in config, and
+    exceeding it is a defect the state machine promises cannot happen. THINKING's bound is
+    ``[gate] think_timeout_s`` — the §6.9 deadline — and the wedge that voided the first window
+    exceeded it by a factor of **8,600**.
+
+    One sampling interval of slack is added to every bound, and printed. The sampler sees the
+    machine at its own cadence, so a state entered just after one sample and left just before the
+    next is indistinguishable from one held the whole time; the slack is that uncertainty made
+    explicit rather than argued away.
+
+    ⚠️ **Verdict `inconclusive`, never `pass`, when the robot did not report `/state` or
+    `transitions`.** A window with no state series did not establish liveness — it is exactly the
+    catatonic case that produced 99.89% uptime, read through an instrument that was not there. A
+    `0` from an absent instrument reads exactly like a real `0`, which is this project's most
+    expensive recurring defect.
+
+    ⚠️ **The transition count is reported, not graded**, and that asymmetry is deliberate. A
+    minimum count cannot be defended: an empty house produces no transitions, and a criterion that
+    fails because nobody came home is a criterion people learn to ignore. What *can* be defended is
+    the bounded state, which is why that is the half with teeth.
+    """
+    stated = [r for r in samples if r["state"] is not None]
+    total_transitions = _transition_total(samples)
+    if not stated:
+        return _Criterion(
+            "LIVE",
+            "the robot was doing something (#452)",
+            "inconclusive",
+            f"no sample in {len(samples)} reported a state — GET /state answered nothing. "
+            f"ABSENT, not idle: check that the build under test carries #385's /state route and "
+            f"that `state` is not listed in the response's `absent`. A window with no state "
+            f"series cannot tell a working robot from a wedged one, which is the whole of #452.",
+        )
+
+    runs = _state_runs(stated, gap_bound=gap_bound)
+    seen = sorted({str(r["state"]) for r in stated})
+    rows: list[str] = [
+        f"states seen     {', '.join(seen)}  (n={len(stated)} samples reported a state, "
+        f"{len(samples) - len(stated)} did not)",
+        f"transitions     {total_transitions if total_transitions is not None else 'ABSENT'}"
+        f"  (reported, not graded — an empty house legitimately produces none)",
+    ]
+
+    longest: dict[str, _StateRun] = {}
+    for run in runs:
+        current = longest.get(run.state)
+        if current is None or run.held_s > current.held_s:
+            longest[run.state] = run
+    for state in sorted(longest):
+        run = longest[state]
+        source = "wall clock" if run.from_wall_clock else "robot uptime"
+        proof = "proven still" if run.proven else "NOT proven still"
+        rows.append(
+            f"longest {state:<9} {run.held_s}s over {run.samples} samples "
+            f"({source}, {proof})"
+        )
+
+    # Only a proven run can fail anything: an unproven one has not established that the machine
+    # stayed put, and failing on it would be convicting on the absence of evidence.
+    breaches = [
+        (run, bounds[run.state])
+        for run in runs
+        if run.proven
+        and run.state in bounds
+        and run.held_s > bounds[run.state] + interval
+    ]
+    for run, bound in breaches[:10]:
+        rows.append(
+            f"!! {run.state} held {run.held_s}s at {run.first_at} — its bound is {bound:g}s "
+            f"(+{interval:g}s sampling slack). The machine did not move for the whole run."
+        )
+    if len(breaches) > 10:
+        rows.append(
+            f"... and {len(breaches) - 10} more not listed — the count above is the whole figure"
+        )
+
+    gradeable = {state: bounds[state] for state in _TRANSIENT_STATES if state in bounds}
+    ungraded = [state for state, key in _TRANSIENT_STATES.items() if key is None]
+    rows.append(
+        f"graded bounds   {gradeable}  (+{interval:g}s slack); no bound exists for "
+        f"{', '.join(ungraded)}, so those are reported only"
+    )
+    rows.append(
+        f"resting states  {', '.join(_RESTING_STATES)} are never graded on held time — S12.6 is "
+        f"explicit that a SLEEPING robot is UP"
+    )
+
+    if total_transitions is None:
+        return _Criterion(
+            "LIVE",
+            "the robot was doing something (#452)",
+            "inconclusive",
+            "the robot reported states but no `transitions` counter, so no run can be PROVEN "
+            "still: identical readings 60s apart are equally consistent with a wedged robot and "
+            "a talking one. ABSENT, not zero.",
+            rows=rows,
+        )
+    return _Criterion(
+        "LIVE",
+        "the robot was doing something (#452)",
+        "fail" if breaches else "pass",
+        f"{len(breaches)} breach(es) of a designed bound across {len(runs)} run(s) of >=2 "
+        f"samples in one state"
+        if breaches
+        else f"no transient state was provably held past its bound, across {len(runs)} run(s) "
+        f"of >=2 samples in one state",
         rows=rows,
     )
 
@@ -825,6 +1163,25 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
     # still the one failure class thirty days can find and fifteen minutes cannot, so the number
     # gets printed either way.
     criteria.append(_memory_criterion(samples))
+
+    # ── LIVE: was the robot doing anything (#452 AC-4) — GRADED ───────────────────────────────
+    #
+    # Beside MEM and for the same structural reason: it depends only on `samples`, so it reports
+    # before the boot_log early-return below. Unlike MEM it is graded, and the bar is read from
+    # config rather than stated here — `[gate] think_timeout_s` is the §6.9 deadline, and a
+    # THINKING run that outlives it is a wedge by the state machine's own definition.
+    criteria.append(
+        _liveness_criterion(
+            samples,
+            bounds={
+                state: float(getattr(config.gate, key))
+                for state, key in _TRANSIENT_STATES.items()
+                if key is not None
+            },
+            interval=args.interval,
+            gap_bound=bound,
+        )
+    )
 
     records = _boot_records(args.robot_db, since, until)
     if not records:

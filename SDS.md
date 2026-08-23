@@ -3787,6 +3787,37 @@ For M11's gate (AVID-389) they mean:
 - **Numerator** — seconds in which the robot process was up. **A SLEEPING robot is UP.** SLEEPING
   is an operational state the design intends (§3.10, M8's nap), not an absence; grading it as
   downtime would penalise the feature.
+- **Liveness — the robot must be DOING something, not merely running (AVID-452).** Uptime is a
+  property of the *process*, and every instrument this harness had measured the process:
+  heartbeat, RSS, watchdog, queue drops. All of them are satisfied by a robot that has done
+  nothing since minute 3, which is exactly what the void window graded at **99.89%**. The
+  **`LIVE`** criterion closes that, and it is graded rather than reported, because the bar is not
+  invented here: a **transient** state has a bound the design already states, and exceeding it is
+  a defect the state machine promises cannot happen. THINKING's bound is `[gate] think_timeout_s`
+  — §6.9's deadline — read from config, never restated.
+
+  > ⚠️ **Neither available signal is sufficient alone.** `GET /state` gives the state per sample,
+  > but two identical readings 60 s apart do *not* prove the state was held: a conversing robot
+  > cycles THINKING → SPEAKING → IDLE → LISTENING → THINKING between samples and looks exactly
+  > like a wedged one. `GET /metrics`' `transitions` counter proves movement, but it is cumulative
+  > and process-scoped, and a low count is ambiguous — an empty house legitimately produces none.
+  > **Together they are conclusive:** a run of consecutive samples reading one state with the
+  > counter unchanged across the whole run proves the machine did not move.
+
+  What `LIVE` deliberately will **not** do, because a criterion that cries wolf is one people
+  rerun without reading: it does not fail the robot for its *observer's* outage (runs split at
+  AC-0's own gap bound), for a restart, or for a build change; it does not grade held time on
+  IDLE, SLEEPING or DEGRADED (a SLEEPING robot is UP, and recovery from DEGRADED is rising-edge
+  driven, so a robot alone in a room stays degraded until someone speaks); and it does not invent
+  a bound for LISTENING, SPEAKING or BOOTING. ⚠️ **LISTENING's absence is itself reported**:
+  §3.10.3 documents a 30 s listen timeout and `Trigger.LISTEN_TIMEOUT` is **unwired** — a row that
+  exists with nothing driving it, which is precisely the shape AVID-452 was.
+
+  ⚠️ **No state series, or no counter, is `INCONCLUSIVE` and never a pass.** A clean liveness
+  figure from an instrument that was not there is the void window in a new costume, and a `0` from
+  an absent instrument reads exactly like a real `0`. Durations come from the robot's own
+  `uptime_s` rather than from `at`, for the reason the next bullet gives.
+  Held to bite, not merely present: `tests/demos/test_soak_liveness.py`.
 - **Down** — the interval between a boot record's last heartbeat and the next boot record's start.
   Bounded by the heartbeat interval, which is why the bound is stated with the result rather than
   hidden: downtime is known only to within one heartbeat.

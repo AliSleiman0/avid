@@ -59,8 +59,21 @@ genuinely healthy — heartbeating, RSS flat, zero bus drops, watchdog satisfied
 is true and is not evidence for O5.** A thirty-day window that cannot distinguish a working robot
 from a catatonic one is not a soak.
 
-⚠️ And `soak_pi.py` **has no liveness criterion** — nothing here asserts the robot ever changed
-state, took a turn or moved. That is the M8 lesson verbatim, and it is #452 AC-4.
+⚠️ And `soak_pi.py` **had no liveness criterion** — nothing here asserted the robot ever changed
+state, took a turn or moved. That is the M8 lesson verbatim, and it was #452 AC-4.
+
+> ✅ **Closed.** `soak_pi.py` now grades a **`LIVE`** criterion (SDS §12.6): it records `GET /state`
+> and `/metrics`' `transitions` counter per sample, and **fails** the run when a transient state is
+> *provably* held past the bound the design states for it — THINKING against `[gate]
+> think_timeout_s`, read from config. Provably is the load-bearing word: identical state readings
+> 60 s apart are equally consistent with a wedged robot and a conversing one, so a run counts only
+> when the transitions counter stood still across all of it. A window with no state series, or no
+> counter, is **INCONCLUSIVE and never a pass** — a clean liveness figure from an instrument that
+> was not there would be this window all over again.
+>
+> Run against *this* window's database it would report `INCONCLUSIVE`, not `FAIL`: the build under
+> test predates the columns, so nothing here was recorded. That is the honest answer. **The wedge
+> is evidenced above, by the journal, not by a criterion that could not see it.**
 
 ## Grading it
 
