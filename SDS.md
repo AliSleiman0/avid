@@ -3628,7 +3628,12 @@ failure — a wet boot, a slow USB enumeration, a network stack not yet up — i
 off until a human notices, which is a worse outcome for a companion than restarting forever. The
 correct answer to a crash loop is not to stop restarting; it is to **notice**. Noticing is what
 was missing, and AVID-379's restart accounting plus `GET /metrics` is what supplies it: an
-unplanned-restart count is a first-class metric, and O5 grades it (§12.6).
+unplanned-restart count is a first-class metric, **reported by O5's gate and not graded by it**
+(§12.6). ⚠️ This sentence read *"and O5 grades it"* until 2026-08-23, which §12.6 and §12.6.1 both
+contradict — O5's criteria are uptime and zero **manual** restarts, and §12.6 is explicit that an
+unclean stop is not manual. Corrected rather than quietly restated, because a rule that is right in
+one section and wrong in its sibling is the defect §13 found three times in `SECURITY.md`: each was
+true when written and never revisited.
 
 A wedge is distinct from a crash: `WATCHDOG=1` stops arriving, systemd kills at `WatchdogSec`, and
 `Restart=always` brings it back (~30 s). `deploy/README.md` verifies both paths.
@@ -3735,6 +3740,28 @@ For M11's gate (AVID-389) they mean:
   independently.
 - **Watchdog restarts are not manual, and are not free.** Zero is the expectation; any occurrence
   is a finding with its own issue.
+- **A second unplanned stop does not end the window (AVID-439 AC-5, decided 2026-08-23).** Decided
+  *before* a second one occurred, because deciding it afterwards is how a window gets quietly
+  restarted to make a number look better. One unplanned stop is already inside the M11 window (a
+  hard power loss, 22 minutes in). The rule:
+
+  > **The window continues. AC-3b keeps reporting the count, and each occurrence is still a finding
+  > with its own issue.** O5's bars are ≥99% uptime and zero *manual* restarts; an unclean stop is
+  > neither, as the bullet above defines it. Ending a window on a criterion **O5 does not contain**
+  > would be inventing a bar mid-run, which is precisely what the closing rule of this section
+  > forbids — and it would do it in the direction that flatters us, since a restarted window is one
+  > whose failures have been discarded.
+
+  ⚠️ **This is not permission to ignore them, and the arithmetic is where that bites.** The
+  permitted downtime is **7 h 12 m across the whole thirty days** and `deploy/RUNBOOK.md` §4.0 is
+  right that the costs are *cumulative and unrecoverable*. Each stop spends uptime and AC-0
+  coverage. A handful of them fails this window **on AC-2** — honestly, on a bar that was agreed in
+  advance, which is the only kind of failure worth having.
+
+  ⚠️ **The verdict is binary; the count is what a reader acts on.** One stop and thirty both read
+  `fail`, so the *number* is the signal, and `docs/demos/soak_pi.py` prints it in the detail line
+  and says so when the row list is capped. A count that silently truncated would break this
+  section's own rule from the inside.
 
 ⚠️ **If O5 is missed, report the number.** Widening a target to fit a measurement is a last resort,
 taken only with the diagnosis attached, and the original target stays visible in the report — or it

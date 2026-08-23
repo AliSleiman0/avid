@@ -776,3 +776,48 @@ def test_an_unreadable_boot_log_cannot_stop_the_clock_line_from_reporting(
     dressed up.
     """
     assert soak._boot_mono_starts(str(tmp_path / "does-not-exist.db")) == []
+
+
+# --- #439 AC-5: the count is what a reader acts on, so it must survive the row cap ---------------
+
+
+def test_more_unplanned_stops_than_the_row_cap_still_report_the_whole_count(
+    tmp_path: Path,
+) -> None:
+    """⚠️ The decision makes the count load-bearing, so the report must not quietly drop part of it.
+
+    #439 AC-5 decided that a second unplanned stop does **not** end the window: AC-3b keeps
+    reporting the count and O5 is still decided by uptime and manual restarts. That makes the
+    *number* the signal — the verdict is binary, so one stop and thirty read `fail` alike.
+
+    The rows are capped at ten. Without a truncation line an eleventh stop is simply absent from
+    the report, which is this harness's own rule — *report the quantity you grade* — broken from
+    the inside, in a gate whose whole subject is measurement honesty.
+    """
+    stops = 13
+    boots = [
+        {
+            "boot_id": f"boot-{i:02d}",
+            "started_at": _SINCE + i * _DAY,
+            "last_seen_at": _SINCE + i * _DAY + 3600,
+        }
+        for i in range(stops)
+    ]
+    # A final, still-running record so the last row is not carved out as "still running".
+    boots.append(
+        {
+            "boot_id": "still-running",
+            "started_at": _SINCE + stops * _DAY,
+            "last_seen_at": _UNTIL,
+        }
+    )
+    ac3b = _by_ac(
+        soak._grade(_args(_samples_db(tmp_path, _dense()), _robot_db(tmp_path, boots)))
+    )["AC-3b"]
+
+    assert ac3b.verdict == "fail"
+    assert f"{stops} run(s)" in ac3b.detail, ac3b.detail
+    assert any("more not listed" in row for row in ac3b.rows), (
+        f"{stops} unplanned stops but the rows stop at {len(ac3b.rows)} with no indication that "
+        "anything was dropped"
+    )

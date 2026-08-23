@@ -108,8 +108,14 @@ Non-zero exit on **fail or inconclusive** — and inconclusive is not a pass. Re
 loopback API; it does **not** count as an intervention, so re-run it as often as you like.
 
 ⚠️ **AC-3b will keep failing for the rest of this window.** The stop is inside it and cannot leave.
-Expect exit 1 every run from now until 21 September; what you are watching for is a *second*
-occurrence, a drifting AC-0 coverage figure, and the memory trend under `MEM`.
+Expect exit 1 every run from now until 21 September.
+
+**And a second stop would not end the window either** — decided in advance (#439 AC-5, SDS §12.6):
+the window continues, AC-3b reports the **count**, each occurrence gets its own issue. ⚠️ Not
+because it is free: downtime is capped at **7 h 12 m for the whole thirty days** and the costs are
+cumulative, so repeated stops fail this on **AC-2** — a bar agreed before the run rather than
+invented after it. **Only a deploy restarts a window.** What you are watching is the AC-2 figure,
+AC-0 coverage drift, and the `MEM` trend.
 
 ### What is actually left, and what each one costs
 
@@ -180,10 +186,14 @@ machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for t
 window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
 full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
 
-The cause is **not established**, and the honest reason is that nothing recorded it: journald had
-already lost the pre-reboot boot by the time anyone looked. That is exactly the hole this log
-covers, and an empty log is indistinguishable from "nobody touched it". **Write the note at the
-time; you cannot reconstruct it later.**
+The cause **is** established — a hard power loss or hardware reset, by elimination: `wtmp` has no
+`shutdown` record for that boot while every other reboot in the machine's history does, and every
+software route (panic, watchdogs, OOM, timers) is independently excluded. **Why** power was lost is
+still unknown. Full evidence in #439 and `window.json`.
+
+⚠️ But note *how* that was recovered: from `wtmp`, `boot_log.started_mono` and sampler **rowids** —
+never from a note, because nobody wrote one. Reconstruction happened to be possible and will not
+always be. **Write the note at the time.**
 
 ---
 
