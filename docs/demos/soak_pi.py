@@ -372,12 +372,19 @@ def _intervention_criterion(
             "⚠️ That is not the same as 'nobody touched it' — this log is written by hand, so an "
             "empty log and an unlogged power cut are indistinguishable here."
         )
+    # Same cap, same rule as AC-3b: a truncated list must say it is truncated, or the report
+    # quietly describes fewer events than it counted.
+    shown = rows[:12]
+    if len(rows) > len(shown):
+        shown.append(
+            f"... and {len(rows) - len(shown)} more not listed (capped at {len(shown)})"
+        )
     return _Criterion(
         "INTV",
         "operator interventions (reported, not graded)",
         "recorded",
         detail,
-        rows=rows[:12],
+        rows=shown,
     )
 
 
@@ -879,6 +886,18 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
             _read_interventions(Path(args.interventions)), unplanned, (since, until)
         )
     )
+    # ⚠️ The verdict is deliberately binary — one unplanned stop and thirty read `fail` alike —
+    # because §12.6 grades O5 on uptime and *manual* restarts, and an unclean stop is neither. The
+    # COUNT is what a reader acts on (#439 AC-5), so it must survive the row cap: an eleventh stop
+    # that vanished from the report while the policy says the count is the point would be this
+    # harness's own "report the quantity you grade" rule broken from the inside.
+    shown = unplanned[:10]
+    unplanned_rows = [f"boot {r.boot_id} last seen {r.last_seen_at}" for r in shown]
+    if len(unplanned) > len(shown):
+        unplanned_rows.append(
+            f"... and {len(unplanned) - len(shown)} more not listed — the count above is the "
+            f"whole figure, this list is capped at {len(shown)}"
+        )
     criteria.append(
         _Criterion(
             "AC-3b",
@@ -890,9 +909,7 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
                 if still_running
                 else ""
             ),
-            rows=[
-                f"boot {r.boot_id} last seen {r.last_seen_at}" for r in unplanned[:10]
-            ],
+            rows=unplanned_rows,
         )
     )
 

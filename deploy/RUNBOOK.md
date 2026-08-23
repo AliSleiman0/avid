@@ -529,6 +529,12 @@ costs the run something, and the costs are cumulative and unrecoverable:
 | `git pull` + restart | **a split window** — AC-4 sees two builds, and an average of two builds describes no robot that ever existed |
 | **anything that reboots the board** | a **new clock frame** on top of the above. No RTC here, so the machine comes up stale and NTP steps it later; the grade report's `CLOCK` line names every backwards step, and AC-0/AC-2 then carry a caveat saying their figures span two clocks (#439) |
 
+⚠️ **A second unplanned stop does not end the window** — decided in advance, #439 AC-5, recorded in
+`docs/demos/m11_evidence/window.json`. AC-3b reports the **count**. But the costs above are
+cumulative against a **7 h 12 m total**, so repeated stops fail this window on **AC-2**, which is a
+bar that was agreed before the run rather than invented after it. **A deploy is the only thing that
+restarts a window.**
+
 **Write it down before you act**, one JSON object per line:
 
 ```sh
