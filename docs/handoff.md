@@ -6,9 +6,33 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-23 · `main` · `v0.M10.0` tagged · ⛔ **M11 soak STOPPED after ~26 h and O5 amended — the rig is UNFROZEN, deploying is allowed again** · gh `AliSleiman0`.
+**As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **rig DEPLOYED and healthy on `v0.M10.0-77-gf1009a3`; #452, #456 and #447 all closed** · ⛔ M11 soak stopped, O5 amended · gh `AliSleiman0`.
 
-## ⭐ Next session — 🔴 DEPLOY, THEN RUN THE 72-HOUR WINDOW
+## ⭐ Next session — 🔴 #415 AC-3 IS ONE BENCH CONVERSATION, THEN THE 72-HOUR WINDOW
+
+**Everything laptop-side in the queue is done.** Closed 2026-08-24: **#452** (the wedge, #455 + #457),
+**#456** (rejected transitions are countable outside the process), **#447** (the M7 recall defect —
+and a second defect in its own instrument). The rig is deployed and healthy.
+
+🔴 **#415 needs one thing and it is not code.** AC-1/2/4 shipped in #446; **AC-3 is a measurement**:
+*"no `response_cancel_not_active` at ERROR across a bench conversation with several barge-ins."*
+Hold a conversation with the robot and **talk over it mid-reply, several times**, then:
+
+```sh
+ssh alisleiman0@100.127.197.112 'journalctl -u robot -b | grep response_cancel_not_active'
+```
+
+⚠️ **The verdict is the LEVEL, not the count.** #446 decided the race is irreducible and is
+*attributed, not suppressed*: a rejection whose `event_id` matches the cancel we just sent drops to
+WARNING and carries the measured race window; anything unattributable **stays at ERROR**. So AC-3
+passes on **zero ERROR-level** occurrences — WARNINGs with a rising race count are the designed
+outcome and are a finding, not a failure.
+
+⚠️ `tools/probe_overlap.py` has still **never been run** and leaves no artefact in `docs/`. #446
+named it the cheapest next step: it answers whether `response.done` carries an id, which gates
+widening the cancel tracker from one slot to a set. Ten minutes, no mic, no human.
+
+## Then: the 72-hour window
 
 **#452 is CLOSED. Steps 1 and 2 of the three below are both done, and step 3 is the whole of
 what is left.**
@@ -302,6 +326,27 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **An aggregate is not a diagnosis, and this project has now been misled by one twice.** #447
+  chased "18/20" and found **three different pairs of misses wearing that number**: the M7 seal's
+  (`standup`, an instrument defect; `dog`, #264), the issue's own (`guitar`, `marathon`, measured
+  before #451 shipped δ=0.5), and today's (none — it is 20/20). A rate tells you *how many*, never
+  *which*, and every one of those pairs had a different cause. **Assert named probes beside the
+  rate**, and when a number is quoted across sessions, ask which failures it was made of.
+
+- ⚠️ **A gate's output is evidence, and evidence on one SD card ends with the SD card.** M7's
+  `recall_result.json` and `mutations_result.json` sat **untracked in `/opt/avid` for ten days**
+  while the repo said in a test docstring that they were never committed. They record that M7 was
+  sealed with **O2 unmet and four criteria failing**. Found only because a deploy ran
+  `git status` on the Pi. **Look at `git status` on the rig after any gate run**, and commit what
+  it shows.
+
+- ⚠️ **`_find`-shaped helpers must not pick when they cannot identify.** The M7 harness resolved a
+  probe's expected fact by needle and returned the **first** match; the corpus had two facts
+  mentioning Cyprus, so it graded a **rank-1 correct answer** as a recall miss and reported O2 a
+  point low. *Nothing was stored* and *this needle identifies nothing* are opposite failures — one
+  is a statement about the robot, the other about the fixture — and letting them share an answer is
+  how a broken instrument reads as a defect. Same family as #450, in the same function.
 
 - ⚠️ **The M11 wedge ended the way #452 said it would have to: a human spoke.** Read off the rig
   before deploying over it (2026-08-24), the whole 32-hour boot held **eight** legal transitions and
