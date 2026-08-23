@@ -8,7 +8,40 @@
 
 **As of:** 2026-08-23 · `main` · `v0.M10.0` tagged · ⛔ **M11 soak STOPPED after ~26 h and O5 amended — the rig is UNFROZEN, deploying is allowed again** · gh `AliSleiman0`.
 
-## ⭐ Next session — the soak is STOPPED and the rig is UNFROZEN
+## ⭐ Next session — #452 is FIXED; the soak still cannot see a wedged robot
+
+**Step 1 of the three below is done (#455, merged).** The §6.9 deadline is armed on **entry to
+THINKING** now — by a synchronous observer on `StateManager`, not from the turn path — so the
+machine cannot occupy THINKING without an armed way out, whichever path drove it in. Three arcs
+were covered, and only one of them involves a network fault at all: the refused reactive open, the
+refused **proactive** open (worse — `BehaviorService` transitions before publishing, so no falling
+edge is ever coming), and plain cross-subscriber ordering on a healthy bus. No new `Trigger` and no
+new table row.
+
+⚠️ **#452 is still OPEN, on AC-4** — the liveness criterion. That is the half of the finding that is
+not about the robot, and it is the one that generalises: *the soak graded a catatonic robot at
+99.89% uptime for 24 hours and reported success.* **Step 2 below is what remains of it**, and it
+gates step 3: running another endurance window before the soak can tell a working robot from a
+wedged one buys another window of the same evidence.
+
+⚠️ **The finding underneath the finding, worth more than the fix.** The e2e test that would have
+caught this **could not be written**. The `ignored illegal transition` assertion only bites at full
+stack, and that harness builds its client through `ReplayRealtimeClient`, which could not express a
+refused `open()` at all — so the failure mode lived in a test-local subclass in `tests/services/`,
+i.e. exactly where the assertion does not work. It ships as an `open_error` knob on the fake now.
+**A fake that cannot fail the way the real transport routinely does is an incomplete port (P6) —
+and the gap is invisible until you go looking for the test you cannot write.**
+
+**#456 is filed** for what #452's AC-6 asked: 147 of 175 log lines were one repeated illegal
+transition and *nothing outside the process could see it*, because `StateManager.transition`
+publishes nothing on rejection. #455 removes this wedge's cause, not the next one's silence.
+
+Also worth carrying: `Config`'s `think_timeout_s < session_idle_close_s` assertion **was** the only
+thing preventing this wedge on the idle-close arc — its own comment describes #452 a milestone
+early. `_teardown_locked` no longer cancels the deadline, so that inequality is a preference now
+rather than a correctness guard, and it is kept and documented as one.
+
+## The soak is STOPPED and the rig is UNFROZEN
 
 **The M11 30-day window was stopped on 2026-08-23 after ~26 hours, deliberately, and O5 is
 amended.** The reasoning is below and on #389. This is the single most important thing to
@@ -41,7 +74,8 @@ before you redeploy over it.
 
 ### 🔴 Do these three, in this order
 
-**1. Fix #452 — the wedge.** The defect: *entering* `THINKING` is driven by a bus fact
+**1. ✅ DONE — #452's wedge is fixed (#455).** Kept here for the reasoning, which still holds. The
+defect: *entering* `THINKING` is driven by a bus fact
 (`audio.speech_ended`, from `AudioService`), but the only exit that does not need a working session
 is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — which a failed
 `open()` aborts before reaching. One happens without the other.
@@ -50,8 +84,14 @@ is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — whic
 > *"reachable arcs that leave this timer armed"*; this is its mirror image, a reachable arc that
 > leaves it **un**armed. Adding a fourth cancel site would be treating the symptom.
 > ⚠️ The replay fake cannot express a failed `open()` — check that before trusting a green.
+>
+> ✅ Both warnings landed. The second was the expensive one and is now a standing gotcha above.
+> The neuter that mattered most: restoring `_think_timer`'s `_session_open` guard turned the
+> tests red on their own assertions — **proof that moving the arm site alone would have been
+> inert**, which is exactly the fix a reader in a hurry would have shipped.
 
-**2. Add the two criteria the soak was missing** (`docs/demos/soak_pi.py`):
+**2. 🔴 THIS IS THE NEXT JOB — add the two criteria the soak was missing**
+(`docs/demos/soak_pi.py`). It is `#452` AC-4, and it is what keeps that issue open:
 
 - **Liveness** — the robot changed state at least N times / no single state held longer than X.
   ⚠️ **This is the whole lesson.** A window that cannot tell a working robot from a catatonic one is
@@ -61,7 +101,9 @@ is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — whic
   thermal throttling, a soak with no thermal series is a gap. `vcgencmd measure_temp` /
   `/sys/class/thermal/thermal_zone0/temp`; report `first/last/min/max`, like `MEM` does.
 
-**3. Then run a 72-hour endurance run** — on the rig, with the robot **actually doing something**.
+**3. Then run a 72-hour endurance run** — on the rig, with the robot **actually doing something**,
+and on a build that carries #455 (deploy it first: `/opt/avid` is still on the wedged build, and
+`robot.service` is the live repro).
 
 ⚠️ **The ~26 hours already run does NOT count**, and this is the one thing not to wave through. The
 robot was wedged for all but the first three minutes, so nothing exercised the paths a soak exists
