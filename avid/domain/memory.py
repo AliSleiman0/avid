@@ -191,13 +191,26 @@ class ScoreWeights:
     recency: float = 1.0
     importance: float = 1.0
     relevance: float = 1.0
-    # δ, the keyword term (#264), MEASURED at #447 — see ScoreWeights.keyword below.
-    # Park et al. have no keyword component, so unlike the three
-    # above this default is NOT a published baseline — it is the same equal weight applied for
-    # consistency, and it is **unmeasured**. `tools/eval_recall.py` is the instrument that would
-    # settle it; until it has been run against a real-MiniLM store, treat 1.0 as a starting point
-    # rather than a result. Said plainly here because an invented number that looks like the
-    # three beside it is how a guess becomes a fact.
+    # δ, the keyword term (#264), MEASURED at #447 and no longer a guess.
+    #
+    # Park et al. have no keyword component, so unlike the three above this was never a published
+    # baseline — it was the same equal weight applied for consistency, labelled unmeasured in five
+    # places, each naming `tools/eval_recall.py` as what would settle it. That tool was run against
+    # a real-MiniLM store on 2026-08-23, for the first time:
+    #
+    #     δ=1.0  recall@5 0.66   paraphrase 0.20      <- was shipped
+    #     δ=0.5  recall@5 0.86   paraphrase 1.00      <- is shipped
+    #     δ=0.0  recall@5 0.84   paraphrase 1.00
+    #
+    # ⚠️ The FAKE embedder scores 0.66 / 0.20 at EVERY δ. At 1.0 the real model scored identically
+    # to bag-of-words: `_fts_match` ORs every query token including stopwords, bm25 returns top_k
+    # rows, and each took a full +1.0 — enough to outrank facts the vector branch ranked FIRST. The
+    # keyword term decided the top-5 on its own, so every recall figure this project had recorded
+    # was measuring FTS5 and not the model.
+    #
+    # 0.5 rather than 0: the keyword term still earns its place (0.86 vs 0.84, temporal 1.00 vs
+    # 0.88). It was the weight that was wrong, not the idea. 0.25 ties 0.5 on that set; 0.5 is the
+    # smaller move from the baseline, and the tie is recorded rather than hidden.
     keyword: float = 0.5
 
 

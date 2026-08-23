@@ -61,6 +61,16 @@ def test_the_shipped_corpus_needles_all_match_their_own_declared_text() -> None:
     ⚠️ A corpus whose needle cannot find its own declared sentence is one that would report a miss
     no matter what the robot did — the failure is in the ruler, and it would be scored as the
     robot's.
+
+    ⚠️ **This does NOT guard the punctuation fold, and saying so is the point.** Neutering `_norm`
+    back to whitespace-only leaves this test **green**: `facts.json`'s `say` strings and their
+    needles happen to agree on punctuation already (`standup`'s declared sentence is *"My team
+    standup is at nine every weekday"* — no hyphen). The hyphen only ever appeared in what the
+    **model** stored, which this corpus does not contain.
+
+    So the property here is *corpus self-consistency*, which is worth having and is what the
+    assertion means — but the fold is guarded by the test above, and by that one alone. Recorded
+    because a test that passes its own neuter is a finding, not a formality.
     """
     spec = json.loads(
         (_ROOT / "docs" / "demos" / "m7_evidence" / "facts.json").read_text(

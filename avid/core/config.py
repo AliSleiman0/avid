@@ -559,7 +559,7 @@ class WeightsConfig(_Section):
 
     ``keyword`` (δ) is #264's addition
     and has no published baseline behind it — see :class:`~avid.domain.ScoreWeights`. It is
-    **unmeasured**; `tools/eval_recall.py` is what would settle it.
+    **measured at AVID-447**: δ=1.0 made the real embedder score identically to the fake (recall@5 0.66, paraphrase 0.20), δ=0.5 gives 0.86/1.00, so it is 0.5 — `tools/eval_recall.py --model-dir ./models --keyword <δ>` reproduces it.
     """
 
     recency: float = 1.0
