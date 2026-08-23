@@ -91,6 +91,13 @@ _MAX_ERROR_CHARS = 200
 # means the response never terminated, which is a different defect and gets its own WARNING.
 _RESPONSE_IDLE_TIMEOUT_S = 5.0
 
+# What ``_active_response`` holds when the API named no id on ``response.created``. It is a
+# sentinel, not an id, and every comparison against it must fall back to the old unconditional
+# behaviour: whether ``response.done`` carries an id at all is `tools/probe_overlap.py`'s first
+# open question and that probe has never been run (#415). Guessing here would make the tracker
+# depend on a frame shape we invented.
+_UNKNOWN_RESPONSE = "active"
+
 _T = TypeVar("_T")
 
 
@@ -532,6 +539,16 @@ class OpenAIRealtimeClient:
         # so the common case (no response active) costs one already-set ``wait()``.
         self._response_idle = asyncio.Event()
         self._response_idle.set()
+        # Which response we have already sent a ``response.cancel`` for, and when (#415). Keyed by
+        # id and NEVER a bare boolean: a boolean would survive into the next turn and suppress a
+        # real cancel, which is the silent direction of this failure — no cancel sent, the model
+        # believing it said a reply nobody heard (§6.2.4 trap 2). ``_cancel_event_id`` is what lets
+        # a later rejection be attributed to *our* cancel rather than to cancels in general, and
+        # ``_cancel_sent_ns`` turns "we know the symptom and not the window" into a number.
+        self._cancel_sent_for: str | None = None
+        self._cancel_event_id: str | None = None
+        self._cancel_sent_ns: int | None = None
+        self._cancel_races = 0
         # Neutral events read from the socket, awaiting the consumer (AVID-182). Unbounded on
         # purpose: this queue REPLACES the vendor library's own read buffer rather than adding a
         # second one, so bounding it would drop assistant audio the previous design simply held.
@@ -693,6 +710,10 @@ class OpenAIRealtimeClient:
         self._error_count = 0
         self._active_response = None
         self._response_idle.set()
+        self._cancel_sent_for = None
+        self._cancel_event_id = None
+        self._cancel_sent_ns = None
+        self._cancel_races = 0
         # The O1 marks belong to ONE session's turn and must not survive a reconnect. On the
         # 2026-08-01 AC-4 run a cold open timed out, and the marks left over from before the
         # retry produced `response.created nan ms` and a 233 ms "total" for a turn whose
@@ -853,15 +874,46 @@ class OpenAIRealtimeClient:
         Two readers now, not one (#284): :meth:`cancel` asks *is anything in flight*, and
         :meth:`send_tool_output` waits until nothing is. The `Event` is maintained in lockstep with
         the `str | None` rather than replacing it, because the two answer different questions — the
-        id is what a log line needs, the event is what an `await` needs."""
+        id is what a log line needs, the event is what an `await` needs.
+
+        ⚠️ **The clear compares ids (#415).** It used to fire unconditionally, and with two
+        responses in play — which `conversation_already_has_active_response` proves is reachable —
+        ``created(A) → created(B) → done(A)`` cleared the slot while **B was still generating**.
+        The next barge-in then sends *no cancel at all*: not a noisy rejection but a silent miss,
+        which is M5's AC-3 and a graded criterion, and it releases ``_response_idle`` early on top
+        (re-arming #284). Note this fixes the *quieter* neighbour of #415's symptom and reduces
+        ``response_cancel_not_active`` not at all.
+
+        ⚠️ It must be a **no-op when either id is unknown**, falling back to the old behaviour.
+        Whether ``response.done`` carries an id is `tools/probe_overlap.py`'s Q1 and that probe has
+        never been run, so a strict match would make the tracker depend on a frame shape nobody has
+        observed — and the failure mode of guessing wrong is a slot that never clears and a cancel
+        that is spurious forever."""
         kind = msg.get("type")
         if kind == "response.created":
             response = msg.get("response") or {}
-            self._active_response = str(response.get("id", "")) or "active"
+            self._active_response = str(response.get("id", "")) or _UNKNOWN_RESPONSE
             self._response_idle.clear()
+            # A new response is cancellable again, whatever we did about the last one.
+            self._cancel_sent_for = None
         elif kind == "response.done":
-            self._active_response = None
-            self._response_idle.set()
+            done_id = (
+                str((msg.get("response") or {}).get("id", "")) or _UNKNOWN_RESPONSE
+            )
+            active = self._active_response
+            if (
+                active is None
+                or _UNKNOWN_RESPONSE in (active, done_id)
+                or done_id == active
+            ):
+                self._active_response = None
+                self._response_idle.set()
+            else:
+                _log.debug(
+                    "response.done for %s while %s is still active — slot kept (#415)",
+                    done_id,
+                    active,
+                )
 
     def _note_first_token_timing(self, msg: dict[str, Any]) -> None:
         """Log where O1 actually goes, once per reply (#106 AC-4, SDS §2.8.1).
@@ -949,12 +1001,61 @@ class OpenAIRealtimeClient:
         # the vendor against us, and #284 sat unnoticed in a journal full of WARNINGs precisely
         # because it did not look different from one. Still never fatal: the socket remains the
         # authority on whether the session is alive.
-        level = (
-            logging.ERROR
-            if (msg.get("error") or {}).get("type") == "invalid_request_error"
-            else logging.WARNING
+        level, attribution = self._error_level(msg)
+        _log.log(
+            level,
+            "%s%s",
+            _format_error_frame(msg, count=self._error_count),
+            attribution,
         )
-        _log.log(level, "%s", _format_error_frame(msg, count=self._error_count))
+
+    def _error_level(self, msg: dict[str, Any]) -> tuple[int, str]:
+        """Level for one error frame, and any attribution to append (#284 AC-4, narrowed by #415).
+
+        The #284 split stands: ``invalid_request_error`` is a defect report filed by the vendor
+        *against us* and is louder than the API declining something reasonable.
+
+        #415 narrows exactly one case out of it, and the narrowing is by **attribution, not by
+        code**. ``response_cancel_not_active`` has an irreducible cause — the server ends
+        generation, emits ``response.done``, and that frame is *in flight* when a barge-in fires,
+        so ``_active_response`` is still set and we cancel something the server has outgrown. That
+        race cannot be closed client-side, and every scheme to close it (a grace window, waiting
+        before cancelling) trades a logged harmless rejection for the **silent** failure
+        :meth:`cancel` documents: no cancel sent, the model believing it said a reply nobody heard.
+
+        ⚠️ **Downgrading on the code alone would be the decision to stop looking**, because the same
+        code is what *"we cancelled the wrong response"* looks like. So the level drops only when
+        the API echoes back the ``event_id`` of the cancel **we** just sent — and the line then
+        carries the measured upper bound on how stale our evidence was, which is the measurement
+        #415 says is missing. A ``response_cancel_not_active`` we cannot tie to our own last cancel
+        stays at ERROR, where it belongs.
+
+        ⚠️ **WARNING, not DEBUG.** A rising ``_cancel_races`` across a soak is a *finding* — about
+        overlapping responses (`tools/probe_overlap.py`, never run) or about a terminal frame we do
+        not watch — and DEBUG would also gut
+        ``test_the_error_log_names_the_five_allowed_fields``, which captures at WARNING.
+        """
+        error = msg.get("error") or {}
+        if error.get("type") != "invalid_request_error":
+            return logging.WARNING, ""
+        ours = (
+            error.get("code") == "response_cancel_not_active"
+            and self._cancel_event_id is not None
+            and error.get("event_id") == self._cancel_event_id
+        )
+        if not ours:
+            return logging.ERROR, ""
+        self._cancel_races += 1
+        elapsed = (
+            ""
+            if self._cancel_sent_ns is None
+            else f" by <= {(time.monotonic_ns() - self._cancel_sent_ns) / 1e6:.0f} ms"
+        )
+        return logging.WARNING, (
+            f" — our response.cancel for {self._cancel_sent_for} lost the race{elapsed} "
+            f"(#415: response.done was already on the wire when we sent it); step 6 muted the "
+            f"audio regardless. Race #{self._cancel_races} this session."
+        )
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> None:
         """Barge-in step 4 (§6.2.4): tell the model the user cut ``item_id`` off at
@@ -997,7 +1098,18 @@ class OpenAIRealtimeClient:
                 "no active response to cancel — skipping response.cancel (§6.2.4 step 5)"
             )
             return
-        await self._send({"type": "response.cancel"})
+        if self._cancel_sent_for == self._active_response:
+            # A second barge-in before ``response.done`` arrives (#415). The first cancel is either
+            # already applied or already rejected; a second can only ever be rejected, and it would
+            # be indistinguishable in the log from cancelling the WRONG response.
+            _log.debug(
+                "response.cancel already sent for %s — not sending a second (#415)",
+                self._active_response,
+            )
+            return
+        self._cancel_sent_for = self._active_response
+        self._cancel_sent_ns = time.monotonic_ns()
+        self._cancel_event_id = await self._send({"type": "response.cancel"})
 
     async def send_tool_output(self, call_id: str, output: str) -> None:
         """Return a tool result and prompt the model to speak (§6.6 steps 4–5).
@@ -1102,8 +1214,12 @@ class OpenAIRealtimeClient:
             {"type": "response.create"}
         )  # step 5 — or the model just sits (§6.6)
 
-    async def _send(self, payload: dict[str, Any]) -> None:
+    async def _send(self, payload: dict[str, Any]) -> str | None:
         """Serialise and send one client event, if the socket is live. Non-blocking (P8).
+
+        Returns the stamped ``event_id``, or ``None`` if the socket was already gone. Only
+        :meth:`cancel` reads it — to recognise the API's rejection of *that* event later (#415) —
+        and every other caller discards it exactly as before.
 
         **Every client event is stamped with a traceable ``event_id``** (AVID-178). The API echoes
         it back in ``error.event_id``, which is the difference between a log line saying *"something
@@ -1117,11 +1233,13 @@ class OpenAIRealtimeClient:
         ``input_audio_buffer.append`` too *because* a rejected append is exactly the error we
         currently cannot see.
         """
-        if self._ws is not None:
-            self._sent_seq += 1
-            kind = str(payload.get("type", "unknown")).replace(".", "_")
-            stamped = {"event_id": f"avid_{self._sent_seq}_{kind}", **payload}
-            await self._ws.send(json.dumps(stamped))
+        if self._ws is None:
+            return None
+        self._sent_seq += 1
+        kind = str(payload.get("type", "unknown")).replace(".", "_")
+        event_id = f"avid_{self._sent_seq}_{kind}"
+        await self._ws.send(json.dumps({"event_id": event_id, **payload}))
+        return event_id
 
 
 # --- CapturingRealtimeClient (#105): record a live session into the replay format ---------

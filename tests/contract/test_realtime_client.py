@@ -1503,3 +1503,243 @@ async def test_the_replay_client_counts_proactive_turns_without_audio() -> None:
     assert replay.proactive_turns == 1
     assert replay.sent == [], "no mic audio may accompany a proactive open"
     assert replay.committed_turns == 0, "and no user turn may be committed"
+
+
+# --- #415: what the cancel guard does NOT cover -------------------------------------------------
+#
+# ⚠️ These are at the WIRE level, and that is forced rather than preferred. `ReplayRealtimeClient`
+# models no response lifecycle at all — its `cancel()` is `self.cancels += 1` — and
+# `assets/sessions/barge_in/session.json` puts `turn_done` LAST, so no fixture can express "the
+# response finished before the barge-in". Teaching the fake a lifecycle would mean asserting
+# against a model of the API we wrote ourselves, which is M5's lesson (*fixtures record the frames
+# these bugs suppress*) with extra steps.
+
+
+async def test_a_stale_response_done_does_not_clear_a_response_that_is_still_generating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single slot used to clear on ANY ``response.done``, without comparing ids.
+
+    ``conversation_already_has_active_response`` proves two responses can overlap, so
+    ``created(A) → created(B) → done(A)`` cleared the slot while **B was still generating**. Both
+    readers of that slot then get the wrong answer: :meth:`cancel` sends nothing, and
+    ``_response_idle`` releases early, which is #284 re-armed."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.created", "response": {"id": "resp_a"}},
+            {"type": "response.created", "response": {"id": "resp_b"}},
+            {"type": "response.done", "response": {"id": "resp_a"}},
+        ]
+    )
+    await _drain_events(client)
+
+    assert client._active_response == "resp_b", "a stale done cleared a live response"
+    assert not client._response_idle.is_set(), "#284's wait was released early"
+
+
+async def test_a_barge_in_still_cancels_the_response_that_is_actually_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠️ **This is #415's AC-4.** Restore the unconditional clear and this test fails on
+    ``ws.sent == []``.
+
+    That is the proof the fix bites, and it names the cost precisely: what breaks without it is
+    **barge-in**, which is M5's AC-3 and a *graded* criterion. The failure is silent — no error, no
+    log, the user hears nothing amiss because step 6 mutes the deltas anyway — and the model goes
+    on believing it said a reply nobody heard."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.created", "response": {"id": "resp_a"}},
+            {"type": "response.created", "response": {"id": "resp_b"}},
+            {"type": "response.done", "response": {"id": "resp_a"}},
+        ]
+    )
+    await _drain_events(client)
+
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == ["response.cancel"]
+
+
+async def test_a_response_done_without_an_id_still_clears_the_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠️ The id-compare must be a **no-op when the id is unknown**.
+
+    Whether ``response.done`` carries the response id is `tools/probe_overlap.py`'s first open
+    question, and **that probe has never been run**. A strict match would make the tracker depend
+    on a frame shape nobody has observed, and the failure mode of guessing wrong is the worst one
+    available: a slot that never clears, so every later cancel is spurious forever."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.done"},
+        ]
+    )
+    await _drain_events(client)
+
+    assert client._active_response is None
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+    assert ws.sent == []
+
+
+async def test_the_same_response_is_not_cancelled_twice(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A second barge-in before ``response.done`` arrives used to send a second ``response.cancel``.
+
+    The first is either already applied or already rejected; a second can only ever be rejected —
+    and in the log it is **indistinguishable from cancelling the wrong response**, which is the
+    thing #415 says must stay visible."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [{"type": "response.created", "response": {"id": "resp_1"}}]
+    )
+    await _drain_events(client)
+
+    client._ws = ws  # type: ignore[assignment]
+    with caplog.at_level(logging.DEBUG, logger="avid.adapters.realtime"):
+        await client.cancel()
+        await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == ["response.cancel"]
+    assert "already sent for resp_1" in caplog.text
+
+
+async def test_a_new_response_after_a_cancel_is_cancellable_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠️ The dedupe's silent direction, and why it is keyed by id rather than a boolean.
+
+    A bare ``already_cancelled`` flag would satisfy the test above and then suppress the **next**
+    turn's real cancel — no error, no log, barge-in quietly broken. Keyed by id it cannot: a new
+    ``response.created`` is a new key."""
+    _stub_websockets(monkeypatch)
+    ws = _CapturingWs()
+    client = _openai()
+
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [{"type": "response.created", "response": {"id": "resp_1"}}]
+    )
+    await _drain_events(client)
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    client._ws = _FakeWs(  # type: ignore[assignment]
+        [
+            {"type": "response.done", "response": {"id": "resp_1"}},
+            {"type": "response.created", "response": {"id": "resp_2"}},
+        ]
+    )
+    await _drain_events(client)
+    client._ws = ws  # type: ignore[assignment]
+    await client.cancel()
+
+    assert [p["type"] for p in ws.sent] == ["response.cancel", "response.cancel"]
+
+
+async def test_a_cancel_rejection_we_can_attribute_to_our_own_race_is_a_warning_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ **#415's AC-1 and AC-3, off hardware.**
+
+    The irreducible race, reproduced deterministically: a response is live, we send the cancel, and
+    the API rejects it because ``response.done`` was already on the wire. The rejection echoes back
+    the ``event_id`` we stamped, which is what lets it be attributed to *our* cancel rather than to
+    cancels in general — and only then does it stop being an ERROR.
+
+    A transcript rides behind each pushed frame as a sequencing proof: receiving it means the reader
+    has already walked the frame in front of it. No sleeps."""
+    _stub_websockets(monkeypatch)
+    ws = _DuplexWs()
+    client = _openai()
+    client._ws = ws  # type: ignore[assignment]
+    stream = client.events()
+
+    ws.push({"type": "response.created", "response": {"id": "resp_1"}})
+    ws.push(
+        {
+            "type": "response.output_audio_transcript.done",
+            "transcript": "once upon a time",
+            "item_id": "item_0",
+        }
+    )
+    await asyncio.wait_for(anext(stream), _WAIT_S)
+    assert client._active_response == "resp_1"
+
+    await client.cancel()
+    event_id = ws.sent[-1]["event_id"]
+
+    with caplog.at_level(logging.WARNING, logger="avid.adapters.realtime"):
+        ws.push(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "response_cancel_not_active",
+                    "event_id": event_id,
+                    "message": "Cancellation failed: no active response found",
+                },
+            }
+        )
+        ws.push(
+            {
+                "type": "response.output_audio_transcript.done",
+                "transcript": "far out on the open ocean",
+                "item_id": "item_0",
+            }
+        )
+        await asyncio.wait_for(anext(stream), _WAIT_S)
+
+    assert client._cancel_races == 1, "the race was never attributed"
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [], (
+        "our own lost race was reported as a defect"
+    )
+    assert "response_cancel_not_active" in caplog.text
+    assert "resp_1" in caplog.text and " ms" in caplog.text
+
+    await client.aclose()
+    await stream.aclose()
+
+
+async def test_a_cancel_rejection_we_cannot_attribute_stays_at_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ The guard that keeps the downgrade from being *"a decision to stop looking"*.
+
+    ``response_cancel_not_active`` is also what **cancelling the wrong response** would look like,
+    so downgrading on the code alone would hide the defect this issue is most worried about. Only a
+    rejection echoing the ``event_id`` of the cancel we just sent goes quiet; anything else stays
+    loud."""
+    _stub_websockets(monkeypatch)
+    client = _openai()
+    client._cancel_event_id = "avid_7_response_cancel"
+
+    with caplog.at_level(logging.DEBUG, logger="avid.adapters.realtime"):
+        client._note_error(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "response_cancel_not_active",
+                    "event_id": "avid_999_response_cancel",
+                    "message": "Cancellation failed: no active response found",
+                },
+            }
+        )
+
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "a rejection we cannot tie to our own cancel was quietly downgraded"
+    )
