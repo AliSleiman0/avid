@@ -348,6 +348,20 @@ def test_a_long_night_in_sleeping_is_not_a_wedge() -> None:
         assert criterion.verdict == "pass", state
 
 
+def test_no_resting_state_is_gradeable_at_all() -> None:
+    """⚠️ The exclusion lives in a table, so it needs an assertion on the table.
+
+    Every other case here passes `bounds` in directly, which means none of them would notice if
+    IDLE or SLEEPING acquired an entry in `_TRANSIENT_STATES` — and the grade pass builds its
+    bounds from exactly that table. This is the assertion that fails if a future edit makes a
+    quiet night gradeable, which S12.6 forbids in as many words: **a SLEEPING robot is UP.**
+    """
+    assert set(soak._TRANSIENT_STATES) & set(soak._RESTING_STATES) == set()
+    assert "SLEEPING" not in soak._TRANSIENT_STATES
+    assert "IDLE" not in soak._TRANSIENT_STATES
+    assert "DEGRADED" not in soak._TRANSIENT_STATES
+
+
 def test_a_state_with_no_designed_bound_is_reported_and_not_graded() -> None:
     """⚠️ LISTENING has no bound because `Trigger.LISTEN_TIMEOUT` is **unwired**.
 
@@ -384,16 +398,29 @@ def test_a_restart_splits_the_run() -> None:
 
     Reading `transitions` across a restart as "unchanged" would manufacture a wedge out of two
     healthy processes that happened to be in the same state when each was sampled.
+
+    ⚠️ The counter here **matches by coincidence across the restart**, and that is the whole
+    fixture: a fresh boot walks BOOTING -> IDLE -> LISTENING -> THINKING, so "3" on either side of
+    a restart is an ordinary thing to see. A version of this test with mismatched counters passes
+    whether or not the restart splits anything — the run is simply unproven — which is a green
+    test proving nothing.
+
+    The assertion is on the reported figure, not the verdict, for the same reason: without the
+    split the run spans two processes and its held time comes out **negative**, which sails past a
+    "> bound" check and reads as a pass.
     """
     samples = [
-        {"state": "THINKING", "uptime_s": 5_000, "transitions": 900},
-        {"state": "THINKING", "uptime_s": 5_060, "transitions": 900},
-        # Restarted: uptime falls, counter resets.
-        {"state": "THINKING", "uptime_s": 30, "transitions": 0},
-        {"state": "THINKING", "uptime_s": 90, "transitions": 0},
+        {"state": "THINKING", "uptime_s": 5_000, "transitions": 3},
+        {"state": "THINKING", "uptime_s": 5_060, "transitions": 3},
+        # Restarted: uptime falls back to a fresh process's count.
+        {"state": "THINKING", "uptime_s": 30, "transitions": 3},
+        {"state": "THINKING", "uptime_s": 90, "transitions": 3},
     ]
     criterion = _grade_liveness(samples)
     assert criterion.verdict == "pass", "a restart was read as one long wedge"
+    assert any(
+        "longest THINKING  60s over 2 samples" in row for row in criterion.rows
+    ), f"the run spans the restart: {criterion.rows}"
 
 
 def test_a_build_change_splits_the_run() -> None:
