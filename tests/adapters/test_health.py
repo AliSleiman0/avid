@@ -11,14 +11,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 from avid.adapters import FakeClock, FakeFactRepository, HealthServer
+from avid.core.event_bus import AsyncioEventBus
 from avid.core.metrics import MetricsRegistry, ProvidedMetrics
+from avid.core.state_manager import StateManager
 from avid.core.state_report import StateReport
-from avid.domain import Affect, RobotState
+from avid.domain import Affect, RobotState, Trigger
 from avid.domain.memory import Fact
 
 
@@ -292,6 +294,38 @@ async def test_metrics_survives_an_unserialisable_value() -> None:
     try:
         status, _ = await _request(server.bound_port, "/metrics")
         assert status == 500
+    finally:
+        await server.stop()
+
+
+async def test_the_rejected_transition_map_reaches_a_reader_intact() -> None:
+    """#456 end to end: a real `StateManager`'s tally, through the real route, as JSON.
+
+    ⚠️ Asserted at the door rather than on the manager, because the failure mode this guards is a
+    *serialisation* one: the keys are pre-rendered strings precisely so `json.dumps` cannot throw
+    here. A tuple or enum key would 500 the **whole** endpoint — the test above pins that
+    behaviour — so one unreadable metric would cost every other one, at the exact moment somebody
+    is trying to find out why the robot is stuck.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    state = StateManager(bus=bus, clock=clock, initial=RobotState.THINKING)
+    async with bus:
+        await state.transition(Trigger.PRESENCE_LOST_TIMEOUT, correlation_id=uuid4())
+        await state.transition(Trigger.PRESENCE_LOST_TIMEOUT, correlation_id=uuid4())
+
+    registry = MetricsRegistry()
+    registry.register("illegal_transitions", state.illegal_transitions)
+    server = HealthServer(bind="127.0.0.1", port=0, metrics=ProvidedMetrics(registry))
+    await server.start()
+    try:
+        status, body = await _request(server.bound_port, "/metrics")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["metrics"]["illegal_transitions"] == {
+            "THINKING/PRESENCE_LOST_TIMEOUT": 2
+        }
+        assert payload["absent"] == []
     finally:
         await server.stop()
 

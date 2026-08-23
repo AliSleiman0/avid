@@ -23,6 +23,10 @@ Illegal transitions are this module's call to make. The domain raises
 view on what that means (``domain/state.py``); SDS §3.10.3 sets the production policy —
 **logged and ignored, never fatal**. A companion robot that dies because a stray event arrived
 in the wrong state is worse than one that shrugs.
+
+They are also **counted**, per ``(state, trigger)`` pair, and that is the only thing about them
+anything outside this process can see (#456) — see :meth:`StateManager.illegal_transitions`.
+Shrugging is still the policy; being unable to find out afterwards was not part of it.
 """
 
 from __future__ import annotations
@@ -93,11 +97,45 @@ class StateManager:
         self._state = initial
         self._lock = asyncio.Lock()
         self._observers: list[tuple[str, TransitionObserver]] = []
+        # Rejected transitions, per `(state, trigger)` pair. See :meth:`illegal_transitions`.
+        self._rejected: dict[str, int] = {}
 
     @property
     def state(self) -> RobotState:
         """The current state. Read freely; write only through :meth:`transition`."""
         return self._state
+
+    def illegal_transitions(self) -> dict[str, int]:
+        """How many times each ``(state, trigger)`` pair has been rejected (#456, SDS §3.12.2).
+
+        **The signal that was there for a day and nobody could read.** An illegal transition is
+        logged and ignored (§3.10.3) and publishes nothing, so until now the only reader was a
+        human tailing journald — and on the M11 rig that meant a wedge announced itself **147
+        times in 175 log lines** while `/health`, `/metrics` and every graded soak criterion
+        reported a healthy robot.
+
+        ⚠️ **Per pair, not a total, and that is the whole of it.** A single counter cannot
+        distinguish a wedge from ordinary noise, because *some* rejections are expected and
+        documented: ``PresenceService`` drives ``VISION_PRESENCE_GAINED`` unconditionally by
+        design (#224), so an awake robot logs one every time somebody sits down. The shape
+        separates them without a threshold — the rig's own boot reads
+        ``{"THINKING/PRESENCE_LOST_TIMEOUT": 135, "THINKING/VISION_PRESENCE_GAINED": 17,
+        "IDLE/VISION_PRESENCE_GAINED": 1}``, where the wedge is the number that kept climbing and
+        the benign one is the number that did not.
+
+        ⚠️ **Pre-rendered string keys, deliberately.** A tuple or enum key raises ``TypeError`` in
+        the ``json.dumps`` behind ``GET /metrics`` and takes the **whole endpoint** down with a
+        500 — one unreadable metric would cost every other one. ``bus_queues`` is the precedent
+        for the shape.
+
+        Growth is bounded by ``|RobotState| x |Trigger|`` (7 x 12 = 84 keys), so this needs no cap
+        and no eviction — the usual objection to an unbounded counter map does not apply.
+
+        A **copy**, so a reader cannot mutate the manager's own tally, and cheap and synchronous
+        so the metrics snapshot may call it inline while the robot is mid-turn (P8). An empty map
+        means *nothing has been rejected*, which is a real reading and not an absent one.
+        """
+        return dict(self._rejected)
 
     def watch(self, observer: TransitionObserver, *, name: str) -> None:
         """Register *observer* to be called on every legal move (#452).
@@ -124,6 +162,12 @@ class StateManager:
             try:
                 nxt = next_state(previous, trigger)
             except IllegalTransition:
+                # Counted before it is logged (#456). The log line is for a human who happens to
+                # be reading; this is for everything else — `GET /metrics`, the soak sampler, and
+                # anyone asking the question thirty days later. Same policy either way: SDS
+                # §3.10.3 says logged-and-ignored, and counting is not reacting.
+                pair = f"{previous.name}/{trigger.name}"
+                self._rejected[pair] = self._rejected.get(pair, 0) + 1
                 # SDS §3.10.3: loud in tests (the domain raises), logged-and-ignored here.
                 _log.warning(
                     "ignored illegal transition: no rule for %s in state %s "

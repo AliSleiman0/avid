@@ -90,17 +90,34 @@ def _rows(samples: list[dict[str, Any]]) -> list[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE s (at INTEGER, build TEXT, uptime_s INTEGER, state TEXT, "
-        "transitions INTEGER)"
+        "transitions INTEGER, payload TEXT)"
     )
     for i, sample in enumerate(samples):
+        # ⚠️ `payload` is here because the real table has it, not because most of these cases care.
+        # It was left out at first and #456's reader — which reads the stored /metrics body rather
+        # than a column — died on every one of them with `IndexError: No item with that key`. The
+        # fixture that omits a column is the fixture that hides the next defect.
+        rejected = sample.get("rejected")
+        payload = sample.get(
+            "payload",
+            json.dumps(
+                {
+                    "metrics": {"illegal_transitions": rejected}
+                    if rejected is not None
+                    else {},
+                    "absent": [],
+                }
+            ),
+        )
         conn.execute(
-            "INSERT INTO s VALUES (?,?,?,?,?)",
+            "INSERT INTO s VALUES (?,?,?,?,?,?)",
             (
                 sample.get("at", 1_700_000_000 + i * int(_INTERVAL)),
                 sample.get("build", _BUILD),
                 sample.get("uptime_s", 100 + i * int(_INTERVAL)),
                 sample.get("state", "IDLE"),
                 sample.get("transitions", 7),
+                payload,
             ),
         )
     return list(conn.execute("SELECT * FROM s"))
@@ -541,6 +558,104 @@ def test_the_breach_rows_are_capped_and_say_so() -> None:
     criterion = _grade_liveness(samples)
     assert criterion.verdict == "fail"
     assert any("more not listed" in row for row in criterion.rows)
+
+
+# ── the rejected-transition pairs, reported beside liveness (#456 AC-5) ──────────────────────
+
+
+def test_the_rejected_pairs_are_read_out_of_the_stored_payload() -> None:
+    """#456 needs no schema change: the sampler has kept the whole `/metrics` body since #383.
+
+    That is the column's stated purpose — *"for questions not yet asked"* — and this is one of
+    them, which means it also works retroactively on any window a build with the counter sampled.
+    """
+    rows = _rows(
+        [
+            {"rejected": {"THINKING/PRESENCE_LOST_TIMEOUT": 3}},
+            {"rejected": {"THINKING/PRESENCE_LOST_TIMEOUT": 135, "IDLE/X": 1}},
+        ]
+    )
+    assert soak._rejected_pairs(rows) == {
+        "THINKING/PRESENCE_LOST_TIMEOUT": 135,
+        "IDLE/X": 1,
+    }
+
+
+def test_the_worst_reading_wins_not_the_last_and_not_the_sum() -> None:
+    """⚠️ The counter is process-scoped, so a restart resets it.
+
+    Summing would double-count a window that restarted; taking the last would report a fresh
+    process's small number over a wedge that ran for a day before it — which is the reading that
+    would have made the M11 window look fine. The max is the worst thing that was ever true of one
+    process, which is the question a reader is actually asking.
+    """
+    rows = _rows(
+        [
+            {"rejected": {"A/B": 10}},
+            {"rejected": {"A/B": 135}},
+            {"rejected": {"A/B": 2}},  # restarted; the counter began again
+        ]
+    )
+    assert soak._rejected_pairs(rows) == {"A/B": 135}
+
+
+def test_a_malformed_payload_is_a_sample_with_nothing_to_say() -> None:
+    """A report *about* the instrument must not die with the instrument."""
+    rows = _rows(
+        [
+            {"payload": None},
+            {"payload": "not json at all"},
+            {"payload": '{"metrics": {"illegal_transitions": "not a map"}}'},
+            {"rejected": {"A/B": 4}},
+        ]
+    )
+    assert soak._rejected_pairs(rows) == {"A/B": 4}
+
+
+def test_the_wedge_names_the_pair_that_caused_it() -> None:
+    """The whole point: `LIVE` says the robot was stuck, and this says what it kept refusing.
+
+    The numbers are the rig's own, read off the machine before it was deployed over: the nap timer
+    arriving at a machine parked in THINKING, 135 times, beside the one documented benign
+    rejection at 1 (#224). A reader sees which is which without being told a threshold.
+    """
+    samples = _held("THINKING", 20)
+    samples[-1]["rejected"] = {
+        "THINKING/PRESENCE_LOST_TIMEOUT": 135,
+        "IDLE/VISION_PRESENCE_GAINED": 1,
+    }
+    criterion = _grade_liveness(samples)
+    assert criterion.verdict == "fail"  # LIVE still convicts, from the state side
+    assert any(
+        "THINKING/PRESENCE_LOST_TIMEOUT" in row and "x135" in row
+        for row in criterion.rows
+    )
+    assert any(
+        "IDLE/VISION_PRESENCE_GAINED" in row and "x1" in row for row in criterion.rows
+    )
+
+
+def test_no_rejected_pairs_says_which_of_the_two_things_it_means() -> None:
+    """⚠️ Absent is not zero, one layer further out than usual.
+
+    An empty reading here is ambiguous in a way the other metrics are not: it means either *the
+    machine refused nothing* or *the build predates the counter*. The row says both rather than
+    letting a reader take the flattering one — which is the same defect as a `0` from an
+    instrument that was never there.
+    """
+    criterion = _grade_liveness(_held("IDLE", 3, transitions=7))
+    assert any("either the machine refused nothing" in row for row in criterion.rows)
+
+
+def test_the_pair_list_is_capped_and_says_so() -> None:
+    """A cap that does not announce itself reads as "that was all of them" (§7.1)."""
+    samples = _held("IDLE", 3)
+    samples[-1]["rejected"] = {f"S{i}/T{i}": i + 1 for i in range(9)}
+    criterion = _grade_liveness(samples)
+    assert any(
+        "more pair(s) not listed" in row and "9 is the whole figure" in row
+        for row in criterion.rows
+    )
 
 
 # ── wired into the real grade pass ───────────────────────────────────────────────────────────

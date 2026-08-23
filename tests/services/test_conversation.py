@@ -1328,6 +1328,49 @@ async def test_a_refused_open_does_not_park_the_robot_in_thinking() -> None:
         assert rig.collector.of_type(ConversationSessionLost) == []
 
 
+async def test_the_wedge_a_refused_open_used_to_cause_is_now_countable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#456 AC-4, driven through the arc #452 actually failed on rather than a synthetic one.
+
+    The rig's wedge was not a `transition()` call in a unit test — it was `PresenceService`'s nap
+    timer arriving, every ten minutes for a day, at a machine parked in THINKING by a refused
+    `open()`. This drives the same shape end to end: the refused open puts the machine in
+    THINKING, and the triggers that used to bounce off it are now **countable by name**, so
+    something outside the process can see which pair is repeating.
+
+    ⚠️ The deadline is deliberately long here. #455 means the robot leaves THINKING on its own
+    after `think_timeout_s`, which is the fix working — but this test is about what is *visible*
+    while it is stuck, so the clock never reaches it."""
+    clock = FakeClock()
+    client = _unreachable(clock)
+
+    with caplog.at_level(logging.WARNING, logger="avid.state"):
+        async with _rig(
+            client=client, initial=RobotState.IDLE, think_timeout_s=3600.0
+        ) as rig:
+            await _utterance(rig, correlation_id=uuid4())
+            assert rig.state.state is RobotState.THINKING  # the wedge, as it was found
+
+            # The nap timer, arriving where it has no row — 135 times on the rig.
+            for _ in range(5):
+                await rig.state.transition(
+                    Trigger.PRESENCE_LOST_TIMEOUT, correlation_id=uuid4()
+                )
+            # ...and the benign one, which happens on any awake robot when someone sits down.
+            await rig.state.transition(
+                Trigger.VISION_PRESENCE_GAINED, correlation_id=uuid4()
+            )
+
+            assert rig.state.illegal_transitions() == {
+                "THINKING/PRESENCE_LOST_TIMEOUT": 5,
+                "THINKING/VISION_PRESENCE_GAINED": 1,
+            }, "the wedge is invisible to everything outside the process"
+
+    # The log line is still there and still says the same thing — counting is not a downgrade.
+    assert "ignored illegal transition" in caplog.text
+
+
 async def test_a_refused_proactive_open_does_not_park_the_robot_in_thinking() -> None:
     """The same defect on the proactive arc, where it is strictly worse (#452).
 

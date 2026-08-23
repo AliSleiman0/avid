@@ -663,6 +663,34 @@ def _transition_total(samples: Sequence[sqlite3.Row]) -> int | None:
     return total
 
 
+def _rejected_pairs(samples: Sequence[sqlite3.Row]) -> dict[str, int]:
+    """The worst reading of each rejected `(state, trigger)` pair across the window (#456).
+
+    Read out of the stored `/metrics` body rather than a column, because the sampler has kept the
+    whole payload since #383 *"for questions not yet asked"* — and this is one of them. No schema
+    change, and it works retroactively on any window sampled by a build that carries the counter.
+
+    ⚠️ **Max, not last and not sum.** The counter is process-scoped, so it resets on restart:
+    summing would double-count a window that restarted, and taking the last would report a fresh
+    process's zero over a wedge that ran for a day before it. The max is the worst thing that was
+    ever true of one process, which is the question a reader is asking.
+
+    Never raises: a malformed payload is a sample with nothing to say, not a failed report.
+    """
+    worst: dict[str, int] = {}
+    for row in samples:
+        if row["payload"] is None:
+            continue
+        try:
+            metrics = json.loads(row["payload"]).get("metrics", {})
+            rejected = metrics.get("illegal_transitions") or {}
+            for pair, count in rejected.items():
+                worst[str(pair)] = max(worst.get(str(pair), 0), int(count))
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            continue
+    return worst
+
+
 def _liveness_criterion(
     samples: Sequence[sqlite3.Row],
     *,
@@ -715,6 +743,37 @@ def _liveness_criterion(
         f"transitions     {total_transitions if total_transitions is not None else 'ABSENT'}"
         f"  (reported, not graded — an empty house legitimately produces none)",
     ]
+
+    # #456: which move the machine kept refusing to make. Reported beside the liveness figures
+    # because it is the thing that EXPLAINS one — a robot that held a state for a day was usually
+    # being asked to leave it, over and over, by something with no row for that arc.
+    #
+    # ⚠️ Reported and NOT graded, decided in writing on #456 AC-5. `LIVE` above already convicts
+    # a wedge from the state side; this answers "which pair", which is a diagnosis rather than a
+    # verdict. Grading it would need a per-pair allowlist for the one documented benign rejection
+    # (`VISION_PRESENCE_GAINED` at an awake robot, #224) — a policy with its own thresholds to
+    # defend, and two graded instruments over one failure double the false-positive surface for
+    # no extra detection.
+    rejected = _rejected_pairs(samples)
+    if rejected:
+        worst = sorted(rejected.items(), key=lambda kv: -kv[1])
+        rows.append(
+            f"rejected moves  {len(rejected)} pair(s); worst {worst[0][0]} x{worst[0][1]}"
+            f"  (reported, not graded — see #456)"
+        )
+        for pair, count in worst[:5]:
+            rows.append(f"  refused       {pair:<38} x{count}")
+        if len(worst) > 5:
+            rows.append(
+                f"  ... and {len(worst) - 5} more pair(s) not listed — {len(rejected)} is the "
+                f"whole figure"
+            )
+    else:
+        rows.append(
+            "rejected moves  none recorded — either the machine refused nothing, or the build "
+            "predates #456's counter. Check `illegal_transitions` in a sample's payload before "
+            "reading this as a clean window."
+        )
 
     longest: dict[str, _StateRun] = {}
     for run in runs:
