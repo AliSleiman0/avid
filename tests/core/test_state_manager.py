@@ -12,6 +12,7 @@ Three guarantees, in descending order of how much a bug would cost:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from uuid import UUID, uuid4
 
@@ -188,6 +189,77 @@ async def test_initial_state_is_injectable() -> None:
     assert (
         _manager(bus, clock, initial=RobotState.SLEEPING).state is RobotState.SLEEPING
     )
+
+
+# --- the rejected-transition counter (#456) ---
+
+
+async def test_the_counter_separates_a_wedge_from_ordinary_noise() -> None:
+    """⚠️ Per pair, and that is the entire design (#456).
+
+    A single total cannot grade this, because some rejections are **expected and documented**:
+    `PresenceService` drives `VISION_PRESENCE_GAINED` unconditionally by design (#224), so an
+    awake robot logs one every time somebody sits down. The M11 rig's own boot is the shape this
+    has to distinguish — one pair at 135 and a benign pair at 1 — and a scalar would have added
+    them together and told you nothing.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    mgr = _manager(bus, clock, initial=RobotState.THINKING)
+
+    async with bus:
+        # The wedge: the 10-minute nap timer, arriving over and over in a state with no row.
+        for _ in range(135):
+            await mgr.transition(Trigger.PRESENCE_LOST_TIMEOUT, correlation_id=uuid4())
+        # ...and the documented benign one, which happens once when a person sits down.
+        await mgr.transition(Trigger.VISION_PRESENCE_GAINED, correlation_id=uuid4())
+
+    assert mgr.illegal_transitions() == {
+        "THINKING/PRESENCE_LOST_TIMEOUT": 135,
+        "THINKING/VISION_PRESENCE_GAINED": 1,
+    }
+
+
+async def test_a_legal_transition_counts_nothing() -> None:
+    """The counter is about the moves that did NOT happen. A robot that works reports `{}`.
+
+    Empty is a real reading — *nothing has been rejected* — not an absent one. `MetricsRegistry`
+    only routes `None` to `absent`, so `{}` reaches `/metrics` as itself, which is the honest
+    answer and the one a soak wants to see for thirty days.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    mgr = _manager(bus, clock, initial=RobotState.IDLE)
+
+    async with bus:
+        await mgr.transition(Trigger.AUDIO_SPEECH_STARTED, correlation_id=uuid4())
+
+    assert mgr.state is RobotState.LISTENING
+    assert mgr.illegal_transitions() == {}
+
+
+async def test_the_reading_is_a_copy_and_survives_json() -> None:
+    """Two properties a metrics provider owes, asserted together because both are about the reader.
+
+    ⚠️ **A copy**: a caller that mutated the returned map would corrupt the tally of the only
+    shared mutable object in the process. ⚠️ **JSON-native**: the keys are pre-rendered strings
+    because a tuple or enum key raises `TypeError` inside `GET /metrics`' `json.dumps` and takes
+    the **whole endpoint** down with a 500 — one unreadable metric costing every other one.
+    """
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    mgr = _manager(bus, clock, initial=RobotState.SPEAKING)
+
+    async with bus:
+        await mgr.transition(Trigger.SYSTEM_STARTED, correlation_id=uuid4())
+
+    reading = mgr.illegal_transitions()
+    reading["SPEAKING/SYSTEM_STARTED"] = 999
+    reading["invented"] = 1
+    assert mgr.illegal_transitions() == {"SPEAKING/SYSTEM_STARTED": 1}
+    assert json.loads(json.dumps(mgr.illegal_transitions())) == {
+        "SPEAKING/SYSTEM_STARTED": 1
+    }
 
 
 # --- observers (#452) -------------------------------------------------------

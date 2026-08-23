@@ -1035,6 +1035,12 @@ async def _run(config: Config, *, build: str) -> int:
     resources = ProcResources()
     metrics.register("rss_bytes", resources.rss_bytes)
     metrics.register("mem_available_bytes", resources.mem_available_bytes)
+    # The other failure a long window finds and a gate cannot: a state machine rejecting the same
+    # move over and over (#456). An illegal transition publishes nothing by design (§3.10.3), so
+    # this counter is the only thing outside the process that can see one — a bound method beside
+    # `bus.queue_stats` above, and for the same reason: both are the "loud" half of a policy whose
+    # loudness was previously one log line nobody reads at 03:00 on day nine.
+    metrics.register("illegal_transitions", state.illegal_transitions)
     # §9.5's GET /state (#385). `state` is registered HERE because the composition root is what
     # holds the StateManager; `affect` and `session` are registered inside `_wire_services`, by
     # the code that builds those services. Three fields, three registrars — which is what makes
