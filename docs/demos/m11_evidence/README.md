@@ -31,9 +31,15 @@ here as such rather than absorbed.
 ## Grading it
 
 ```sh
-sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
+cd /opt/avid && sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
     --mode grade --since 1787404688 --config /etc/robot/config.toml
 ```
+
+⚠️ **The `cd` is load-bearing, not tidiness.** `[ai] personality` is a *relative* path, and
+SDS §6.5 resolves relative paths against the **process working directory** — which for
+`robot.service` is `WorkingDirectory=/opt/avid`. Run this from anywhere else and `load_config`
+raises `FileNotFoundError` before a single criterion is graded. The command recorded here from
+2026-08-22 until 2026-08-23 omitted it, and **could not run as written**.
 
 Exit code is non-zero on **fail or inconclusive** — inconclusive is not a pass, and most often
 means the sampler itself has holes, which makes every other number a statement about a smaller
@@ -68,6 +74,18 @@ The Pi was rebooted before this window opened, to find out:
 ⚠️ That note **explains** an event; it does not **excuse** one. AC-3 and AC-3b keep their verdicts.
 It exists because a power cut and a crash leave byte-identical records and journald is volatile
 (#381), so thirty days from now nothing else will remember which was which.
+
+### ⚠️ It stopped being hypothetical on day 1
+
+**It happened, 22.5 minutes into this window** — and the log above was empty when it did. The
+machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for the whole
+window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
+full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
+
+The cause is **not established**, and the honest reason is that nothing recorded it: journald had
+already lost the pre-reboot boot by the time anyone looked. That is exactly the hole this log
+covers, and an empty log is indistinguishable from "nobody touched it". **Write the note at the
+time; you cannot reconstruct it later.**
 
 ## What is being measured
 

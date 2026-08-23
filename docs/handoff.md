@@ -6,7 +6,7 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-23 · `main = 7cd2238` + this commit · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · gh `AliSleiman0`.
+**As of:** 2026-08-23 · `main = dd3fba4` + this branch · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · 🔴 **AC-3b already failed on day 1 — the window continues, see below** · gh `AliSleiman0`.
 
 ## ⭐ Next session — the clock is the only thing on the critical path
 
@@ -23,15 +23,62 @@ fine — **deploying is not**, until 21 September.
 If something genuinely must ship, that is a decision to **restart the window**, recorded as such in
 `docs/demos/m11_evidence/window.json`. Restarting is not a disaster; *silently* restarting is.
 
-### 🔴 Do this first: run the soak grade pass
+### ✅ Done, and it found something: the first soak grade pass
 
-It is the one time-sensitive item on the list, and it has still never been run against a
-multi-day window.
+**Run 2026-08-23T09:14Z, 0.83 days in. `4 passed, 1 failed, 0 inconclusive` — exit 1.**
+It found a real defect on its first outing, which is the argument for having run it on day 1
+rather than day 29.
+
+| | |
+|---|---|
+| AC-0 coverage | 99.6420%, 1195 samples, one 209 s gap |
+| AC-2 uptime | **99.8914%** (78 s down; 717 s permitted at the 99% bar) ✅ |
+| AC-3 manual restarts | **0** ✅ |
+| AC-4 build | single, `v0.M10.0-47-g8d03690` ✅ |
+| **AC-3b unplanned stops** | **1 — ❌ FAIL.** Boot `c7c6c3d5`, last seen `1787406043` |
+
+⚠️ **This does NOT end the window, and the reasoning is on the record so nobody re-litigates it on
+day 29.** O5 is *"30-day soak, ≥99% uptime, zero manual restarts"*, and §12.6 is explicit that an
+unclean stop is **not manual**: *"a crash or watchdog kill … but it is a defect, counted and
+reported separately."* Both of O5's own bars pass. §12.6 then says *"zero is the expectation; any
+occurrence is a finding with its own issue"* — so it is **filed, not absorbed**, and the clock
+keeps running.
+
+⚠️ **Do not read the non-zero exit code as "O5 failed".** AC-3b failing is enough to make the
+harness exit 1. Read the per-criterion lines, not `$?`.
+
+**What the failure actually was** — the *machine* rebooted ≈22.5 min into the window. It is **not**
+the deliberate reboot: that one is earlier and *clean* (`5e1009ea`, `e5e1d1ee`, both
+`stop_reason=signal` at 13:15/13:16), which proves the graceful path records a signal on this
+machine, so the 13:40:43 stop was not graceful. Evidence it was a machine reboot: journald holds
+nothing before 13:40:53; both units `ActiveEnter` 13:40:53/13:41:13 with `NRestarts=0`;
+`boot_log.started_mono` is **48.7 s** for `b566ffd9` against **15726 s** for the run before the
+deliberate reboot.
+
+⚠️ **The cause is not established and probably never will be** — journald is volatile here (#381),
+and a power cut and a kernel panic leave byte-identical records. That gap is the entire reason
+`/var/lib/soak/interventions.jsonl` exists, and it was **empty**. `vcgencmd get_throttled` reads
+`0x0`, but it resets at boot, so it covers only the run since.
+
+⚠️ **The clock is not trustworthy across a reboot on this board.** That boot came up reading
+**2026-04-27** — 118 days stale — before `fake-hwclock` and then `systemd-timesyncd` stepped it
+(`13:17:20 → 13:40:47`, *"restoring from recorded timestamp"*). Epoch arithmetic **across** a
+reboot here is sand; `boot_log.started_mono` is the column that survives it. That is AVID-345, and
+it is why that column exists.
+
+### Re-running it
+
 
 ```sh
-sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
+cd /opt/avid && sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
     --mode grade --since 1787404688 --config /etc/robot/config.toml
 ```
+
+⚠️ **The `cd` is load-bearing, not tidiness.** `[ai] personality` is a *relative* path, and
+SDS §6.5 resolves relative paths against the **process working directory** — which for
+`robot.service` is `WorkingDirectory=/opt/avid`. Run this from anywhere else and `load_config`
+raises `FileNotFoundError` before a single criterion is graded. The command recorded here from
+2026-08-22 until 2026-08-23 omitted it, and **could not run as written**.
 
 | | |
 |---|---|
@@ -40,12 +87,12 @@ sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
 | build under test | **`v0.M10.0-47-g8d03690`** |
 | durable record | `docs/demos/m11_evidence/window.json` + issue #389 |
 
-⚠️ **Run it now-ish, not on day 29.** It works — smoke-tested against the live window, all nine
-criteria reporting — but a multi-day window is the first time **AC-0's coverage figure means
-anything**, and a coverage hole discovered on day 29 cannot be repaired. Non-zero exit on **fail or
-inconclusive**; inconclusive is not a pass.
+Non-zero exit on **fail or inconclusive** — and inconclusive is not a pass. Read-only over the
+loopback API; it does **not** count as an intervention, so re-run it as often as you like.
 
-This is read-only over the loopback API and does **not** count as an intervention.
+⚠️ **AC-3b will keep failing for the rest of this window.** The stop is inside it and cannot leave.
+Expect exit 1 every run from now until 21 September; what you are watching for is a *second*
+occurrence, a drifting AC-0 coverage figure, and the memory trend under `MEM`.
 
 ### What is actually left, and what each one costs
 
@@ -108,6 +155,18 @@ Either way it also costs uptime (7h12m slack at the 99% bar) and AC-0 coverage.
 ⚠️ It **explains** an event, it does not **excuse** one — AC-3/AC-3b keep their verdicts. It exists
 because a power cut and a crash leave byte-identical records and journald is volatile (#381), so
 nothing else will remember which was which.
+
+### ⚠️ It stopped being hypothetical on day 1
+
+**It happened, 22.5 minutes into this window** — and the log above was empty when it did. The
+machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for the whole
+window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
+full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
+
+The cause is **not established**, and the honest reason is that nothing recorded it: journald had
+already lost the pre-reboot boot by the time anyone looked. That is exactly the hole this log
+covers, and an empty log is indistinguishable from "nobody touched it". **Write the note at the
+time; you cannot reconstruct it later.**
 
 ---
 
