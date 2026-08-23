@@ -1848,6 +1848,50 @@ async def test_a_deadline_that_outlives_its_cancel_still_declines_to_fire(
     assert "ignored illegal transition" not in caplog.text
 
 
+async def test_an_idle_close_does_not_disarm_the_deadline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The deadline belongs to the state, so a session teardown must not take it away (#452).
+
+    ``_teardown_locked`` used to cancel it, and `Config` carries an inequality —
+    ``think_timeout_s < session_idle_close_s`` — for exactly that reason: *"the idle close
+    cancels the think timer and drives no transition, so a think timeout at or past it never
+    fires and the robot wedges in THINKING"*. That is the #452 wedge, written down a milestone
+    early and held off by a config check rather than by the code.
+
+    This drives the ordering the check forbids, deliberately: an idle close **before** the
+    deadline, with the machine still in THINKING. The socket goes; the deadline stays; the robot
+    still gets out. The inequality is worth keeping as a preference — a robot that closes its
+    socket mid-wait is not what anyone wants — but it is no longer the only thing standing
+    between this arc and a wedge, and that is the difference this asserts."""
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())  # answers nothing, ever
+    with caplog.at_level(logging.WARNING, logger="avid.state"):
+        async with _rig(
+            client=client, session_idle_close_s=2, think_timeout_s=5.0
+        ) as rig:
+            await _arm_the_deadline(rig)
+
+            # The idle close first — it tears the socket down and drives no transition at all,
+            # so the machine is still in THINKING with nothing left to answer it.
+            await _advance_until(rig, lambda: rig.client.closed, step_s=1.0)
+            assert rig.state.state is RobotState.THINKING
+            assert rig.service._session_open is False
+            assert rig.service._think_task is not None, (
+                "the idle close took the deadline with it — the machine is wedged again"
+            )
+
+            await _advance_until(
+                rig, lambda: rig.state.state is RobotState.DEGRADED, step_s=1.0
+            )
+
+            entered = rig.collector.of_type(SystemDegradedEntered)
+            assert len(entered) == 1
+            assert isinstance(entered[0], SystemDegradedEntered)
+            assert entered[0].cause == "think_timeout"
+    assert "ignored illegal transition" not in caplog.text
+
+
 async def test_stop_is_idempotent_and_closes_the_session() -> None:
     """``stop`` tears a live session down and is safe to call twice (§9.2)."""
     clock = FakeClock()

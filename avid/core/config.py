@@ -985,11 +985,20 @@ class Config(_Section):
     @model_validator(mode="after")
     def _think_timeout_precedes_the_idle_close(self) -> Config:
         # Two timers watch the same silence and only one of them drives a transition. The idle
-        # close tears the session down — cancelling the think timer on its way out — but publishes
-        # no trigger, so the machine stays exactly where it was. Set the think timeout at or past
-        # the idle close and it can never fire: the robot wedges in THINKING with a closed socket,
-        # which is verbatim the 54-second freeze AVID-171 was filed for. Loud at load, like the
-        # VAD inequality above — the alternative is a knob that silently does nothing.
+        # close tears the session down but publishes no trigger, so the machine stays exactly
+        # where it was. Set the think timeout at or past the idle close and the robot waits in
+        # THINKING with a closed socket — the 54-second freeze AVID-171 was filed for. Loud at
+        # load, like the VAD inequality above: the alternative is a knob that silently does
+        # nothing.
+        #
+        # ⚠️ **This check was the only thing preventing that wedge, and since #452 it is not.**
+        # The idle close used to cancel the think timer on its way out, so a think timeout past
+        # it could *never fire at all*; the deadline is owned by the state now and `_teardown_locked`
+        # deliberately leaves it alone, so it still fires and still gets the robot out. Kept
+        # anyway, and deliberately not relaxed here: a robot that closes its socket while it is
+        # still waiting for the reply is not a configuration anyone wants, and the ordering is
+        # cheaper to reject at load than to explain in a log. It is a preference now rather than
+        # a correctness guard — relaxing it is its own decision, with its own test.
         if self.gate.think_timeout_s >= self.gate.session_idle_close_s:
             raise ValueError(
                 f"gate.think_timeout_s ({self.gate.think_timeout_s}) must be < "

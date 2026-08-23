@@ -1136,7 +1136,9 @@ class ConversationService:
         self._thinking_task = None
         # ⚠️ NOT the §6.9 think deadline (#452). It is armed by the *state*, not by the session,
         # and every path here can run with the machine still in THINKING — an idle close most of
-        # all, which drives no transition, so nothing would ever re-arm what this cancelled.
+        # all, which drives no transition, so nothing would ever re-arm what this cancelled. That
+        # exact arc is why `Config` asserts `think_timeout_s < session_idle_close_s`; leaving the
+        # deadline alone here is what turns that inequality from the only guard into a preference.
         # `_degrade` needs no help: it transitions out of THINKING first, and `on_transition`
         # cancels on that edge. `stop()` cancels it explicitly, where the process is ending.
         await self._client.aclose()
