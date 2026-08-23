@@ -462,6 +462,44 @@ async def test_every_criterion_reports_even_when_an_earlier_one_fails(
     assert _load_memory_pi()._report(criteria) == 1
 
 
+def _fact(fact_id: int, text: str) -> Fact:
+    """A stored row, reduced to what `_find` reads: its id and its text."""
+    return Fact(
+        id=fact_id,
+        text=text,
+        kind="other",
+        importance=5,
+        created_at=0,
+        last_accessed_at=0,
+    )
+
+
+def test_find_refuses_to_choose_between_two_matching_facts() -> None:
+    """The guard itself, tested — because the corpus guard above cannot reach it (#447).
+
+    ⚠️ **Neutering `_find`'s raise left the suite green**, since with the corpus fixed nothing ever
+    hands it an ambiguous needle. A guard covered only by the absence of the thing it guards
+    against is a guard the next person deletes as dead code — and this one is what stops a
+    *future* corpus edit from silently re-introducing a coin flip.
+
+    `None` is asserted in the same test on purpose: "nothing was stored" and "this needle
+    identifies nothing" are opposite failures and must not share an answer. The first is a
+    statement about the robot and AC-2 counts it as a miss; the second is a statement about the
+    corpus and admits no verdict at all.
+    """
+    memory_pi = _load_memory_pi()
+    facts = [
+        _fact(1, "My sister Maya is a doctor in Cyprus"),
+        _fact(2, "I'm flying to Cyprus in September"),
+    ]
+
+    with pytest.raises(ValueError, match="identifies none of them"):
+        memory_pi._find(facts, ["cyprus"])
+
+    assert memory_pi._find(facts, ["flying", "cyprus"]).id == 2
+    assert memory_pi._find(facts, ["kangaroo"]) is None
+
+
 def test_every_declared_needle_identifies_exactly_one_fact() -> None:
     """#447: a needle that matches two facts identifies neither, and used to pick the first.
 
