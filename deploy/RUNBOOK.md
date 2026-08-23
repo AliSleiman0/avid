@@ -10,7 +10,8 @@
 > deliberately does not copy them: a procedure duplicated here is a copy that will rot, which is
 > the exact failure `PI_OPERATIONS.md` exists to teach.
 
-⏱️ **The M11 soak is running (2026-08-22 → 2026-09-21).** Every diagnostic in §1 is read-only and
+⛔ **The M11 soak was STOPPED on 2026-08-23 and the freeze is lifted** (§4.0, SDS §12.6). The
+read-only discipline below still applies whenever a window IS open. Every diagnostic in §1 is read-only and
 safe. Everything in §4 is an intervention that costs the window something. Read
 [§4.0](#40-before-you-intervene-during-the-soak) before you touch anything.
 
@@ -518,8 +519,13 @@ Each says what it destroys. Read that line before running the command above it.
 
 ### 4.0 Before you intervene during the soak
 
-⏱️ While the M11 window is open (it closes **2026-09-21T13:18:08Z**), every action in this section
-costs the run something, and the costs are cumulative and unrecoverable:
+> ⛔ **The M11 window was STOPPED on 2026-08-23 and the freeze is LIFTED — deploying is allowed
+> again.** `soak-sampler` is stopped and disabled. O5 is amended (SDS §12.6): the 30-day hardware
+> soak moves to the production board, and what remains here is a 72-hour software-endurance run.
+> **The section below applies again the moment a new window is opened** — keep it.
+
+⏱️ While a soak window is open, every action in this section costs the run something, and the costs
+are cumulative and unrecoverable:
 
 | action | what it costs O5 |
 |---|---|

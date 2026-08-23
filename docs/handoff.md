@@ -6,220 +6,92 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-23 · `main = dd3fba4` + this branch · `v0.M10.0` tagged · ⏱️ **M11 soak running, closes 2026-09-21** · 🔴 **AC-3b already failed on day 1 — the window continues, see below** · gh `AliSleiman0`.
+**As of:** 2026-08-23 · `main` · `v0.M10.0` tagged · ⛔ **M11 soak STOPPED after ~26 h and O5 amended — the rig is UNFROZEN, deploying is allowed again** · gh `AliSleiman0`.
 
-## 🔴 STOP — the M11 window has been measuring a wedged robot (#452)
+## ⭐ Next session — the soak is STOPPED and the rig is UNFROZEN
 
-Found 2026-08-23 while gathering evidence for #439 AC-6. **The robot entered `THINKING` at minute 3
-of the window (2026-08-22 13:41:13) and has never left.** Three state transitions in 24 hours; 147
-of its 175 log lines are `ignored illegal transition ... in state THINKING`.
+**The M11 30-day window was stopped on 2026-08-23 after ~26 hours, deliberately, and O5 is
+amended.** The reasoning is below and on #389. This is the single most important thing to
+understand before touching anything.
 
-A spurious `audio.speech_started` in an empty room drove it LISTENING → THINKING; the Realtime
-session open then timed out on the handshake. The **10-second `THINK_TIMEOUT`** that exists for
-exactly this — `(THINKING, THINK_TIMEOUT) → DEGRADED` in `domain/state.py` — **never armed**,
-because the arming call sits in the turn path the failed open aborted. *Entering* THINKING is driven
-by a bus fact; *leaving* it needs a service. One happened without the other.
+### Why it was stopped
 
-⚠️ **AC-2's 99.89% is true and is not evidence for O5.** The process is genuinely healthy —
-heartbeating, RSS flat, zero drops, watchdog satisfied. The robot has done nothing. And `soak_pi.py`
-has **no liveness criterion**, so the gate cannot see it: the M8 lesson verbatim.
+Three findings, in the order they matter:
 
-**Two decisions, which are really one decision, and both are the operator's:**
-1. Restarting the window. It has thirteen days' less value than the clock suggests.
-2. Fixing #452 — which needs a deploy, and a deploy splits the window anyway.
+1. **The robot was wedged the whole time (#452).** It entered `THINKING` at minute 3 and never
+   left. 147 of its 175 log lines are `ignored illegal transition ... in state THINKING`. **The
+   window was measuring a catatonic robot at 99.89% uptime**, and every graded criterion passed.
+2. **The hardware under test is not the hardware that ships.** This is an MVP; the product board
+   will be cheaper and different. So the board-specific half of a soak — thermals, SD wear, brownout
+   margin, the whole no-RTC clock saga — is evidence about a prototype nobody will own.
+3. **The real cost was never calendar, it was the deploy freeze.** Thirty days of not touching
+   `/opt/avid` blocks #406, #400, #382, #414, #428, #310, #207's seal — and **#452's own fix**. You
+   could not repair the defect that made the window meaningless without invalidating the window.
 
-⛔ Do not restart the robot casually to "unstick" it: that is a clean stop, which fails **AC-3**,
-and it destroys the only live instance of the defect.
+⚠️ **The value the soak did deliver was front-loaded and came from *looking*, not from waiting.**
+Every finding — the AC-3b stop, the clock frames, the broken grade command, the wedge — landed in
+the first 48 hours, by inspection. The soak's own criteria found none of them and would have
+reported success for thirty days.
 
+### ⛔ The old rule is GONE. Deploying is allowed again.
 
-## ⭐ Next session — the clock is the only thing on the critical path
+The "do not `git pull` + restart on `/opt/avid`" freeze is **lifted**. `soak-sampler` is `inactive`
+**and `disabled`; `robot.service` is still running** and is the live repro of #452 — worth one look
+before you redeploy over it.
 
-⚠️ **This section replaces the previous one entirely.** It was written when Group B still had five
-open items. All five shipped; the laptop-only lane inside M11 is empty, and what is left divides
-cleanly into *"needs the rig"* and *"does not advance a milestone"*.
+### 🔴 Do these three, in this order
 
-### ⛔ The one rule, unchanged
+**1. Fix #452 — the wedge.** The defect: *entering* `THINKING` is driven by a bus fact
+(`audio.speech_ended`, from `AudioService`), but the only exit that does not need a working session
+is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — which a failed
+`open()` aborts before reaching. One happens without the other.
 
-**Do not `git pull` + restart on `/opt/avid`.** §12.6 makes a mid-window build change a *split
-window*; the guard is real (#388) and its criterion is proven to fire (#410). Working on `main` is
-fine — **deploying is not**, until 21 September.
+> ⚠️ Fix the **invariant**, not the site. `_think_timer`'s own docstring already enumerates
+> *"reachable arcs that leave this timer armed"*; this is its mirror image, a reachable arc that
+> leaves it **un**armed. Adding a fourth cancel site would be treating the symptom.
+> ⚠️ The replay fake cannot express a failed `open()` — check that before trusting a green.
 
-If something genuinely must ship, that is a decision to **restart the window**, recorded as such in
-`docs/demos/m11_evidence/window.json`. Restarting is not a disaster; *silently* restarting is.
+**2. Add the two criteria the soak was missing** (`docs/demos/soak_pi.py`):
 
-### ✅ Done, and it found something: the first soak grade pass
+- **Liveness** — the robot changed state at least N times / no single state held longer than X.
+  ⚠️ **This is the whole lesson.** A window that cannot tell a working robot from a catatonic one is
+  not a soak at any duration, and this one could not. Reported at minimum; graded if you can defend
+  the bar.
+- **Thermal** — the sampler records **no temperature at all** today. On a board whose R-09 risk *is*
+  thermal throttling, a soak with no thermal series is a gap. `vcgencmd measure_temp` /
+  `/sys/class/thermal/thermal_zone0/temp`; report `first/last/min/max`, like `MEM` does.
 
-**Run 2026-08-23T09:14Z, 0.83 days in. `4 passed, 1 failed, 0 inconclusive` — exit 1.**
-It found a real defect on its first outing, which is the argument for having run it on day 1
-rather than day 29.
+**3. Then run a 72-hour endurance run** — on the rig, with the robot **actually doing something**.
 
-| | |
-|---|---|
-| AC-0 coverage | 99.6420%, 1195 samples, one 209 s gap |
-| AC-2 uptime | **99.8914%** (78 s down; 717 s permitted at the 99% bar) ✅ |
-| AC-3 manual restarts | **0** ✅ |
-| AC-4 build | single, `v0.M10.0-47-g8d03690` ✅ |
-| **AC-3b unplanned stops** | **1 — ❌ FAIL.** Boot `c7c6c3d5`, last seen `1787406043` |
+⚠️ **The ~26 hours already run does NOT count**, and this is the one thing not to wave through. The
+robot was wedged for all but the first three minutes, so nothing exercised the paths a soak exists
+to stress. The memory series looks perfect —
 
-⚠️ **This does NOT end the window, and the reasoning is on the record so nobody re-litigates it on
-day 29.** O5 is *"30-day soak, ≥99% uptime, zero manual restarts"*, and §12.6 is explicit that an
-unclean stop is **not manual**: *"a crash or watchdog kill … but it is a defect, counted and
-reported separately."* Both of O5's own bars pass. §12.6 then says *"zero is the expectation; any
-occurrence is a finding with its own issue"* — so it is **filed, not absorbed**, and the clock
-keeps running.
-
-⚠️ **Do not read the non-zero exit code as "O5 failed".** AC-3b failing is enough to make the
-harness exit 1. Read the per-criterion lines, not `$?`.
-
-**What the failure actually was** — the *machine* rebooted ≈22.5 min into the window. It is **not**
-the deliberate reboot: that one is earlier and *clean* (`5e1009ea`, `e5e1d1ee`, both
-`stop_reason=signal` at 13:15/13:16), which proves the graceful path records a signal on this
-machine, so the 13:40:43 stop was not graceful. Evidence it was a machine reboot: journald holds
-nothing before 13:40:53; both units `ActiveEnter` 13:40:53/13:41:13 with `NRestarts=0`;
-`boot_log.started_mono` is **48.7 s** for `b566ffd9` against **15726 s** for the run before the
-deliberate reboot.
-
-**The cause is now established by elimination — a hard power loss or hardware reset, not
-software.** `/var/log/wtmp` persists across reboots where journald does not, and it has **no
-`shutdown system down` record for this boot** while *every other reboot in the machine's history
-has one*. Every remaining software route is excluded independently: `kernel.panic = 0` (a panic
-**hangs** this board, it does not reboot), `RuntimeWatchdogUSec=0`, `robot.service` `NRestarts=0`,
-no timer within 17 minutes, no `dpkg` activity that day. `EXT4-fs: orphan cleanup` on mount
-corroborates. The robot was **healthy at the instant** — RSS flat at 234.0 MiB, 1524 MiB available,
-zero bus drops, `/health` answering. Instantaneous is what a power loss looks like and what almost
-nothing else does.
-
-⚠️ **Why power was lost is still unknown.** One hypothesis worth eliminating before #400: #413
-landed the same day, so **2026-08-22 is the first day the robot drove servos under its own
-service**, and the servo rail is a plausible brownout source. A hypothesis, not a finding.
-
-⚠️ **The clock runs backwards inside the soak's own evidence.** Ordered by **rowid** (write order)
-rather than by `at`, row 24 was written *before* row 25 and is stamped one second *later* —
-`13:41:08` then `13:41:07` — and row 24 carries `uptime_s = 1492`, exactly `1432 + 60`, i.e. **the
-old process still alive and counting**. Rows 23–24 are in the pre-reboot clock frame, rows 25+ in
-the post-reboot one, and they are not the same timeline. **So AC-0's "209 s gap" and AC-2's "78 s
-down" are subtractions across two clocks, not measurements.** It does not move O5 — tens of seconds
-against a 7h12m budget — but the harness reports them as measurements. Tracked as #439 AC-4.
-
-⚠️ **The clock is not trustworthy across a reboot on this board.** That boot came up reading
-**2026-04-27** — 118 days stale — before `fake-hwclock` and then `systemd-timesyncd` stepped it
-(`13:17:20 → 13:40:47`, *"restoring from recorded timestamp"*). Epoch arithmetic **across** a
-reboot here is sand; `boot_log.started_mono` is the column that survives it. That is AVID-345, and
-it is why that column exists.
-
-### Re-running it
-
-
-```sh
-cd /opt/avid && sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
-    --mode grade --since 1787404688 --config /etc/robot/config.toml
+```
+h 0  235.24 MiB   h 4  236.52   h 8  236.47   h 24  236.48   <- flat for 20+ h
 ```
 
-⚠️ **The `cd` is load-bearing, not tidiness.** `[ai] personality` is a *relative* path, and
-SDS §6.5 resolves relative paths against the **process working directory** — which for
-`robot.service` is `WorkingDirectory=/opt/avid`. Run this from anywhere else and `load_config`
-raises `FileNotFoundError` before a single criterion is graded. The command recorded here from
-2026-08-22 until 2026-08-23 omitted it, and **could not run as written**.
+— and it is **worthless**: a leak shows under *work*, and there was none. Flat RSS on an idle
+process is not evidence of no leak; it is the absence of a test.
 
-| | |
-|---|---|
-| `--since` | **`1787404688`** |
-| closes | `1789996688` — 2026-09-21T13:18:08Z |
-| build under test | **`v0.M10.0-47-g8d03690`** |
-| durable record | `docs/demos/m11_evidence/window.json` + issue #389 |
+### What O5 now means
 
-Non-zero exit on **fail or inconclusive** — and inconclusive is not a pass. Read-only over the
-loopback API; it does **not** count as an intervention, so re-run it as often as you like.
+Amended on #389 with the original wording kept visible. The 30-day hardware soak moves to **the
+production board, when it exists** — that is the only board where thermals, wear and brownout are
+worth measuring. What stays here is the **software-endurance half**, which is what transfers across
+hardware: leaks, wedges, unbounded growth, reconnection decay.
 
-⚠️ **AC-3b will keep failing for the rest of this window.** The stop is inside it and cannot leave.
-Expect exit 1 every run from now until 21 September.
+⚠️ **Knowingly deferred, written down so it is not a surprise later:** SDS §12.6.1 argues a slow
+leak is visible only over thirty days and that on 2 GB it is *the* failure mode. A 72-hour run does
+not discharge that. The honest position is that it is cheaper to test under synthetic load than by
+waiting a month — but it **is** untested, and it is owed on the production board.
 
-**And a second stop would not end the window either** — decided in advance (#439 AC-5, SDS §12.6):
-the window continues, AC-3b reports the **count**, each occurrence gets its own issue. ⚠️ Not
-because it is free: downtime is capped at **7 h 12 m for the whole thirty days** and the costs are
-cumulative, so repeated stops fail this on **AC-2** — a bar agreed before the run rather than
-invented after it. **Only a deploy restarts a window.** What you are watching is the AC-2 figure,
-AC-0 coverage drift, and the `MEM` trend.
+### After that, the board is wide open again
 
-### What is actually left, and what each one costs
-
-**Nothing left in the M11 laptop lane.** Group B is done. The remaining work is one of four kinds,
-and it is worth picking deliberately rather than by issue number:
-
-| | Issue | Cost / blocker |
-|---|---|---|
-| **Wait** | **#389** — the M11 gate | ⏱️ the clock. Grade pass above; nothing else advances it |
-| **Bench, and it charges the soak** | **#207** AC-10 → AC-11 | see below — it stops `robot.service` |
-| **Laptop, off the milestone path** | **#407** `XS`, **#415** `S`, **#264** `M`, **#402** `XL` epic | free of the rig; none of them seals anything |
-| **Blocked on the rig** | #406 `must`, #400 `must`, #382 `must`, #310, #414, #428, #265, #267 | ⛔ all need hardware, most need a deploy |
-
-The four laptop-doable ones, in the order I would take them:
-
-- **#407** (`XS`, `conf:H`) — five modules name a **ReSpeaker** the rig does not have. Pure
-  documentation-in-code drift, cheap, and the kind of thing that misleads a future bring-up.
-- **#415** (`S`) — `response_cancel_not_active`: barge-in cancels a response the server already
-  finished. SDS §6.2.4 step 5 already describes the conditional fix; this is the code catching up.
-- **#264** (`M`) — ⚠️ **AC-1 is merged** (`2777b1a`); AC-2 and AC-3 need the two gate probes run
-  against a **real-MiniLM store**, which is a model download rather than a rig. Genuinely
-  off-hardware, and the issue says so.
-- **#402** (`XL`, epic, `conf:L`) — M12's fleet epic. A planning artefact, not an afternoon.
-
-### #207 is 10 of 12 — and finishing it charges the soak
-
-| | |
-|---|---|
-| **AC-10** | ⛔ bench — pin #200's **provisional** `min_deg`/`max_deg` to measured safe reach. The **procedure is written down** now (`PI_OPERATIONS.md` §5c), so this is execution, not design |
-| **AC-11** | tag `v0.M9.0`, once AC-10 lands |
-
-Passed with evidence on the issue: AC-0 … AC-9.
-
-⚠️ **AC-10 needs no deploy, but it does need `robot.service` stopped**, and that is an
-**intervention against the running window**: it fails **AC-3** (a clean stop *is* a manual restart),
-and it spends uptime against the 99% bar. Log it to `/var/lib/soak/interventions.jsonl` *before*
-acting. **This is a deliberate trade — M9's seal against M11's evidence — and it should be decided
-at a desk, not at the bench with a servo in hand.** Waiting until 21 September costs nothing but
-time.
-
-### What a power cut costs — measured, not guessed
-
-The Pi was rebooted before the window opened, deliberately, to find out. **It survives**: both
-units are `enabled` and came back unattended, `samples.db` persisted, the sampler resumed on the
-same file.
-
-| | records | fails |
-|---|---|---|
-| graceful `reboot` | `stop_reason=signal` — a **clean** stop | **AC-3** (manual restart) — *part of O5* |
-| power cut / crash | `stopped_at` NULL | **AC-3b** — reported, not part of O5's definition |
-
-Either way it also costs uptime (7h12m slack at the 99% bar) and AC-0 coverage.
-
-**If it happens, write it down** — `/var/lib/soak/interventions.jsonl`, one JSON object per line:
-
-```json
-{"at": 1787404800, "kind": "power_cut", "note": "unplugged the bench strip"}
-```
-
-⚠️ It **explains** an event, it does not **excuse** one — AC-3/AC-3b keep their verdicts. It exists
-because a power cut and a crash leave byte-identical records and journald is volatile (#381), so
-nothing else will remember which was which.
-
-### ⚠️ It stopped being hypothetical on day 1
-
-**It happened, 22.5 minutes into this window** — and the log above was empty when it did. The
-machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for the whole
-window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
-full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
-
-The cause **is** established — a hard power loss or hardware reset, by elimination: `wtmp` has no
-`shutdown` record for that boot while every other reboot in the machine's history does, and every
-software route (panic, watchdogs, OOM, timers) is independently excluded. **Why** power was lost is
-still unknown. Full evidence in #439 and `window.json`.
-
-⚠️ But note *how* that was recovered: from `wtmp`, `boot_log.started_mono` and sampler **rowids** —
-never from a note, because nobody wrote one. Reconstruction happened to be possible and will not
-always be. **Write the note at the time.**
-
----
+With the freeze lifted, the rig work is unblocked and most of it is `must`: **#406** (re-measure
+O1), **#207** AC-10/AC-11 (seal M9 — it needed the service stopped, which no longer costs
+anything), **#400**, **#382**, **#414**, **#428**, **#310**. Laptop-side: **#447**'s O2 verdict and
+**#402**.
 
 ## What shipped, 2026-08-22 → 23
 
@@ -316,7 +188,8 @@ a new issue for a phantom artefact; that is an owner in name only.
 - 📕 **`deploy/RUNBOOK.md` exists** (#387/#425) — symptom-first, thirteen entries, each Confirm /
   Fix / **Not-to-be-confused-with**. Read it before diagnosing anything on the rig; it is now the
   first stop and `PI_OPERATIONS.md` is the second. `tests/docs/test_runbook.py` keeps it honest.
-- ⏱️ **The M11 soak is RUNNING** — opened 2026-08-22T13:18:08Z, closes 2026-09-21T13:18:08Z, build
+- ⛔ **The M11 soak is STOPPED** (2026-08-23, ~26 h in, void — see the top of this file). Was:
+  opened 2026-08-22T13:18:08Z, build
   `v0.M10.0-47-g8d03690`. `robot` and `soak-sampler` both `active` + `enabled`.
 - **The robot moves under its own service** — that had never worked before 2026-08-22 (#413).
 - **M9 is 10/12, not sealed** — AC-10 (bench) then AC-11 (the tag). M10 sealed (`v0.M10.0`). Nine

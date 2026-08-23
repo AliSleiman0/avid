@@ -88,10 +88,26 @@ def test_every_recorded_grade_command_enters_the_working_directory() -> None:
 
     window = json.loads(_WINDOW_PATH.read_text(encoding="utf-8"))
     recorded.append(("window.json:grade_command", window["grade_command"]))
-    for path in (_README_PATH, _HANDOFF_PATH):
-        blocks = _fenced_grade_blocks(path.read_text(encoding="utf-8"))
-        assert blocks, f"{path.name} no longer records the grade command — did it move?"
-        recorded.extend((f"{path.name}:{i}", b) for i, b in enumerate(blocks))
+
+    # ⚠️ The *durable record* must carry the command; the working baton need not.
+    # `window.json` and the evidence README are the artefacts that outlive the session, so a
+    # missing command there is a real regression. `handoff.md` is rewritten every session and may
+    # legitimately stop mentioning it — as it did on 2026-08-23 when the M11 window was stopped.
+    # The invariant this test defends is **"every command that IS recorded is runnable as
+    # written"**, not "these three files each contain one". Requiring the baton to carry it made a
+    # deliberate edit look like a regression — a guard describing yesterday's document instead of
+    # today's claim.
+    blocks = _fenced_grade_blocks(_README_PATH.read_text(encoding="utf-8"))
+    assert blocks, (
+        f"{_README_PATH.name} no longer records the grade command — did it move?"
+    )
+    recorded.extend((f"{_README_PATH.name}:{i}", b) for i, b in enumerate(blocks))
+    recorded.extend(
+        (f"{_HANDOFF_PATH.name}:{i}", b)
+        for i, b in enumerate(
+            _fenced_grade_blocks(_HANDOFF_PATH.read_text(encoding="utf-8"))
+        )
+    )
 
     for where, command in recorded:
         assert _GRADE_CALL.search(command), (
@@ -148,7 +164,10 @@ def test_the_recorded_command_grades_the_window_the_record_declares() -> None:
     sources: list[tuple[str, str]] = [
         ("window.json:grade_command", window["grade_command"])
     ]
-    for path in (_README_PATH, _HANDOFF_PATH):
+    for path in (
+        _README_PATH,
+        _HANDOFF_PATH,
+    ):  # absence is fine; a WRONG --since is not
         sources.extend(
             (f"{path.name}:{i}", b)
             for i, b in enumerate(

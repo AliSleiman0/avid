@@ -68,5 +68,19 @@
     "what_it_means_for_this_window": "!! READ THIS BEFORE QUOTING ANY FIGURE FROM THIS WINDOW. The uptime arithmetic is not wrong - it is measuring the PROCESS, which is genuinely healthy: heartbeating, RSS flat, zero bus drops, watchdog satisfied. But O5 means to describe a robot that works unattended for thirty days, and this one has done nothing since minute 3. AC-2's 99.89% is true and it is not evidence for O5.",
     "the_gate_cannot_see_it": "soak_pi.py has NO liveness criterion. Nothing asserts the robot ever changed state, took a turn, or moved. That is #452 AC-4, and it is the second defect: the M8 lesson verbatim - every automated gate passed while the robot was blind.",
     "decision_still_open": "Whether to restart the window is NOT decided here. Restarting is an operator decision recorded in this file (see _second_occurrence_policy for what does and does not restart a window). Note that #452 cannot be fixed on the rig without a deploy, and a deploy splits the window anyway - so the two decisions are one decision."
+  },
+  "_STOPPED": {
+    "stopped_at_utc": "2026-08-23T15:18Z",
+    "ran_for": "~26 hours of a planned 30 days. 1560 samples, 2026-08-22 13:18 -> 2026-08-23 15:18 UTC.",
+    "verdict": "VOID as evidence for O5. Not a failed window - a window whose subject was not doing anything. See #452.",
+    "why": [
+      "#452: the robot entered THINKING at minute 3 and never left. The window was measuring a catatonic robot at 99.89% uptime, and every graded criterion passed.",
+      "The hardware under test is not the hardware that ships. This is an MVP; the product board will be different and cheaper. The board-specific half of a soak - thermals, SD wear, brownout margin, the no-RTC clock behaviour - is evidence about a prototype nobody owns.",
+      "The real cost was the deploy freeze, not the calendar: 30 days of not touching /opt/avid blocked #406, #400, #382, #414, #428, #310, #207's seal - and #452's OWN FIX. The defect that made the window meaningless could not be repaired without invalidating the window."
+    ],
+    "what_it_did_buy": "Everything of value arrived in the first 48 hours and came from LOOKING, not from waiting: the AC-3b unplanned stop (#439), the two clock frames (#444), a grade command that could not run (#440), and the wedge itself (#452). !! The soak's own criteria found NONE of them and would have reported success for thirty days.",
+    "machine_state": "soak-sampler: stopped AND disabled. robot.service: left RUNNING on purpose - it is the live repro of #452. samples.db and robot.db left in place; a future window needs a new --since, and this file's window_start_epoch is now historical.",
+    "what_replaces_it": "O5 amended (#389): the 30-day HARDWARE soak moves to the production board when it exists. What stays is the software-endurance half, which transfers across hardware - leaks, wedges, unbounded growth, reconnection decay - as a 72-hour run, after #452 is fixed and after soak_pi.py gains a LIVENESS criterion and a thermal series.",
+    "_knowingly_deferred": "SDS §12.6.1 argues a slow leak is visible only over thirty days and that on 2 GB it is THE failure mode. A 72-hour run does not discharge that, and the ~26 hours already run discharges nothing at all: the robot was wedged, so the flat RSS curve is the ABSENCE of a test, not a passing one. Owed on the production board."
   }
 }
