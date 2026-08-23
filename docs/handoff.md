@@ -269,6 +269,35 @@ so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
 
+- ⚠️ **Ask which test you *cannot* write — that is where the defect is.** #452 ran for 24 hours on
+  the rig and the assertion that would have caught it (`"ignored illegal transition" not in
+  caplog.text`) works **only** in `tests/e2e`, because illegal transitions are reachable only when
+  the real `AudioService` drives the audio edges. That harness builds its client through
+  `ReplayRealtimeClient`, which could not refuse a connect at all — so the failure mode lived in a
+  test-local subclass in `tests/services/`, i.e. precisely where the assertion does nothing. **A
+  fake that cannot fail the way the real transport routinely does is an incomplete port (P6)**, and
+  the gap is invisible from either side on its own: the unit test passes, the e2e test does not
+  exist, and nothing is red. `ReplayRealtimeClient(open_error=…)` closes this one; the question
+  generalises to every port.
+
+- ⚠️ **A test that races `FakeClock` hangs instead of failing, and `sleepers` can stay flat while a
+  new sleeper parks.** Writing #452's re-check test, `while clock.sleepers <= parked: await
+  asyncio.sleep(0)` spun forever: the cancelled timer's sleeper deregistered as the new one
+  registered, so the count never moved even though the task *was* parked. A count-based wait is
+  a guess with a nicer face. Prefer removing the race — a zero-length deadline runs the body with
+  nothing to lose — and remember the failure mode is a **hung suite**, not a red one, so it costs a
+  timeout to notice rather than a line of output.
+
+- ⚠️ **When a fix relocates ownership, every test that used the old owner as its instrument is
+  silently measuring something else.** #452 moved the §6.9 deadline from the turn path to the state.
+  Two tests stayed green and stopped meaning anything: AVID-186's latch regression asserted on
+  `_think_task`, which the latch no longer controls (it would now pass **with the latch bug fully
+  restored**), and AVID-161's overlap test claimed the in-timer state re-check was "the only thing
+  standing between this arc and an illegal transition" when the new cancel is. Both were rewritten
+  onto what they still govern. **Grep the moved thing's name through the tests and re-read every
+  hit's docstring** — a green test whose stated mechanism no longer exists is worse than a deleted
+  one.
+
 - ⚠️ **A green gate can mean the instrument never looked.** The M11 soak passed every graded
   criterion for 26 hours while the robot was wedged and doing nothing. Before trusting a gate, ask
   what it asserts the *subject* did — not what it asserts about the process running it.
