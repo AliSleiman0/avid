@@ -241,6 +241,28 @@ async def test_keyword_search_on_a_termless_query_returns_empty(
     assert list(await repo.keyword_search("!?...", limit=5)) == []
 
 
+async def test_a_query_of_only_function_words_matches_nothing(
+    repo: FactRepository,
+) -> None:
+    """#447: a keyword branch that fires on "I" is not a keyword branch.
+
+    ⚠️ This is a *contract* test rather than a sqlite one because the claim is about the port, not
+    the storage: `keyword_search` is §7.7's proper-noun branch, and #375 made a hit worth delta in
+    the score. Together those meant every token was worth delta — including the ones that appear
+    in every sentence — so a query like *"what am I training for?"* handed the bonus to five facts
+    whose only overlap was **I**, and the semantically correct fact, which had no keyword hit at
+    all, lost to two facts the model itself ranked further away.
+
+    Matching everything is not evidence about anything, so a query with no content words is a
+    clean miss — the same answer punctuation already got, for the same reason."""
+    await repo.add(make_fact(text="Maya is my sister"))
+    await repo.add(make_fact(text="I love spicy food"))
+
+    assert list(await repo.keyword_search("what am I doing for it?", limit=5)) == []
+    # ...and one content word is still enough to bring its fact back.
+    assert list(await repo.keyword_search("what am I doing about Maya?", limit=5)) != []
+
+
 async def test_keyword_search_respects_the_limit(repo: FactRepository) -> None:
     for i in range(6):
         await repo.add(make_fact(text=f"coffee fact number {i}", kind="routine"))

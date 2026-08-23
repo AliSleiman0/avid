@@ -462,6 +462,29 @@ async def test_every_criterion_reports_even_when_an_earlier_one_fails(
     assert _load_memory_pi()._report(criteria) == 1
 
 
+def test_every_declared_needle_identifies_exactly_one_fact() -> None:
+    """#447: a needle that matches two facts identifies neither, and used to pick the first.
+
+    `flight` declared ``["cyprus"]`` and the corpus holds **two** facts mentioning Cyprus, so
+    `_find` returned the *sister* fact and the flight probe graded a rank-**1** correct answer as
+    a recall miss. O2 was reported a point below what the robot earned, by the instrument.
+
+    ⚠️ **This runs against the declared corpus, not against a store**, so it needs no embedder and
+    no model — which is the point: an ambiguous needle is a fixture defect and should fail in
+    milliseconds on every CI run, not on the one real-embedder run somebody remembers to do.
+    `_find` raises on ambiguity now as well; this is the guard that stops it ever being reached.
+    """
+    memory_pi = _load_memory_pi()
+    spec, _ = _full_corpus()
+    texts = [fact["say"] for fact in spec["facts"]]
+
+    for declared in spec["facts"]:
+        hits = [t for t in texts if memory_pi._matches(t, declared["match"])]
+        assert len(hits) == 1, (
+            f"needle {declared['match']} for '{declared['key']}' matches {len(hits)} facts: {hits}"
+        )
+
+
 def test_the_shipped_script_declares_twenty_facts_and_a_proper_noun_probe() -> None:
     """The committed corpus is part of the criterion, not a sample.
 
@@ -731,11 +754,12 @@ async def test_the_two_probes_that_failed_the_m7_gate_hit_against_a_real_minilm_
     *structurally* unreproducible there. `2777b1a` said exactly that in its own commit message
     rather than ticking AC-2 on a green that meant nothing.
 
-    ⚠️ **Scoped to those two probes, deliberately.** The full recall phase scores **18/20 = 90%**
-    against this store, under O2's 19/20 bar — but the two misses are `guitar` and `marathon`,
-    neither of them this issue's, and both pure semantic inference with no lexical anchor for FTS5
-    to grip. Asserting the whole phase here would make #264 hostage to an unrelated defect; that
-    one is **#447**. Asserting *these* probes is what #264 asked for.
+    ⚠️ **Scoped to those two probes, deliberately.** When this was written the full recall phase
+    scored **18/20** against this store on two unrelated misses, `guitar` and `marathon`, and
+    asserting the whole phase here would have made #264 hostage to a different defect. That one
+    was **#447**, and it is fixed — the phase now scores 20/20 and is asserted as its own test
+    below. The scoping stays anyway: this test is about the proper-noun branch, and a test that
+    grades an aggregate cannot say *which* fact stopped being reachable.
     """
     embedder = _real_embedder()
     spec, facts = _full_corpus()
@@ -882,6 +906,53 @@ async def _probe_one(
     finally:
         await repo.aclose()
         await bus.stop()
+
+
+@pytest.mark.real_embedder
+async def test_the_whole_corpus_is_recalled_against_a_real_minilm_store(
+    tmp_path: Path,
+) -> None:
+    """#447 AC-4: the aggregate O2 is graded on, against the only instrument that can judge it.
+
+    **20/20.** The number this replaces was 18/20, and neither the score nor the misses survived
+    contact with a measurement:
+
+    ====================  =======  ==========================================
+    when                  score    misses
+    ====================  =======  ==========================================
+    M7 seal (2026-08-14)  18/20    `standup` (#450's punctuation), `dog` (#264)
+    #447 filed            18/20    `guitar`, `marathon` — at δ = 1.0
+    after #451 (δ = 0.5)  19/20    `marathon`
+    after #447            **20/20**  --
+    ====================  =======  ==========================================
+
+    ⚠️ **Three different pairs of misses, all called "18/20".** An aggregate is not a diagnosis,
+    and this project has now been misled by this particular one twice — which is the argument for
+    the two scoped probe tests above rather than only this line.
+
+    ⚠️ **This store is the best case and says so.** `_store` gives every fact the same importance
+    and one shared timestamp, so `_min_max` collapses the recency and importance terms to
+    constants and ordering is decided by relevance and keyword alone; extraction cannot fail
+    because the rows are written directly. O2 says *"at 30 days"* and nothing here ages anything.
+    A pass is therefore necessary and not sufficient.
+    """
+    embedder = _real_embedder()
+    spec, facts = _full_corpus()
+    db = await _store(
+        tmp_path, facts=facts, supersede=None, forget=None, embedder=embedder
+    )
+    criteria = await _run(db, script=spec, phase="recall", embedder=embedder)
+
+    recall = [c for c in criteria if c.ac == "AC-2"]
+    assert recall, (
+        "the harness reported no AC-2 criterion — this test is grading nothing"
+    )
+    assert len(recall) == 1
+    assert recall[0].verdict == "pass", (
+        f"O2's bar is not met against a real-MiniLM store: "
+        f"{recall[0].detail} {recall[0].rows}"
+    )
+    assert "20/20" in recall[0].name, recall[0].name
 
 
 @pytest.mark.real_embedder

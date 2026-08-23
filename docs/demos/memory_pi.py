@@ -167,10 +167,28 @@ def _matches(row_text: str, needles: list[str]) -> bool:
 
 
 def _find(facts: list[Fact], needles: list[str]) -> Fact | None:
-    for fact in facts:
-        if _matches(fact.text, needles):
-            return fact
-    return None
+    """The one stored fact *needles* identifies, or ``None`` if nothing was stored.
+
+    ⚠️ **Ambiguity raises rather than picking the first match (#447).** It used to return the
+    first, which is a coin flip presented as a measurement — and it lost one: `flight`'s declared
+    needle was ``["cyprus"]``, the corpus holds **two** facts mentioning Cyprus, and this returned
+    the *sister* fact. The flight probe then graded a rank-**1** correct answer as a recall miss,
+    and O2 was reported a point lower than the robot earned.
+
+    ``None`` and "ambiguous" are opposite failures and must not share an answer: ``None`` is a
+    statement about the *robot* (nothing was stored, which AC-2 counts as a miss), ambiguity is a
+    statement about the *corpus* (this needle cannot identify anything, so no verdict is
+    available). Reporting the second as the first is how a broken instrument reads as a defect —
+    which is #450 in a new costume, in the same function's blast radius.
+    """
+    hits = [fact for fact in facts if _matches(fact.text, needles)]
+    if len(hits) > 1:
+        raise ValueError(
+            f"needle {needles} matches {len(hits)} stored facts and so identifies none of them: "
+            + " | ".join(repr(f.text) for f in hits)
+            + " — fix the declared `match` in facts.json; a first-wins pick is a coin flip"
+        )
+    return hits[0] if hits else None
 
 
 async def _all_rows(repo: SqliteFactRepo) -> list[Fact]:
