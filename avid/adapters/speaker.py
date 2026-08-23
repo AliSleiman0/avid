@@ -9,8 +9,8 @@ both adapters keep them identically (SDS §3.9.1, lines 771-775):
   §3.9.2 "FakeSpeaker writes a WAV"), so the sim can never drift from the real speaker — it is
   the real speaker with no hardware behind it. Stdlib only.
 * :class:`AlsaSpeaker` plays to the MAX98357 I2S DAC via ALSA (``pyalsaaudio``). That library is
-  pip-on-Pi and absent off it (ADR-008, like ``picamera2``/``adafruit_servokit``/the ReSpeaker
-  mic), so it is imported **only** inside this module and **lazily** — inside the worker-thread
+  pip-on-Pi and absent off it (ADR-008, like ``picamera2``/``adafruit_servokit``), so it is
+  imported **only** inside this module and **lazily** — inside the worker-thread
   helpers, plus one guarded resolution at construction time (:func:`_alsa_error_type`, which is
   reached only on the Pi-only ``alsa`` branch of the composition root and falls back cleanly
   everywhere else). The module itself imports cleanly on CI and a laptop, where the fake path

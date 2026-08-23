@@ -116,7 +116,13 @@ async def demo_camera() -> None:
 
 
 async def demo_mic() -> None:
-    """Capture a few seconds from the ReSpeaker and save a WAV to play back."""
+    """Capture a few seconds from the microphone and save a WAV to play back.
+
+    ⚠️ The device below is a hardcoded ``"default"``, and on the built rig ``default`` is the
+    **MAX98357A amp**, not the mic — capture belongs at ``plughw:CARD=Device,DEV=0``. Tracked as
+    AVID-443; not fixed here, because AVID-407 is prose-only and a behaviour change would put a
+    silent capture defect inside a documentation PR.
+    """
     mic = AlsaMicrophone(
         device="default", sample_rate=_MIC_RATE, channels=1, chunk_ms=20
     )

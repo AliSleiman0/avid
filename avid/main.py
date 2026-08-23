@@ -251,8 +251,8 @@ def _build_microphone(config: Config) -> Microphone:
     """Select the ``Microphone`` adapter named by ``[adapters] microphone`` (AVID-53).
 
     ``fake`` is the laptop/sim default — synthesized PCM, no hardware; ``alsa`` captures from
-    the ReSpeaker via ALSA (the ``alsaaudio`` import lives inside that adapter, pip-on-Pi only,
-    ADR-008). Both are handed the same capture params from ``[microphone]`` (P7), so the stream
+    the ALSA device named in ``[microphone] device`` (the ``alsaaudio`` import lives inside that
+    adapter, pip-on-Pi only, ADR-008). Both are handed the same capture params from ``[microphone]`` (P7), so the stream
     contract behaves identically. Any other value fails loudly rather than silently doing nothing.
     """
     match config.adapters.microphone:
