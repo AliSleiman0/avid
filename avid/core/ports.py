@@ -359,7 +359,16 @@ class RealtimeClient(Protocol):
         (AC-2). ``None`` (or an empty resolved string) seeds the stateless M5 instruction unchanged
         (AC-4). Every open re-runs it — a reconnect is a cold session re-seeded with memory (§6.2.3,
         AC-5). The caller owns the fetch's error/empty/timeout handling, so what crosses here is only
-        ever a ready string."""
+        ever a ready string.
+
+        **Failure contract (#452).** An adapter that cannot establish the transport raises
+        :class:`OSError` — the stdlib's transport-failure family, so ``ConnectionError``,
+        ``socket.gaierror`` and ``TimeoutError`` all satisfy it. That is a **routine outcome, not a
+        bug**: a companion robot on a home network will meet it, and the caller's job is to stay
+        quiet and let the robot degrade, never to crash a bus handler. Anything else escaping this
+        call is a genuine defect and is meant to reach ``system.handler_failed`` — which is why the
+        caller catches this type and nothing wider. Every implementation, real and fake, owes this
+        contract; a fake that cannot refuse a connect is an incomplete port (P6)."""
         ...
 
     async def aclose(self) -> None:

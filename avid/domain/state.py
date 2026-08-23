@@ -58,7 +58,10 @@ class Trigger(Enum):
     type. ``THINK_TIMEOUT`` was in that unwired set until AVID-171: the row existed and nothing
     could reach it, and the bench paid for the difference — a 60 ms noise blip opened a session the
     model never answered and the robot sat in THINKING for **54 seconds** with no row out. It is
-    driven by ``ConversationService`` now (SDS §6.9).
+    driven by ``ConversationService`` now (SDS §6.9) — and since #452 it is armed on **entry to
+    THINKING**, whichever path drove it, rather than at the falling edge of a turn. The row was
+    reachable from one arc and the state has three; the soak rig found the difference the same way
+    the bench found the first one, at 24 hours instead of 54 seconds.
     ``test_every_trigger_drives_at_least_one_row`` holds that line; it is why AVID-158 deleted
     ``CONVERSATION_USER_TRANSCRIBED`` outright rather than leaving it row-less. That fact is
     still published (``avid/domain/conversation.py``) — it simply drives nothing.

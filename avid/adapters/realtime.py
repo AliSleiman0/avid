@@ -298,10 +298,28 @@ class ReplayRealtimeClient:
     """
 
     def __init__(
-        self, *, clock: Clock, timeline: Sequence[tuple[int, RealtimeEvent]]
+        self,
+        *,
+        clock: Clock,
+        timeline: Sequence[tuple[int, RealtimeEvent]],
+        open_error: str | None = None,
     ) -> None:
         self._clock = clock
         self._timeline = tuple(timeline)
+        # A refused connect, which the fake could not express at all until #452 — and a fake that
+        # cannot fail the way the real transport routinely does is an incomplete port (P6). The
+        # e2e gate is the only place the "no illegal transition" assertion bites, and it builds
+        # its client here, so a failure mode reachable only from a test-local subclass was
+        # invisible to exactly the test that would have caught the 24-hour wedge.
+        #
+        # A knob rather than a manifest record, deliberately: a manifest describes the stream on
+        # an **open** session, so `--capture` could never record a connect that never happened —
+        # and a `format` bump would invalidate every committed `assets/sessions/` directory for a
+        # fault that belongs to the transport, not to the recording.
+        #
+        # Public and mutable, beside the trace attributes below, so a test can clear it mid-run
+        # to script "refuses, then recovers" — which is the arc that matters.
+        self.open_error = open_error
         # Advertised, off the port (the contract's observation points, not an app need).
         self.sent: list[AudioChunk] = []
         self.truncations: list[tuple[str, int]] = []
@@ -316,7 +334,9 @@ class ReplayRealtimeClient:
         self.closed = False
 
     @classmethod
-    def from_dir(cls, path: Path, *, clock: Clock) -> ReplayRealtimeClient:
+    def from_dir(
+        cls, path: Path, *, clock: Clock, open_error: str | None = None
+    ) -> ReplayRealtimeClient:
         """Build a replay client from a recorded-session directory (AC-2).
 
         Reads ``<path>/session.json`` and resolves each ``assistant_audio_chunk``'s WAV
@@ -333,7 +353,7 @@ class ReplayRealtimeClient:
             (int(record["delay_ms"]), _build_event(record, base=path))
             for record in manifest["events"]
         ]
-        return cls(clock=clock, timeline=timeline)
+        return cls(clock=clock, timeline=timeline, open_error=open_error)
 
     async def open(self, *, memory: Awaitable[str] | None = None) -> None:
         """Open a fresh session — cold, no resume (SDS §6.2.3). Rewinds so a re-open replays
@@ -342,9 +362,17 @@ class ReplayRealtimeClient:
         A replay carries recorded instructions, so it does not seed a ``session.update`` — but it
         **awaits** the injected ``memory`` block (#126) so the top-facts fetch actually runs on every
         open (the cold re-seed, AC-5) and does not leak an un-awaited coroutine, recording the resolved
-        text on the off-port :attr:`injected` trace for the dispatch tests, like :attr:`truncations`."""
+        text on the off-port :attr:`injected` trace for the dispatch tests, like :attr:`truncations`.
+
+        Raises :class:`OSError` when :attr:`open_error` is set — the port's documented
+        transport-failure contract, and the exact type ``ConversationService`` catches at the
+        connect and nothing wider. The memory block is awaited **first**, before the raise, because
+        the real client resolves it concurrently with the connect and an un-awaited coroutine would
+        leak on every refusal (#452)."""
         if memory is not None:
             self.injected.append(await memory)
+        if self.open_error is not None:
+            raise OSError(self.open_error)
         self.opened = True
         self.closed = False
 

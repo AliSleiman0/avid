@@ -216,6 +216,35 @@ async def test_session_loss_ends_mid_turn_without_a_turn_done() -> None:
     assert not any(isinstance(e, TurnDone) for e in events)
 
 
+async def test_open_error_refuses_the_connect_with_an_oserror() -> None:
+    """The port's failure contract, on the fake that has to be able to express it (#452).
+
+    ``OSError`` **specifically**, and asserted as the type rather than as "it raised": the caller
+    catches exactly this at the connect and nothing wider, because a broad ``except Exception``
+    around a bus handler would re-hide the genuine subscriber bugs the bus's swallow-and-republish
+    exists to surface. Nothing is half-opened, and the memory block is still awaited — the real
+    client resolves it concurrently with the connect, so a refusal that skipped it would leak a
+    coroutine on every failed open.
+
+    Mutable on purpose: clearing it is how a test scripts "refuses, then recovers", which is the
+    arc that matters and the one a constructor-only knob could not express."""
+    clock = FakeClock()
+    replay = ReplayRealtimeClient(clock=clock, timeline=(), open_error="refused")
+
+    async def _memory() -> str:
+        return "one fact"
+
+    with pytest.raises(OSError):
+        await replay.open(memory=_memory())
+
+    assert replay.opened is False
+    assert replay.injected == ["one fact"]
+
+    replay.open_error = None
+    await replay.open()
+    assert replay.opened is True
+
+
 async def test_empty_timeline_drains_to_nothing() -> None:
     """An empty session yields nothing and returns cleanly (AC-5) — no hang, no error."""
     clock = FakeClock()

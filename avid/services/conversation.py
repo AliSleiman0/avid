@@ -360,9 +360,18 @@ class ConversationService:
         Cancels the pump/mic/idle/cue tasks and closes the client, so a shutdown mid-turn
         releases the socket rather than leaking it. Runs under the lock so it cannot race a
         concurrent ensure-session.
+
+        The §6.9 deadline is cancelled **here and only here** among the teardown paths (#452).
+        :meth:`_teardown_locked` deliberately leaves it alone: since the deadline belongs to the
+        state rather than to the session, a teardown that cancelled it would re-open the very hole
+        this issue closed — an idle close fires with the machine still in THINKING and drives no
+        transition, so nothing would re-arm it. Here the process is going down and a dangling task
+        is the only concern left.
         """
         async with self._lock:
             await self._teardown_locked()
+            self._cancel_task(self._think_task)
+            self._think_task = None
             self._cancel_cues()
 
     def subscriptions(self) -> Sequence[Subscription]:
@@ -420,13 +429,11 @@ class ConversationService:
         AudioService's, already done by the time this runs, so this handler never drives it.
         """
         async with self._lock:
-            # The user talking again ends the previous turn's wait, whatever came of it —
-            # `(THINKING, AUDIO_SPEECH_STARTED) -> LISTENING` moves the machine out from under an
-            # armed deadline, and LISTENING has no THINK_TIMEOUT row (AVID-171). Before the
-            # session branch on purpose: it is true whether or not a session is open, and
-            # `_cancel_task(None)` is a no-op.
-            self._cancel_task(self._think_task)
-            self._think_task = None
+            # The user talking again ends the previous turn's wait — but this handler no longer
+            # cancels the §6.9 deadline for it. `(THINKING, AUDIO_SPEECH_STARTED) -> LISTENING`
+            # is an *exit from THINKING*, so `on_transition` has already cancelled it by the time
+            # this runs, and single ownership is the whole of #452's fix: a deadline the state
+            # arms and a handler cancels is a deadline nobody owns.
             self._turn_id = event.correlation_id
             if not self._session_open:
                 # Cold session (§6.2.3). The §6.7-path-1 memory block is composed and injected here,
@@ -509,11 +516,10 @@ class ConversationService:
             # latch.
             already_replying = self._first_audio
             self._first_audio = False
-            if not already_replying:
-                # The §6.9 deadline starts at the same instant as the cue below, and for the
-                # same reason: this is the moment the wait for a first token actually begins
-                # (AVID-171).
-                self._arm_think_timeout()
+            # ⚠️ The §6.9 deadline used to be armed here, and that is the defect #452 is. It is
+            # now armed by `on_transition` on entry to THINKING — which this falling edge drives,
+            # so the ordinary turn is unchanged, while the arcs that reach THINKING *without*
+            # reaching this line are covered for the first time.
         # The AVID-194 commit, and the reason this service is now the only turn-taking authority.
         # Outside the lock: `end_user_turn` goes to the socket, and the lock guards this service's
         # own state, not the wire. Before the `already_replying` return below, because a turn must
@@ -986,23 +992,79 @@ class ConversationService:
                 self._corr(),
             )
 
-    # --- the §6.9 first-token deadline (AVID-171) ----------------------------------------
+    # --- the §6.9 first-token deadline (AVID-171, #452) ----------------------------------
+
+    def on_transition(
+        self,
+        *,
+        from_: RobotState,
+        to: RobotState,
+        trigger: Trigger,
+        correlation_id: UUID,
+    ) -> None:
+        """Keep the §6.9 deadline attached to the **state**, not to the turn path (#452).
+
+        Registered with ``StateManager.watch`` at the composition root, so this runs on every
+        legal move by direct synchronous call. The invariant it exists to hold is one sentence:
+        **the machine cannot occupy THINKING without an armed deadline out of it.** Entering
+        THINKING arms; leaving it cancels; nothing else here has an opinion.
+
+        The deadline used to be armed at the falling edge, inside the turn path, and #452 is what
+        that cost: a refused ``open()`` returns from :meth:`_on_speech_started` without touching
+        the machine, while ``AudioService`` drives ``LISTENING -> THINKING`` regardless — so
+        :meth:`_on_speech_ended` returned at its ``_session_open`` guard before it could arm
+        anything, and the robot sat in THINKING for **24 hours**, 8,600x its designed bound, with
+        147 of 175 log lines reading ``ignored illegal transition ... in state THINKING``. Three
+        reachable arcs did it, and only one of them involves a network fault at all:
+
+        * the reactive refused open, above;
+        * the **proactive** one, which is worse — ``BehaviorService`` drives
+          ``IDLE -> THINKING`` *before* publishing ``behavior.trigger_fired``, so a refused open
+          in :meth:`_on_trigger_fired` wedges immediately with no falling edge ever coming;
+        * plain cross-subscriber ordering on a healthy network — the bus is FIFO per subscriber,
+          not across (#72), so ``audio.speech_ended`` can be delivered before its own
+          ``audio.speech_started`` opened the session.
+
+        Arming from the state covers all three, and any fourth nobody has thought of yet, because
+        this is the only place in the process that sees *every* entry.
+
+        ``correlation_id`` is adopted only when there is no turn id yet: on the proactive arc this
+        observer runs before :meth:`_on_trigger_fired` has set one, and the timer's own log lines
+        go through :meth:`_corr`. An id already set belongs to a turn in flight and is not ours to
+        overwrite.
+
+        Synchronous, and called inside the state manager's lock: it may only arm or cancel tasks,
+        never do I/O (P8). It touches ``_think_task`` without this service's lock, which is safe
+        for the reason ``TransitionObserver`` gives — a sync callback runs to completion between
+        two awaits, so no coroutine holding that lock can be mid-flight.
+        """
+        if to is RobotState.THINKING:
+            if self._turn_id is None:
+                self._turn_id = correlation_id
+            self._arm_think_timeout()
+        elif from_ is RobotState.THINKING:
+            self._cancel_task(self._think_task)
+            self._think_task = None
 
     def _arm_think_timeout(self) -> None:
-        """(Re)start the first-token countdown from *now*. Caller holds the lock."""
+        """(Re)start the countdown from *now*. Called from :meth:`on_transition` only."""
         self._cancel_task(self._think_task)
         self._think_task = spawn(
             self._think_timer(), name="ConversationService.think_timeout"
         )
 
     async def _think_timer(self) -> None:
-        """Degrade if the model produces no first token within ``think_timeout_s`` (§6.9).
+        """Degrade if the machine is still in THINKING ``think_timeout_s`` later (§6.9).
 
-        Sleeps on the injected clock, exactly like :meth:`_idle_timer`. The three guards below
-        are not defensive padding — each covers a *reachable* arc that leaves this timer armed:
+        ⚠️ Read that sentence rather than the old one. This was *"no first token within 10 s of
+        the falling edge"*; since #452 it is **"the machine has been in THINKING for 10 s"** — a
+        strict superset, and the difference is every arc that reaches THINKING without a session
+        to produce a first token at all (see :meth:`on_transition`).
+
+        Sleeps on the injected clock, exactly like :meth:`_idle_timer`. The two guards below are
+        not defensive padding — each covers a *reachable* arc that leaves this timer armed:
 
         * ``_first_audio`` — the delta landed on the same tick the deadline expired.
-        * ``_session_open`` — an idle close or :meth:`stop` got there first.
         * **the state re-check** — AVID-161's overlap, and the only one no cancel site can
           reach. A reply to an *earlier* turn draining while this one waits drives
           ``THINKING + audio.playback_finished -> IDLE``, leaving this timer armed in IDLE with
@@ -1012,12 +1074,22 @@ class ConversationService:
           class of bug AVID-158/161/162 were. Cancelling on ``turn_done`` instead would be
           wrong: an earlier turn finishing says nothing about *this* turn's first token.
 
-        Degrading here is a deliberate give-up on a socket that is still open, which is why it
-        goes through :meth:`_degrade` (tearing the session down) and publishes no
-        ``conversation.session_lost`` — see that method.
+        ⚠️ There used to be a third, ``_session_open`` ("an idle close or :meth:`stop` got there
+        first"), and **deleting it is half of #452's fix**. It is the mirror image of the list
+        above: an arc that leaves this timer *un*armed, or here armed-and-toothless. Every wedge
+        #452 describes has ``_session_open is False`` by construction — that is what a refused
+        open means — so the guard declined to fire in precisely the case that motivated the timer.
+        Moving the arm site without deleting it would have been inert, and there is a neuter in
+        the PR that proves it. What the guard actually protected against is now covered by the
+        state re-check: an idle close drives no transition, but it also cannot leave the machine
+        in THINKING, and :meth:`stop` cancels this task outright.
+
+        Degrading here is a deliberate give-up on a socket that is still open — or was never
+        opened at all — which is why it goes through :meth:`_degrade` (tearing the session down)
+        and publishes no ``conversation.session_lost``; see that method.
         """
         await self._clock.sleep(self._think_timeout_s)
-        if self._first_audio or not self._session_open:
+        if self._first_audio:
             return
         if self._state.state is not RobotState.THINKING:
             _log.debug(
@@ -1027,7 +1099,7 @@ class ConversationService:
             )
             return
         _log.warning(
-            "no first token after %ss — degrading [correlation_id=%s]",
+            "no first token after %ss in THINKING — degrading [correlation_id=%s]",
             self._think_timeout_s,
             self._corr(),
         )
@@ -1062,8 +1134,13 @@ class ConversationService:
         self._pump_task = None
         self._cancel_task(self._thinking_task)
         self._thinking_task = None
-        self._cancel_task(self._think_task)
-        self._think_task = None
+        # ⚠️ NOT the §6.9 think deadline (#452). It is armed by the *state*, not by the session,
+        # and every path here can run with the machine still in THINKING — an idle close most of
+        # all, which drives no transition, so nothing would ever re-arm what this cancelled. That
+        # exact arc is why `Config` asserts `think_timeout_s < session_idle_close_s`; leaving the
+        # deadline alone here is what turns that inequality from the only guard into a preference.
+        # `_degrade` needs no help: it transitions out of THINKING first, and `on_transition`
+        # cancels on that edge. `stop()` cancels it explicitly, where the process is ending.
         await self._client.aclose()
 
     def _start_thinking_cue(self) -> None:

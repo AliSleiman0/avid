@@ -187,6 +187,8 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
     async def _collect(event: Event) -> None:
         seen.append(event)
 
+    # The §6.9 deadline follows the state (#452), as `main._wire_services` wires it.
+    state.watch(conversation.on_transition, name="ConversationService.think_deadline")
     for service in (memory, behavior, conversation):
         for sub in service.subscriptions():
             bus.subscribe(
