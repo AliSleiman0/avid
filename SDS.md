@@ -3699,6 +3699,32 @@ For M11's gate (AVID-389) they mean:
 - **Down** — the interval between a boot record's last heartbeat and the next boot record's start.
   Bounded by the heartbeat interval, which is why the bound is stated with the result rather than
   hidden: downtime is known only to within one heartbeat.
+- **One window, one clock frame — and the harness now checks (AVID-439).** Every figure above is
+  a subtraction between two readings of the Pi's wall clock, and this board has **no RTC**: an
+  offline boot restores a stale time and NTP steps it later. Observed 2026-08-22, 22 minutes into
+  the M11 window — the machine came up reading **2026-04-27**, was stepped by `fake-hwclock`, then
+  stepped again by `systemd-timesyncd` *"restoring from recorded timestamp"*, and only reached true
+  time when NTP landed **3.5 minutes later** after repeated timeouts.
+
+  > The soak's own evidence caught it. Ordered by **rowid** — write order — two consecutive samples
+  > read `13:41:08` then `13:41:07`, and the **earlier-written** row carried the *old* robot
+  > process's `uptime_s` still counting. The rows before and after that boundary are in two
+  > different timelines.
+
+  `docs/demos/soak_pi.py` reports a **`CLOCK`** line: every backwards step in **write order**,
+  because `ORDER BY at` sorts the defect back into ascending order and cannot show one, and because
+  a `WHERE at` filter discards the very rows a step pushed out of the window. AC-0 and AC-2 carry a
+  caveat row when it fires.
+
+  ⚠️ **Reported, never corrected and never graded.** The observed disagreement is seconds against a
+  7 h 12 m budget, and a harness that repaired `at` would be inventing the measurement it exists to
+  take. Two instruments date a step without the wall clock: `uptime_s` in write order (a fall is a
+  new robot process, a rise means the clock moved *under* a running one, absent means **cannot
+  tell** — AVID-380's rule applied to the reader), and **`boot_log.started_mono`**, which is the one
+  column a clock step cannot touch. A *decrease* across consecutive runs **proves** a new monotonic
+  origin, i.e. a machine reboot. An *increase* proves **nothing** — a reboot whose successor started
+  later on the new clock than its predecessor did on the old one is indistinguishable from a service
+  restart, so the line says *"not proof"*, never *"the machine did not reboot"*.
 - **99% of 30 days = 7 h 12 m** of permitted downtime. State the achieved figure, always, not a
   verdict.
 - **"Manual restart"** — a restart that a *person* caused. Operationally: a clean stop

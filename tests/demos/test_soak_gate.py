@@ -81,16 +81,31 @@ def _robot_db(tmp_path: Path, boots: list[dict[str, Any]]) -> str:
 
 
 def _samples_db(
-    tmp_path: Path, ats: list[int], *, builds: list[str] | None = None
+    tmp_path: Path,
+    ats: list[int],
+    *,
+    builds: list[str] | None = None,
+    uptimes: list[int | None] | None = None,
 ) -> str:
+    """Write samples in LIST ORDER, which is what makes rowid meaningful here.
+
+    ``ats`` is inserted in the order given, so passing a non-ascending list produces exactly the
+    real defect #439 found: a rowid order that disagrees with the timestamps. ``uptimes`` carries
+    the robot's own counter, ``None`` included, because an absent reading is a third answer and
+    not a zero (#380).
+    """
     path = tmp_path / "samples.db"
     conn = soak._open_samples(path)
     with conn:
         for i, at in enumerate(ats):
             conn.execute(
                 "INSERT INTO samples (at, reachable, build, uptime_s, dropped) "
-                "VALUES (?,1,?,60,0)",
-                (at, (builds[i] if builds else _BUILD)),
+                "VALUES (?,1,?,?,0)",
+                (
+                    at,
+                    (builds[i] if builds else _BUILD),
+                    (uptimes[i] if uptimes else 60),
+                ),
             )
     conn.close()
     return str(path)
@@ -262,7 +277,7 @@ def test_an_empty_boot_log_does_not_hide_the_criteria_already_computed(
     graded = _by_ac(
         soak._grade(_args(_samples_db(tmp_path, _dense()), _robot_db(tmp_path, [])))
     )
-    assert {"AC-0", "AC-4", "MEM", "AC-2"} <= set(graded), sorted(graded)
+    assert {"AC-0", "CLOCK", "AC-4", "MEM", "AC-2"} <= set(graded), sorted(graded)
 
 
 def test_a_failing_criterion_does_not_suppress_a_passing_one(tmp_path: Path) -> None:
@@ -464,3 +479,300 @@ def test_interventions_outside_the_window_are_ignored(tmp_path: Path) -> None:
         )
     )
     assert "no interventions logged" in graded["INTV"].detail
+
+
+# ── the clock the record is written in (#439) ────────────────────────────────────────────────
+#
+# The defect these guard: this Pi has no RTC, so every boot restores a stale wall clock and NTP
+# steps it later. Ordered by ROWID, two consecutive samples in the live M11 window read 13:41:08
+# then 13:41:07, and the earlier-WRITTEN row carried the old robot process's uptime still
+# counting. Every figure the harness prints subtracts those timestamps.
+#
+# The shape that makes this hard to test is the same shape that made it hard to see: `_grade`'s
+# own read is `ORDER BY at`, which sorts the evidence away, and `WHERE at ...`, which discards it.
+
+
+def _stepped(step_at: int = 100) -> list[int]:
+    """A dense window with one backwards step at index ``step_at`` — the real 13:41:08→13:41:07."""
+    ats = _dense()
+    ats[step_at] = ats[step_at - 1] - 1
+    return ats
+
+
+def test_a_backwards_step_in_write_order_is_detected_though_the_read_is_ordered_by_at(
+    tmp_path: Path,
+) -> None:
+    """The detector must not inherit `_grade`'s ordering, or it cannot see the thing it exists for.
+
+    `SELECT ... ORDER BY at` sorts a backwards step back into ascending order: the defect
+    disappears in the act of reading it, which is why nothing noticed for a day.
+    """
+    ats = _stepped()
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, ats),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )
+    clock = graded["CLOCK"]
+    assert clock.verdict == "recorded", clock.detail
+    assert "1 backwards step" in clock.detail, clock.detail
+    assert "2 clock frames" in clock.detail, clock.detail
+    assert any("step at rowid" in row for row in clock.rows), clock.rows
+
+
+def test_the_clock_criterion_never_grades_and_never_moves_the_exit_code(
+    tmp_path: Path,
+) -> None:
+    """⚠️ The whole decision, as a test: detect and say so, never grade.
+
+    Inventing a bar here would fail a running thirty-day window for a property nobody agreed to
+    grade — and `_report` turns both `fail` and `inconclusive` into a non-zero exit, so `recorded`
+    is the only verdict that is genuinely inert.
+    """
+    args = _args(
+        _samples_db(tmp_path, _stepped()),
+        _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+    )
+    criteria = soak._grade(args)
+    assert _by_ac(criteria)["CLOCK"].verdict == "recorded"
+    assert soak._report(criteria, args) == 0, "a reported line moved the exit code"
+
+
+def test_a_sample_whose_stale_clock_falls_outside_the_window_is_still_read_by_write_order(
+    tmp_path: Path,
+) -> None:
+    """⚠️ The blind spot inside the blind spot.
+
+    `_grade` filters `WHERE at >= ? AND at < ?` — by the very clock under audit. A row stamped
+    118 days early (which is what this board actually did) is dropped before any criterion sees
+    it, so the evidence of the step is discarded by the query that would have reported it.
+    """
+    ats = _dense()
+    ats[100] = _SINCE - 118 * _DAY
+    clock = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, ats),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )["CLOCK"]
+    assert "outside the graded" in clock.detail, clock.detail
+    assert "1 of them outside" in clock.detail, clock.detail
+    assert any(str(_SINCE - 118 * _DAY) in row for row in clock.rows), clock.rows
+
+
+def test_a_clock_step_with_the_robot_uptime_falling_is_reported_as_a_new_robot_process(
+    tmp_path: Path,
+) -> None:
+    """`uptime_s` is the robot's own counter, so it survives a clock step and can date one.
+
+    A fall across the step means a new process began — which is how #439 established that the
+    machine, not just the clock, had moved.
+    """
+    ats = _stepped()
+    uptimes: list[int | None] = [60] * len(ats)
+    uptimes[99], uptimes[100] = 1432, 47
+    clock = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, ats, uptimes=uptimes),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )["CLOCK"]
+    assert any("NEW ROBOT PROCESS" in row for row in clock.rows), clock.rows
+
+
+def test_a_clock_step_while_the_robot_uptime_keeps_rising_is_not_blamed_on_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The other half, and the one that keeps the first honest.
+
+    A clock can be corrected *underneath a running robot* — that is a timesyncd step, not a
+    reboot. A detector that called every step a restart would be reporting a conclusion it never
+    tested.
+    """
+    ats = _stepped()
+    uptimes: list[int | None] = [60] * len(ats)
+    uptimes[99], uptimes[100] = 1432, 1492
+    clock = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, ats, uptimes=uptimes),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )["CLOCK"]
+    assert not any("NEW ROBOT PROCESS" in row for row in clock.rows), clock.rows
+    assert any("SURVIVED" in row for row in clock.rows), clock.rows
+
+
+def test_an_absent_uptime_beside_a_clock_step_says_unknown_rather_than_no_restart(
+    tmp_path: Path,
+) -> None:
+    """⚠️ #380's rule applied to the reader: absent is not zero.
+
+    An unreachable sample reports no uptime. `int(row["uptime_s"] or 0)` would turn that into 0,
+    which is less than the previous reading, and the detector would announce a restart it has no
+    evidence for — a `0` from an instrument that never ran reading exactly like a real zero.
+    """
+    ats = _stepped()
+    uptimes: list[int | None] = [60] * len(ats)
+    uptimes[99], uptimes[100] = 1492, None
+    clock = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, ats, uptimes=uptimes),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )["CLOCK"]
+    assert any("CANNOT TELL" in row for row in clock.rows), clock.rows
+    assert not any("NEW ROBOT PROCESS" in row for row in clock.rows), clock.rows
+
+
+def test_a_started_mono_that_went_backwards_is_reported_as_a_machine_reboot(
+    tmp_path: Path,
+) -> None:
+    """`started_mono` is the one column a clock step cannot touch — written since #379, read by
+    nothing until now.
+
+    Monotonic time only grows within one machine boot, so a decrease across consecutive runs is
+    *proof* of a new origin. In the real incident that was 48.7 s against the previous run's
+    15726 s, and it is what distinguished a reboot from a service restart.
+    """
+    boots = [
+        {
+            "boot_id": "e5e1d1ee",
+            "started_at": _SINCE,
+            "last_seen_at": _SINCE + _DAY,
+            "started_mono": 15_726 * 10**9,
+        },
+        {
+            "boot_id": "b566ffd9",
+            "started_at": _SINCE + _DAY,
+            "last_seen_at": _UNTIL,
+            "started_mono": int(48.7 * 10**9),
+        },
+    ]
+    clock = _by_ac(
+        soak._grade(_args(_samples_db(tmp_path, _dense()), _robot_db(tmp_path, boots)))
+    )["CLOCK"]
+    assert any("MACHINE REBOOTED" in row for row in clock.rows), clock.rows
+    assert any("48.7" in row and "15726.0" in row for row in clock.rows), clock.rows
+
+
+def test_a_rising_started_mono_is_reported_as_weak_evidence_not_as_proof_of_no_reboot(
+    tmp_path: Path,
+) -> None:
+    """⚠️ The converse does not hold, and saying it does would be the worse error.
+
+    A reboot whose successor started later on the new monotonic clock than its predecessor did on
+    the old one is indistinguishable from a service restart. "No reboot proven" is the claim;
+    "the machine did not reboot" is not.
+    """
+    boots = [
+        {
+            "boot_id": "aaaa",
+            "started_at": _SINCE,
+            "last_seen_at": _SINCE + _DAY,
+            "started_mono": 100 * 10**9,
+        },
+        {
+            "boot_id": "bbbb",
+            "started_at": _SINCE + _DAY,
+            "last_seen_at": _UNTIL,
+            "started_mono": 200 * 10**9,
+        },
+    ]
+    clock = _by_ac(
+        soak._grade(_args(_samples_db(tmp_path, _dense()), _robot_db(tmp_path, boots)))
+    )["CLOCK"]
+    assert not any("REBOOTED" in row for row in clock.rows), clock.rows
+
+
+def test_ac0_and_ac2_carry_the_clock_caveat_without_changing_their_verdicts(
+    tmp_path: Path,
+) -> None:
+    """The caveat annotates; it must never grade.
+
+    AC-0 and AC-2 keep their own verdicts — the clock is a statement about how to *read* those
+    numbers, not a new bar they have to clear.
+    """
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _stepped()),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )
+    assert graded["AC-0"].verdict == "pass", graded["AC-0"].detail
+    assert graded["AC-2"].verdict == "pass", graded["AC-2"].detail
+    assert any("see CLOCK" in row for row in graded["AC-0"].rows), graded["AC-0"].rows
+    assert any("see CLOCK" in row for row in graded["AC-2"].rows), graded["AC-2"].rows
+    assert "heartbeat" in graded["AC-2"].rows[0], "the heartbeat caveat must stay first"
+
+
+def test_a_window_with_one_clock_frame_carries_no_caveat_rows(tmp_path: Path) -> None:
+    """⚠️ The passes-on-silence guard, and the reason the other nine mean anything.
+
+    A caveat appended unconditionally would decorate every clean run, and a warning that is always
+    there is a warning nobody reads. This proves the detector *discriminates*.
+    """
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, _dense()),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )
+    assert not any("see CLOCK" in row for row in graded["AC-0"].rows), graded[
+        "AC-0"
+    ].rows
+    assert not any("see CLOCK" in row for row in graded["AC-2"].rows), graded[
+        "AC-2"
+    ].rows
+    assert "ONE clock frame" in graded["CLOCK"].detail, graded["CLOCK"].detail
+
+
+def test_the_clock_line_is_reported_even_when_no_sample_lands_in_the_window(
+    tmp_path: Path,
+) -> None:
+    """⚠️ The branch where the clock line is most likely to be the explanation.
+
+    "No samples between X and Y" is exactly what a clock stale by months looks like through a
+    `WHERE at` filter. `_grade` returns early there, and a clock line appended after that return
+    would be invisible in the one case that needs it most — §7.1's *"every criterion reports
+    before any verdict is decided"*, at the place the code is shaped to break it.
+    """
+    stale = [at - 118 * _DAY for at in _dense()]
+    graded = _by_ac(
+        soak._grade(
+            _args(
+                _samples_db(tmp_path, stale),
+                _robot_db(tmp_path, [{"started_at": _SINCE, "last_seen_at": _UNTIL}]),
+            )
+        )
+    )
+    assert graded["AC-0"].verdict == "inconclusive", graded["AC-0"].detail
+    assert "CLOCK" in graded, sorted(graded)
+    assert graded["CLOCK"].verdict == "recorded"
+
+
+def test_an_unreadable_boot_log_cannot_stop_the_clock_line_from_reporting(
+    tmp_path: Path,
+) -> None:
+    """A report *about* the instrument must not die with the instrument.
+
+    ⚠️ **The weakest of these twelve, and worth saying so.** Its neuter — removing the
+    `except sqlite3.Error` — makes the call *raise*, so the proof is a test error rather than a
+    failing assertion. That is a weaker signal than the others and it is recorded here rather than
+    dressed up.
+    """
+    assert soak._boot_mono_starts(str(tmp_path / "does-not-exist.db")) == []

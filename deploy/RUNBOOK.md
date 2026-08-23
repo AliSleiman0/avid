@@ -527,6 +527,7 @@ costs the run something, and the costs are cumulative and unrecoverable:
 | a crash or a power cut | fails **AC-3b** (zero unplanned stops); the boot row's `stopped_at` is NULL |
 | either of the above | uptime against the 99% bar, and AC-0's coverage figure |
 | `git pull` + restart | **a split window** — AC-4 sees two builds, and an average of two builds describes no robot that ever existed |
+| **anything that reboots the board** | a **new clock frame** on top of the above. No RTC here, so the machine comes up stale and NTP steps it later; the grade report's `CLOCK` line names every backwards step, and AC-0/AC-2 then carry a caveat saying their figures span two clocks (#439) |
 
 **Write it down before you act**, one JSON object per line:
 
