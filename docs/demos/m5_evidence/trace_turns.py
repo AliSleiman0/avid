@@ -254,6 +254,8 @@ async def main() -> int:
         thinking_delay_ms=config.cues.thinking_delay_ms,
     )
 
+    # The §6.9 deadline follows the state (#452), exactly as `main._wire_services` wires it.
+    state.watch(conversation.on_transition, name="ConversationService.think_deadline")
     for sub in conversation.subscriptions():
         bus.subscribe(
             sub.event_type,

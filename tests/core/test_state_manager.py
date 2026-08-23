@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -188,3 +188,73 @@ async def test_initial_state_is_injectable() -> None:
     assert (
         _manager(bus, clock, initial=RobotState.SLEEPING).state is RobotState.SLEEPING
     )
+
+
+# --- observers (#452) -------------------------------------------------------
+
+
+async def test_an_observer_sees_every_legal_move_and_no_rejected_one() -> None:
+    """``watch`` is the seam the §6.9 deadline hangs off, so it must see moves, not attempts.
+
+    A rejected transition changes nothing and publishes nothing; telling an observer about it
+    would let a service arm something on a state the machine is not in."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    mgr = _manager(bus, clock, initial=RobotState.IDLE)
+    seen: list[tuple[RobotState, RobotState, Trigger, UUID]] = []
+
+    def observer(
+        *,
+        from_: RobotState,
+        to: RobotState,
+        trigger: Trigger,
+        correlation_id: UUID,
+    ) -> None:
+        seen.append((from_, to, trigger, correlation_id))
+
+    mgr.watch(observer, name="test.observer")
+    corr = uuid4()
+
+    async with bus:
+        await mgr.transition(Trigger.AUDIO_SPEECH_STARTED, correlation_id=corr)
+        # Not a row: IDLE + system.started. Nothing moved, so nothing to observe.
+        await mgr.transition(Trigger.SYSTEM_STARTED, correlation_id=uuid4())
+
+    assert seen == [
+        (RobotState.IDLE, RobotState.LISTENING, Trigger.AUDIO_SPEECH_STARTED, corr)
+    ]
+
+
+async def test_a_raising_observer_does_not_lose_the_move(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one thing this class exists never to lose is the transition itself.
+
+    So a broken reaction is swallowed and logged, exactly as the bus does for a raising
+    subscriber (SDS §3.5) — and by name, because an observer nobody can identify from the log is
+    the reason ``watch`` makes *name* mandatory. The observer registered after the raising one
+    still runs: one bad reaction must not silence the rest."""
+    clock = FakeClock()
+    bus = AsyncioEventBus(clock=clock)
+    mgr = _manager(bus, clock, initial=RobotState.IDLE)
+    later: list[RobotState] = []
+
+    def boom(**_: object) -> None:
+        raise RuntimeError("observer bug")
+
+    def after(*, to: RobotState, **_: object) -> None:
+        later.append(to)
+
+    mgr.watch(boom, name="test.broken")  # type: ignore[arg-type]  # deliberately wrong shape
+    mgr.watch(after, name="test.after")  # type: ignore[arg-type]  # **kwargs stand-in
+
+    with caplog.at_level(logging.ERROR, logger="avid.state"):
+        async with bus:
+            result = await mgr.transition(
+                Trigger.AUDIO_SPEECH_STARTED, correlation_id=uuid4()
+            )
+
+    assert result is RobotState.LISTENING
+    assert mgr.state is RobotState.LISTENING
+    assert later == [RobotState.LISTENING]
+    assert "test.broken" in caplog.text

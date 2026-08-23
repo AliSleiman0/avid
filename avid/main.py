@@ -842,6 +842,13 @@ def _wire_services(
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
         thinking_delay_ms=config.cues.thinking_delay_ms,
     )
+    # The §6.9 first-token deadline follows the STATE, not the turn path (#452). A direct
+    # synchronous observer rather than a `state.transitioned` subscription, and the distinction is
+    # the whole issue: that subscription is at-most-once behind a bounded DROP_OLDEST queue, so one
+    # overflow would silently drop an arming — and CLAUDE.md §4 is explicit that anything whose loss
+    # is a correctness bug is a direct awaited call, never an event. A soak rig sat in THINKING for
+    # 24 hours because this arming lived on a code path a refused `open()` returns before reaching.
+    state.watch(conversation.on_transition, name="ConversationService.think_deadline")
     # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
     # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so
     # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the

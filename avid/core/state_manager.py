@@ -11,6 +11,13 @@ class exists to prevent.
 would be a correctness bug, and the bus is explicitly at-most-once notification. The *fact*
 that the state moved is what goes on the bus afterwards, as ``state.transitioned``.
 
+:meth:`StateManager.watch` exists for the same reason, and only for that reason (#452). Nothing
+here moves the machine on its own — it still has no timer and no clock of its own — but a
+subscriber that must arm or disarm something on *every* entry into a state cannot ride
+``state.transitioned``: that subscription is at-most-once behind a bounded DROP_OLDEST queue, so
+one overflow silently drops the arming and the invariant it protects. An observer registered
+here is called by direct, synchronous invocation inside the same lock that made the move.
+
 Illegal transitions are this module's call to make. The domain raises
 :class:`~avid.domain.IllegalTransition` for anything not in the table and deliberately takes no
 view on what that means (``domain/state.py``); SDS §3.10.3 sets the production policy —
@@ -22,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Protocol
 from uuid import UUID
 
 from avid.core.envelope import envelope
@@ -39,6 +47,30 @@ _log = logging.getLogger("avid.state")
 
 # The component name stamped on the events this module publishes (SDS §9.1.3).
 _SOURCE = "StateManager"
+
+
+class TransitionObserver(Protocol):
+    """A synchronous reaction to every legal move, registered with :meth:`StateManager.watch`.
+
+    Deliberately **not** in ``core/ports.py``: this is not a device port, so it carries none of
+    the §14.4 contract-suite or P6 fake obligations — it is a seam on the one object services
+    already hold, for the one thing the bus cannot carry (see the module docstring).
+
+    ⚠️ **Synchronous, and that is the whole design.** An observer cannot await, so it can neither
+    deadlock on the manager's lock nor re-enter :meth:`StateManager.transition`, and it runs to
+    completion between two awaits — which is also why an observer may touch a service's own task
+    handles without taking that service's lock. It runs **on the event loop, inside the lock**:
+    arm or cancel a task and return (P8). Any I/O here stalls every transition in the process.
+    """
+
+    def __call__(
+        self,
+        *,
+        from_: RobotState,
+        to: RobotState,
+        trigger: Trigger,
+        correlation_id: UUID,
+    ) -> None: ...
 
 
 class StateManager:
@@ -60,11 +92,22 @@ class StateManager:
         self._clock = clock
         self._state = initial
         self._lock = asyncio.Lock()
+        self._observers: list[tuple[str, TransitionObserver]] = []
 
     @property
     def state(self) -> RobotState:
         """The current state. Read freely; write only through :meth:`transition`."""
         return self._state
+
+    def watch(self, observer: TransitionObserver, *, name: str) -> None:
+        """Register *observer* to be called on every legal move (#452).
+
+        Composition-time only, from ``main.py`` — like ``subscriptions()``, and for the same
+        reason. *name* is **mandatory**, exactly as it is on ``EventBus.subscribe``: an anonymous
+        observer is invisible to anyone reading the wiring, and this one runs inside the lock
+        that owns the only shared mutable object in the process.
+        """
+        self._observers.append((name, observer))
 
     async def transition(self, trigger: Trigger, *, correlation_id: UUID) -> RobotState:
         """Apply *trigger*, publish ``state.transitioned``, and return the resulting state.
@@ -107,4 +150,28 @@ class StateManager:
                     trigger=trigger,
                 )
             )
+            # Observers last, and still inside the lock (#452). Last, because they react to a
+            # move that has already happened — the same tense the bus fact is in. Inside, because
+            # the point of this seam is that an arming cannot be lost between the move and the
+            # reaction; hoisting it out would reintroduce the window the bus already has.
+            for name, observer in self._observers:
+                try:
+                    observer(
+                        from_=previous,
+                        to=nxt,
+                        trigger=trigger,
+                        correlation_id=correlation_id,
+                    )
+                except Exception:  # noqa: BLE001 - an observer bug must not lose the move
+                    # The one thing this class exists never to lose is the transition itself, and
+                    # it is already applied and published by here. So this is the bus's own
+                    # swallow-and-log policy (SDS §3.5), for the same reason: a broken reaction
+                    # must not take down the machine it was only watching.
+                    _log.exception(
+                        "state observer %s raised on %s -> %s [correlation_id=%s]",
+                        name,
+                        previous.name,
+                        nxt.name,
+                        correlation_id,
+                    )
             return nxt

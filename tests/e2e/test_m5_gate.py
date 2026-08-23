@@ -335,6 +335,10 @@ async def _drive_session(
     # Above the 100 virtual seconds `_advance_until` can drain, so the §6.9 deadline can only
     # fire in the test that asks for it by passing a small value (AVID-171).
     think_timeout_s: float = 300.0,
+    # A connect the network refuses (#452). The fake can express it since this issue; before that
+    # a failed open was reachable only from a test-local subclass in tests/services, i.e. exactly
+    # where the "no illegal transition" assertion does not work.
+    open_error: str | None = None,
 ) -> tuple[_Collector, FakeSpeaker, ReplayRealtimeClient, StateManager]:
     """Run one replayed session through the real AudioService→ConversationService stack.
 
@@ -383,7 +387,9 @@ async def _drive_session(
         # The M5 seam: assistant PCM arrives through the TurnSink, not an M4 echo (#103).
         loopback=False,
     )
-    client = ReplayRealtimeClient.from_dir(_SESSIONS / fixture, clock=clock)
+    client = ReplayRealtimeClient.from_dir(
+        _SESSIONS / fixture, clock=clock, open_error=open_error
+    )
     conversation = ConversationService(
         bus=bus,
         clock=clock,
@@ -405,6 +411,9 @@ async def _drive_session(
     )
 
     collector = _Collector()
+    # The §6.9 deadline follows the state, not the turn path (#452) — `main._wire_services`
+    # registers this the same way, by direct call rather than by subscription.
+    state.watch(conversation.on_transition, name="ConversationService.think_deadline")
     # Subscribe before the bus starts (P3): the service's own declared set, then the observer.
     for sub in conversation.subscriptions():
         bus.subscribe(
@@ -575,6 +584,9 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         gesture=_StubGesture(),
     )
     collector = _Collector()
+    # Wired exactly as `main._wire_services` does, even though this harness never reaches the
+    # deadline: a rig that differs from production is where the next defect hides (#452).
+    state.watch(conversation.on_transition, name="ConversationService.think_deadline")
     for sub in conversation.subscriptions():
         bus.subscribe(
             sub.event_type,
@@ -766,6 +778,64 @@ async def test_m5_gate_a_silent_model_degrades_on_the_think_timeout(
 
     assert "ignored illegal transition" not in caplog.text, (
         "the think timeout fired in a state the §3.10.3 table has no rule for"
+    )
+
+
+async def test_m5_gate_a_refused_open_does_not_park_the_robot_in_thinking(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#452: the 24-hour wedge, at full stack, with the assertion that only works here.
+
+    The soak rig entered THINKING at minute 3 and never left. ``AudioService`` drives
+    ``LISTENING -> THINKING`` off its own falling edge whether or not the session opened; the
+    refused ``open()`` returns from ``_on_speech_started`` without touching the machine, and the
+    only exit that needs neither a live session nor the user to speak again was armed inside the
+    turn path, past a guard that same failure had already tripped. 147 of the process's 175 log
+    lines were ``ignored illegal transition ... in state THINKING``, and every graded soak
+    criterion passed for 24 hours.
+
+    ⚠️ **This test could not be written before #452**, and that is the finding underneath the
+    finding. The caplog assertion only bites at full stack — illegal transitions are reachable
+    only when the real ``AudioService`` drives the audio edges — and this harness builds its
+    client through ``ReplayRealtimeClient``, which had no way to refuse a connect. The failure
+    mode lived in a test-local subclass in ``tests/services``, i.e. exactly where the assertion
+    that would have caught this does not work. A fake that cannot fail the way the real transport
+    routinely does is an incomplete port (P6).
+
+    ``conversation.session_lost`` must not appear, for the same reason as the timeout above:
+    nothing dropped."""
+    with caplog.at_level(logging.WARNING, logger=_STATE_LOGGER):
+        collector, speaker, client, state = await _drive_session(
+            "no_reply",
+            until=lambda c: len(c.of_type(SystemDegradedEntered)) >= 1,
+            think_timeout_s=2.0,
+            open_error="[Errno 111] Connect call failed ('162.159.140.245', 443)",
+        )
+
+    assert state.state is RobotState.DEGRADED, (
+        "the robot is parked in THINKING with no armed exit — #452's wedge"
+    )
+    assert not client.opened, "the fixture opened a session it was told to refuse"
+    assert collector.of_type(ConversationSessionLost) == [], (
+        "nothing dropped — the session never opened at all"
+    )
+    assert any(p.name == "something_wrong.wav" for p in speaker.files_played), (
+        "the robot degraded silently — §6.9's whole point is that it says something"
+    )
+
+    moves = [
+        (e.from_, e.trigger, e.to)
+        for e in collector.of_type(StateTransitioned)
+        if isinstance(e, StateTransitioned)
+    ]
+    assert (
+        RobotState.THINKING,
+        Trigger.THINK_TIMEOUT,
+        RobotState.DEGRADED,
+    ) in moves, "the deadline never fired — THINKING had no armed way out"
+
+    assert "ignored illegal transition" not in caplog.text, (
+        "the wedge's own signature: a machine rejecting the same transition over and over"
     )
 
 

@@ -845,6 +845,10 @@ async def _run_conversation(
     cost_meter = CostMeterService(bus=bus, model=config.ai.model)
 
     collector = _ConversationCollector(silence_hold_ms=config.gate.silence_hold_ms)
+    # The §6.9 deadline follows the state, not the turn path (#452). A bench harness that skipped
+    # this would be measuring a robot nobody ships — which is the failure mode CLAUDE.md §7.1 is
+    # about, and the one the M11 soak just paid for.
+    state.watch(conversation.on_transition, name="ConversationService.think_deadline")
     # Register before the bus starts — subscription is static-at-composition (P3).
     for sub in (
         *affect.subscriptions(),

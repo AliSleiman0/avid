@@ -383,6 +383,36 @@ def test_the_think_timeout_arc_degrades_and_the_next_turn_recovers() -> None:
     )
 
 
+def test_a_proactive_turn_the_network_refused_still_has_a_way_out() -> None:
+    """#452: the arc with no user in it, and the reason the deadline moved to the state.
+
+    ``BehaviorService`` drives ``IDLE -> THINKING`` before publishing ``behavior.trigger_fired``,
+    so a refused ``open()`` leaves the machine in THINKING with **no falling edge ever coming** —
+    no one is in the room, and the two remaining THINKING rows both need a live session. Walked
+    from a state the table can reach without a single audio event, this arc has exactly one
+    continuation, and it is the one the timer drives.
+
+    Its sibling above walks the same escape from a *reactive* turn. The point of having both is
+    that the row is reachable from every path into THINKING, which is what the fix asserts and
+    what falling-edge arming quietly did not provide."""
+    assert (
+        _walk(
+            RobotState.IDLE,
+            Trigger.BEHAVIOR_TRIGGER_FIRED,  # a reminder fires; the session is never opened
+            Trigger.THINK_TIMEOUT,  # ...and this is the only thing that can move it
+            Trigger.AUDIO_SPEECH_STARTED,  # the owner walks in and speaks: absorbed while open() runs
+            Trigger.SYSTEM_DEGRADED_EXITED,
+        )
+        == [
+            RobotState.IDLE,
+            RobotState.THINKING,
+            RobotState.DEGRADED,
+            RobotState.DEGRADED,
+            RobotState.LISTENING,
+        ]
+    )
+
+
 def test_a_failed_reopen_leaves_the_robot_degraded_rather_than_lying() -> None:
     """The asymmetry that makes the LISTENING target safe: nothing moves off DEGRADED except a
     *successful* open. If ``open()`` raises there is no ``degraded_exited``, the user's edges are
