@@ -8,21 +8,33 @@
 
 **As of:** 2026-08-23 · `main` · `v0.M10.0` tagged · ⛔ **M11 soak STOPPED after ~26 h and O5 amended — the rig is UNFROZEN, deploying is allowed again** · gh `AliSleiman0`.
 
-## ⭐ Next session — #452 is FIXED; the soak still cannot see a wedged robot
+## ⭐ Next session — 🔴 DEPLOY, THEN RUN THE 72-HOUR WINDOW
 
-**Step 1 of the three below is done (#455, merged).** The §6.9 deadline is armed on **entry to
-THINKING** now — by a synchronous observer on `StateManager`, not from the turn path — so the
-machine cannot occupy THINKING without an armed way out, whichever path drove it in. Three arcs
-were covered, and only one of them involves a network fault at all: the refused reactive open, the
-refused **proactive** open (worse — `BehaviorService` transitions before publishing, so no falling
-edge is ever coming), and plain cross-subscriber ordering on a healthy bus. No new `Trigger` and no
-new table row.
+**#452 is CLOSED. Steps 1 and 2 of the three below are both done, and step 3 is the whole of
+what is left.**
 
-⚠️ **#452 is still OPEN, on AC-4** — the liveness criterion. That is the half of the finding that is
-not about the robot, and it is the one that generalises: *the soak graded a catatonic robot at
-99.89% uptime for 24 hours and reported success.* **Step 2 below is what remains of it**, and it
-gates step 3: running another endurance window before the soak can tell a working robot from a
-wedged one buys another window of the same evidence.
+- **#455** — the wedge. The §6.9 deadline is armed on **entry to THINKING** now, by a synchronous
+  observer on `StateManager`, never from the turn path, so the machine cannot occupy THINKING
+  without an armed way out whichever path drove it in. Three arcs, only one of them a network
+  fault: the refused reactive open, the refused **proactive** open (worse — `BehaviorService`
+  transitions before publishing, so no falling edge is ever coming), and plain cross-subscriber
+  ordering on a healthy bus. No new `Trigger` and no new table row.
+- **#457** — the soak can see a wedge now. `LIVE` records `GET /state` and `/metrics`'
+  `transitions` per sample and **fails** when a transient state is *provably* held past the bound
+  the design states for it. ⚠️ *Provably* is load-bearing: identical state readings 60 s apart are
+  equally consistent with a wedged robot and a conversing one, so a run counts only when the
+  transitions counter stood still across all of it. No state series → **INCONCLUSIVE, never a
+  pass**.
+
+⛔ **`/opt/avid` is still on the WEDGED build**, and `robot.service` is the live repro. **Deploy
+before anything else** — a window on the old build measures the defect again, and the sampler's
+new columns do not exist there either. `PI_OPERATIONS.md` for the deploy; the venv rebuild recipe
+below if `uv sync` has been anywhere near it.
+
+⚠️ **The ~26 hours already run still counts for nothing**, and `LIVE` run against that window's own
+database reports **INCONCLUSIVE, not FAIL** — the build predates the columns, so nothing was
+recorded. That is the honest answer, and the wedge stays evidenced by the journal rather than by a
+criterion that could not see it.
 
 ⚠️ **The finding underneath the finding, worth more than the fix.** The e2e test that would have
 caught this **could not be written**. The `ignored illegal transition` assertion only bites at full
@@ -32,9 +44,13 @@ i.e. exactly where the assertion does not work. It ships as an `open_error` knob
 **A fake that cannot fail the way the real transport routinely does is an incomplete port (P6) —
 and the gap is invisible until you go looking for the test you cannot write.**
 
-**#456 is filed** for what #452's AC-6 asked: 147 of 175 log lines were one repeated illegal
-transition and *nothing outside the process could see it*, because `StateManager.transition`
-publishes nothing on rejection. #455 removes this wedge's cause, not the next one's silence.
+**Two issues were split out rather than bundled.** **#456** — what #452's AC-6 asked: 147 of 175
+log lines were one repeated illegal transition and *nothing outside the process could see it*,
+because `StateManager.transition` publishes nothing on rejection. #455 removes this wedge's cause,
+not the next one's silence. **#458** — the soak records **no temperature at all**, on a board whose
+R-09 risk *is* thermal throttling; `hardware-required`, because `/metrics` has no thermal provider
+so the sampler must read the host, and "works by hand, dead under systemd" has bitten five times
+here.
 
 Also worth carrying: `Config`'s `think_timeout_s < session_idle_close_s` assertion **was** the only
 thing preventing this wedge on the idle-close arc — its own comment describes #452 a milestone
@@ -90,20 +106,27 @@ is `THINK_TIMEOUT`, armed by `ConversationService` inside the turn path — whic
 > tests red on their own assertions — **proof that moving the arm site alone would have been
 > inert**, which is exactly the fix a reader in a hurry would have shipped.
 
-**2. 🔴 THIS IS THE NEXT JOB — add the two criteria the soak was missing**
-(`docs/demos/soak_pi.py`). It is `#452` AC-4, and it is what keeps that issue open:
+**2. ✅ DONE — the soak can tell a working robot from a catatonic one (#457).**
 
-- **Liveness** — the robot changed state at least N times / no single state held longer than X.
-  ⚠️ **This is the whole lesson.** A window that cannot tell a working robot from a catatonic one is
-  not a soak at any duration, and this one could not. Reported at minimum; graded if you can defend
-  the bar.
-- **Thermal** — the sampler records **no temperature at all** today. On a board whose R-09 risk *is*
-  thermal throttling, a soak with no thermal series is a gap. `vcgencmd measure_temp` /
-  `/sys/class/thermal/thermal_zone0/temp`; report `first/last/min/max`, like `MEM` does.
+- **Liveness** — shipped as `LIVE`, and **graded**, because the bar did not have to be invented:
+  a transient state has a bound the design already states in config, and exceeding it is a defect
+  the state machine promises cannot happen. What made it gradeable without crying wolf is the
+  *conjunction* — state series **and** transitions counter — and the four things it refuses to
+  fail on: a sampler outage, a restart, a build change, and a long legitimate night in
+  IDLE/SLEEPING (§12.6: **a SLEEPING robot is UP**). ⚠️ LISTENING is reported and not graded, and
+  the report says why: `Trigger.LISTEN_TIMEOUT` is **unwired**, a row that exists with nothing
+  driving it — which is precisely the shape #452 was.
+- **Thermal** — **not done, and now #458.** Deliberately not bundled: it is not a #452 AC, and it
+  is a different measurement with a different source. Worth having before the 72-hour run (a
+  throttle event during it would otherwise read as a software regression), but the thermal
+  question itself is owed on the production board, per O5's amendment.
 
-**3. Then run a 72-hour endurance run** — on the rig, with the robot **actually doing something**,
-and on a build that carries #455 (deploy it first: `/opt/avid` is still on the wedged build, and
-`robot.service` is the live repro).
+**3. 🔴 THIS IS THE NEXT JOB — run the 72-hour endurance window** on the rig, with the robot
+**actually doing something**, on a build carrying #455 **and** #457. Deploy first; then confirm the
+sampler is recording the new columns (`sqlite3 /var/lib/soak/samples.db "select state, transitions
+from samples order by id desc limit 5"`) **before** the clock starts, because a window whose
+liveness column is NULL grades INCONCLUSIVE for its whole length — the #404 lesson, one release
+later.
 
 ⚠️ **The ~26 hours already run does NOT count**, and this is the one thing not to wave through. The
 robot was wedged for all but the first three minutes, so nothing exercised the paths a soak exists
@@ -268,6 +291,24 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A criterion that can only fail is worth less than one that can also refuse to.** `LIVE`
+  (#457) grades whether the robot was doing anything, and most of its design is the four cases it
+  must *not* fail: a sampler outage, a restart, a build change, and a long legitimate night in
+  IDLE/SLEEPING. Each was a way to build a gate people learn to rerun without reading. The
+  general shape: **when adding a criterion, write the false-positive list before the detection
+  logic** — here it turned out to be four times the size of the thing being detected, and it is
+  what forced the honest design (state series *and* transitions counter, because either alone
+  convicts a healthy robot or misses a wedged one).
+
+- ⚠️ **A neuter can come back green because a *different* guard caught the fixture.** #457's
+  restart-split test passed with the split removed: the fixture's mismatched counters left the run
+  "unproven", so nothing could fail it either way. The fix was a fixture where the counter matches
+  **by coincidence** across the restart (a fresh boot walks BOOTING → IDLE → LISTENING → THINKING,
+  so `3` on either side is ordinary) plus an assertion on the reported **figure** rather than the
+  verdict — without the split, held time comes out `-4910s`, and a negative sails straight past a
+  `> bound` check and reads as a pass. **When a neuter stays green, ask which other guard is
+  covering for it before concluding the test is fine.**
 
 - ⚠️ **Ask which test you *cannot* write — that is where the defect is.** #452 ran for 24 hours on
   the rig and the assertion that would have caught it (`"ignored illegal transition" not in
