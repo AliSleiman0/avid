@@ -79,8 +79,8 @@ It exists because a power cut and a crash leave byte-identical records and journ
 
 **It happened, 22.5 minutes into this window** — and the log above was empty when it did. The
 machine rebooted; boot `c7c6c3d5` left `stopped_at` NULL, so **AC-3b fails for the whole
-window**. It is *not* the deliberate reboot: that one is earlier and clean. Full diagnosis and the
-evidence trail are in `window.json` under `_unplanned_stop_2026_08_22`.
+window**. It is *not* the deliberate reboot: that one is earlier and clean. **#439** carries the
+full diagnosis; the evidence trail is in `window.json` under `_unplanned_stop_2026_08_22`.
 
 The cause is **not established**, and the honest reason is that nothing recorded it: journald had
 already lost the pre-reboot boot by the time anyone looked. That is exactly the hole this log
