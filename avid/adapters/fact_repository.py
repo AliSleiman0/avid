@@ -54,10 +54,49 @@ _FACT_COLUMNS = (
 # this SQL — decides final ordering. A token-less query yields no MATCH string, i.e. no rows.
 _WORD = re.compile(r"\w+", re.UNICODE)
 
+# Function words, dropped from the MATCH string before it is built (#447).
+#
+# ⚠️ **The keyword branch exists for words that identify a fact, and "I" identifies nothing.**
+# §7.7 adds FTS5 to answer *"vector search fails on proper nouns"* — Biscuit, Karim — and #375
+# then carried a keyword hit into the score as delta. Together those made every token worth
+# delta, including the ones every sentence contains: `keyword_search` ORs the query's tokens and
+# returns `LIMIT top_k`, so *"what am I training for?"* handed +0.5 to five facts whose only
+# overlap with the query was the word **I**.
+#
+# Measured on the M7 corpus with a real MiniLM store, before this filter: the target
+# *"I'm running the marathon next spring"* ranked **6th** at cosine 0.2779, behind *"I live in
+# Beirut"* (0.1131) and *"I love spicy food"* (0.1055) — both of which are further from the query
+# by the model's own measure and both of which matched only "I". After it, 20/20.
+#
+# ⚠️ **delta is not the lever, and that was checked rather than assumed.** delta = 0 also lifts
+# the M7 probe (20/20) but costs a temporal query on the 50-query eval set (43/50 -> 42/50); the
+# shipped 0.5 is the optimum there. This filter gets 20/20 **and** leaves the eval set untouched,
+# which is what makes it a defect fix rather than a re-weighting.
+#
+# A closed list of English function words rather than a length or frequency heuristic: "Ali",
+# "Kim" and "gym" are short and identifying, and a corpus-frequency cut-off would need a corpus
+# this adapter does not have. It costs nothing when a query is all content words, and a query
+# that is *entirely* stopwords now yields no MATCH at all — which is correct, since it would have
+# matched everything.
+_STOPWORDS = frozenset(
+    """
+    a about am an and any are as at be been being but by can could did do does doing for from
+    had has have having he her hers him his how i if in into is it its me my of on or our ours
+    out over she should so some such than that the their theirs them then there these they this
+    those to too under until up us was we were what when where which while who whom why will
+    with would you your yours
+    """.split()
+)
+
 
 def _fts_match(query: str) -> str | None:
-    """Turn a free-text query into a safe FTS5 ``MATCH`` string, or ``None`` if it has no terms."""
-    tokens = _WORD.findall(query)
+    """Turn a free-text query into a safe FTS5 ``MATCH`` string, or ``None`` if it has no terms.
+
+    "Terms" excludes function words since #447 — see :data:`_STOPWORDS` for the measurement. A
+    query with nothing else in it returns ``None``, which the caller reads as *no keyword
+    evidence*: a branch that matched every fact was never evidence about any of them.
+    """
+    tokens = [t for t in _WORD.findall(query) if t.casefold() not in _STOPWORDS]
     if not tokens:
         return None
     return " OR ".join(f'"{token}"' for token in tokens)

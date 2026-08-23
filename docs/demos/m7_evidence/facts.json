@@ -35,7 +35,7 @@
     {"key": "dog",       "kind": "relationship", "say": "The neighbour's dog is called Biscuit",                 "match": ["biscuit"],             "probe": "what is the neighbour's dog called?"},
     {"key": "friend",    "kind": "relationship", "say": "My oldest friend Karim lives in Berlin now",            "match": ["karim"],               "probe": "where does Karim live?"},
 
-    {"key": "flight",    "kind": "event",        "say": "I'm flying to Cyprus in September",                     "match": ["cyprus"],              "probe": "where am I travelling in September?"},
+    {"key": "flight",    "kind": "event",        "say": "I'm flying to Cyprus in September",                     "match": ["flying", "cyprus"],              "probe": "where am I travelling in September?"},
     {"key": "guitar",    "kind": "event",        "say": "I started guitar lessons in June",                      "match": ["guitar"],              "probe": "what did I start learning?"},
     {"key": "move",      "kind": "event",        "say": "We moved into this flat two years ago",                 "match": ["flat", "moved"],       "probe": "when did we move in?"},
     {"key": "marathon",  "kind": "event",        "say": "I'm running the marathon next spring",                  "match": ["marathon"],            "probe": "what am I training for?"}
