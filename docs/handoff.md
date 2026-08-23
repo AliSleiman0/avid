@@ -93,165 +93,74 @@ O1), **#207** AC-10/AC-11 (seal M9 — it needed the service stopped, which no l
 anything), **#400**, **#382**, **#414**, **#428**, **#310**. Laptop-side: **#447**'s O2 verdict and
 **#402**.
 
-## What shipped, 2026-08-22 → 23
+## What shipped, 2026-08-23 (this session)
 
-Twelve PRs across two days. The five M11 Group B items, plus #207's two laptop-doable criteria.
+Nine PRs. The M11 lane was emptied, then M11 itself was stopped.
 
 ### The deliverables
 
-- **`deploy/RUNBOOK.md`** (#387 → #425) — symptom-first, thirteen entries, each **Confirm / Fix /
-  Not-to-be-confused-with**. The third part is the one that earns its place: nearly every fault in
-  this project's history has a twin that presents identically.
-- **`SDS.md` §13** (#21 → #427) — threat model, secrets, data at rest, data in transit, camera and
-  microphone, update integrity, and §13.7's guard. **§13 is now the security authority**;
-  `SECURITY.md` is the operator summary that defers to it.
-- **The release path** (#388 → #430, #431) — `git push origin vX` runs build → verify → publish,
-  and **publish `needs:` verify**. Rehearse it any time:
-  `gh workflow run release.yml -f tag=v0.0.0-rc.1` builds and verifies and does *not* publish.
-  `docs/RELEASE.md` carries the decisions, including **no retroactive artifacts**.
-- **The control API is complete** (#385 → #433, #386 → #434) — `/health`, `/metrics`, `/state`,
-  `/facts`, `/events/stream`, `POST /quiet`. Every route SDS §9.5 has specified since M0 now
-  exists.
-- **`PI_OPERATIONS.md` §5c** (#207 AC-9 → #436) — the servo rig, which the document had never
-  covered.
+- **The first soak grade pass was run** (#440) — and the command recorded for it **could not run**.
+  Every path absolute, so it looked location-independent; `_grade` loads config, `[ai] personality`
+  is relative, and SDS §6.5 resolves against the *process* working directory. Fixed in three places
+  with a guard.
+- **`CLOCK`, and the wall clock is not one timeline** (#444, #439 AC-4) — ordered by **rowid**, two
+  consecutive samples read `13:41:08` then `13:41:07`, with the earlier-*written* row carrying the
+  old process's uptime. AC-0's gap and AC-2's downtime were subtractions across two clocks. Detected
+  in write order, reported, **never corrected and never graded**.
+- **The second-stop policy** (#449, #439 AC-5) — decided *before* a second stop could occur.
+- **#415 rescoped and fixed** (#446) — the guard it proposed was already shipped; what remained was
+  an irreducible wire race (now *attributed by `event_id`*, never suppressed by code) and a
+  single-slot tracker that was **silently skipping** cancels.
+- **#407** (#445) — five modules named a ReSpeaker the rig does not have.
+- **δ measured at last** (#451) — see below. The single biggest finding of the session.
+- **#439 closed**, all six criteria answered. AC-6 eliminated the servo rail.
+- **The M11 window stopped and O5 amended** (this PR).
 
-### The five findings worth more than the deliverables
+### The findings worth more than the deliverables
 
-⚠️ **1. A correction can land in one document and not its sibling, for months.** Writing §13 found
-three false claims in `SECURITY.md` — a model the project stopped using on 2026-08-01, `structlog`
-(imported nowhere, and **SDS §3.12.2 had already corrected the identical sentence in #378**), and
-`GET /facts` described as the audit when the route did not exist. None was a typo. Each was a
-literal that was right when written and never revisited.
+⚠️ **1. The robot was wedged in `THINKING` for 24 hours, and the soak could not see it (#452).**
+Three state transitions in a day; 147 of 175 log lines were `ignored illegal transition`. **Every
+graded criterion passed.** Found by reading logs while checking something else — the gate would
+have reported success for thirty days. *Uptime is satisfiable by a robot that does nothing*, which
+is M8's lesson in a new costume.
 
-⚠️ **2. The same scoping defect appeared three times in the doc guards.** Asking *"does this phrase
-appear anywhere in the file"* rather than *"is this claim right"*. Correct only while every subject
-is in the same state; the moment one route shipped and another had not, a surviving sentence about
-the second made the guard accuse the first. **Scope to the claim block** — paragraph, then bullet,
-then table row. Two of the three were caught only by neutering.
+⚠️ **2. The shipped keyword weight made the real embedder score exactly like the fake (#447).** At
+δ = 1.0, real MiniLM scored **0.66 / paraphrase 0.20** — identical to bag-of-words at every δ.
+`_fts_match` ORs every query token *including stopwords*, bm25 returns `top_k`, and each took a full
+`+1.0`, outranking facts the vector branch ranked **first**. At δ = 0.5: **0.86 / 1.00**. So every
+recall figure this project had ever recorded was measuring FTS5 and not the model. δ was labelled
+UNMEASURED in five places, each naming the tool that would settle it — and **that tool had never
+been run with a real embedder.**
 
-⚠️ **3. Across the session, 6 of ~42 neuters exposed guards of mine that could not fail.** A
-`uses:` regex that matched nothing so a third-party action could be inserted unnoticed; a
-"raises on a missing file" assertion `tarfile` satisfied by itself; an ordering test whose fixture
-made both orderings identical; a route check that searched the whole document. **Every one looked
-right when written.** The neuter step is not a formality, and when one comes back green the first
-suspect is the test.
+⚠️ **3. A hyphen had been costing a milestone criterion since the M7 seal (#450).** The model stored
+`"stand-up"`, the needle said `"standup"`, `_norm` folded whitespace but not punctuation — so a
+*correctly stored fact* scored as a recall miss. The `v0.M7.0` tag called it "a scoring artifact"
+and nobody filed it. **A measurement taken with a known-faulty instrument is not a measurement.**
 
-⚠️ **4. The `git checkout --` trap recurred with the memory already written.** A neuter harness
-restored a file to HEAD and destroyed the *uncommitted* fix it was proving. Knowing the rule was
-not enough — the harness now **refuses to start unless `git status --porcelain` is empty**, which
-is the only state in which its own restore is safe. Make the rule mechanical, not remembered.
+⚠️ **4. Fixing that broke the silence detector, and its own test caught it.** The announcement
+patterns contain apostrophes and were compared **un-normalised** against a normalised transcript —
+the same needle/haystack asymmetry, in reverse.
 
-⚠️ **5. A spec estimate can be wrong for a *good* reason.** §9.5 called the SSE tap "ten lines of
-code". It is not: dispatch is by **exact runtime type with no subclass fan-out** (§9.1.5) and
-**subscription is static** (§3.5.2), so a wildcard tap is impossible and the shape is forced — one
-tap, subscribed at composition time to every event type. Both decisions should stay. Say so in the
-PR rather than quietly shipping 200 lines against a line that says ten.
+⚠️ **5. Two neuters came back green, and both were real.** A `Path(...).is_absolute()` that cannot
+fail on Windows (rooted, no drive letter — it would have failed only in CI, for a reason nobody
+would have connected to it), and a corpus-consistency test that passes without the punctuation fix
+because `facts.json` never contained the hyphen — only what the *model* stored did. Both kept, both
+scoped honestly.
 
-### And one pattern that is now precedent
-
-**#207's AC-5 asked for the stall test "in the enclosure". There is no enclosure** — SDS §4.8 is an
-unwritten ToC entry, no WBS package, no issue, nothing planned. The criterion was **unsatisfiable,
-not unmet**, and left literal it would have blocked AC-11 forever on an artefact nobody is
-building.
-
-The resolution, which `PI_OPERATIONS.md` §7 already prescribed and nobody had applied: **amend on
-the issue, keep the original wording visible above the amendment, and give the deferred half a real
-owner** — here PMP's R-04 row, which already owns *"re-measure with a meter before #400 lands"*. Not
-a new issue for a phantom artefact; that is an owner in name only.
+⚠️ **6. I filed an issue that was wrong and closed it (#442).** I claimed `config/pi.toml` had
+drifted because `[adapters] embedder` was missing. It is missing **on purpose** —
+`PI_OPERATIONS.md` §3 says the template ships every device `"fake"` and that selecting real
+hardware is a provisioning act. **Read §3 before filing "the repo has drifted from the machine".**
+What survived was the real cause of my misreading: two keys named `embedder`, in one file, answering
+different questions.
 
 ### Closed, filed, merged
 
-**Closed:** #401 · #384 · #404 · #206 · #410 · **#387** · **#21** · **#388** · **#385** · **#386**.
-**Filed:** **#428** (no capture indicator — out of §13.5) · #406 (O1 stale) · #407 (five modules say
-"ReSpeaker") · #414 · #415.
-**Merged:** #405, #408, #409, #411, #412, #413, #416, #418, #419, #420, #421, #422, #423, **#425**,
-**#427**, **#430**, **#431**, **#433**, **#434**, **#436**.
-
----
-
-## Current state
-
-- **`main = 7cd2238`**, zero open PRs. Suite **1866 passed / 67 skipped** on 3.11 and 3.13.
-- 📕 **`PI_OPERATIONS.md` §5c is the servo rig** — channel map, the four faults that all look like
-  success, the PCA9685 register read-back that locates one downstream of the chip, and why the
-  reach limits are still provisional.
-- 🔌 **The control API is complete** (#385, #386): `/health`, `/metrics`, `/state`,
-  `/facts`, `/events/stream`, `POST /quiet`. `curl -N 127.0.0.1:8787/events/stream` is the live
-  event feed — the fastest answer to *"is anything happening at all"* on a robot that looks stuck.
-  `GET /facts` is §7.10's audit; `?include_superseded=1` adds the history.
-- 📦 **A tag now builds a verified artifact** (#388 → #430/#431). `git push origin vX` runs
-  build → verify → publish, and **publish `needs:` verify**. Dry-run it any time with
-  `gh workflow run release.yml -f tag=v0.0.0-rc.1` — it builds and verifies and does **not**
-  publish. `docs/RELEASE.md` carries the decisions.
-- 🔐 **`SDS.md` §13 is now the security authority** (#21/#427) and `SECURITY.md` is the
-  operator-facing summary that defers to it. Do not add a rule to `SECURITY.md` without §13.
-- 📕 **`deploy/RUNBOOK.md` exists** (#387/#425) — symptom-first, thirteen entries, each Confirm /
-  Fix / **Not-to-be-confused-with**. Read it before diagnosing anything on the rig; it is now the
-  first stop and `PI_OPERATIONS.md` is the second. `tests/docs/test_runbook.py` keeps it honest.
-- ⛔ **The M11 soak is STOPPED** (2026-08-23, ~26 h in, void — see the top of this file). Was:
-  opened 2026-08-22T13:18:08Z, build
-  `v0.M10.0-47-g8d03690`. `robot` and `soak-sampler` both `active` + `enabled`.
-- **The robot moves under its own service** — that had never worked before 2026-08-22 (#413).
-- **M9 is 10/12, not sealed** — AC-10 (bench) then AC-11 (the tag). M10 sealed (`v0.M10.0`). Nine
-  of eleven milestones tagged.
-- ⚠️ **The two `tests/docs/` guards are load-bearing now.** They hold `RUNBOOK.md`, `SECURITY.md`
-  and SDS §9.5/§13 against the code — models against `config/pi.toml`, routes against `health.py`
-  **in both directions**, retention and deletion constants against the schema, the API key
-  unwrapped only at the composition root. **If you change a route or a constant, expect them to go
-  red; that is them working.**
-- ⚠️ **`build` is now the deployed commit**, not `0.0.0`. `git describe --always --dirty --tags`,
-  resolved once at startup. **`-dirty` means someone edited files on the machine.** A `0.0.0` on a
-  checkout means the resolver has regressed and §12.6's guard is inert again.
-- ⚠️ **The two config copies that are deliberately different** — the machine's quiet window is
-  `02:00→09:00` and `session_idle_close_s = 300`, against `config/pi.toml`'s `22:00→07:30` and
-  `30`. **Do not reconcile in either direction.** Every other differing key resolves to the same
-  value via schema defaults (checked).
-- ⚠️ **Both units are installed FROM the repo** and diff-verified identical, not hand-edited.
-  Backups at `robot.service.pre206.bak` / `.pre207.bak`.
-
-### Gotchas — the ones that cost something
-
-- ⚠️ **`uv run --frozen --exact mypy avid` reproduces CI exactly — AND UNINSTALLS 13 PACKAGES**,
-  numpy included, turning the suite **78 red**. Restore with
-  `uv sync --extra memory --extra openai` (name every extra). The previous baton recorded the
-  recipe without its cost.
-- ⚠️ **`git checkout -- <file>` reverts to HEAD, not to your uncommitted edits.** Neutering a guard
-  to prove a test bites destroyed the fix it was proving. **Commit first, then neuter, then
-  restore.**
-- ⚠️ **A test can pass while the property it names is violated.** The P8 "must not re-derive per
-  scrape" test asserted object identity — CPython interns short strings, so a deliberately
-  re-deriving provider stayed green. **The neuter step is what caught it.** Assert something the
-  bug cannot satisfy: break `subprocess.run` and scrape.
-- ⚠️ **Backticks inside a double-quoted `git commit -m` run as command substitution** and silently
-  gut the message. Use a heredoc.
-- ⚠️ **Git Bash `/tmp` and Windows `C:\tmp` are different directories.** A shell redirect wrote one,
-  Python read the other, and `gh issue edit --body-file` then re-posted an unmodified body while
-  looking like success. Verify after editing an issue body.
-- ⚠️ **Python 3.11 rejects same-quote nesting inside f-strings.** Bit twice over SSH. Ship a file.
-- ⚠️ **`pgrep -f <pattern>` matches the shell running it** — a wait-loop never exited.
-- ⚠️ **Piping to `tail` hides the exit code**; a traceback scrolls past and reads as success. A
-  probe "completed" having died on line one, and the operator watched a still robot. **Smoke-test
-  anything a human is asked to observe, before asking them to observe it.**
-- ⚠️ **`uv run --python 3.11` REBUILDS the main venv without the extras** and turns the suite
-  **79 red** in untouched files (`ModuleNotFoundError: numpy`). Run the second interpreter in a
-  throwaway environment and delete it:
-  `UV_PROJECT_ENVIRONMENT=.venv311 uv sync --dev --frozen --extra memory --python 3.11`.
-- ⚠️ **A neuter harness must refuse to run on a dirty tree.** Its own `git checkout --` is safe
-  only when `git status --porcelain` is empty — and it ate an uncommitted fix mid-proof here,
-  *with the rule already written down two lines above*.
-- ⚠️ **`mypy` reporting `numpy/__init__.pyi: Type statement is only supported in 3.12+` is a LOCAL
-  artifact**, not a failure: it appears when numpy is installed under a 3.11 target. CI's lint job
-  syncs with no extras, so numpy is absent there. Reproduce CI's answer (`uv sync --dev --frozen`)
-  before believing a mypy red.
-- ⚠️ **A docs-only PR shows NO checks, not green ones** — `ci.yml`'s `paths-ignore` skips
-  `**/*.md`. That is a **skip, not a pass**; run the suite locally and say so.
-- ⚠️ **`setsid` does not exist in Git Bash**, and a background app started from one Bash call is
-  not reachable as a job from the next. Start it in the same call you use it from, and stop it with
-  `taskkill //PID <pid> //F` — Windows will not deliver a graceful SIGTERM from here, so
-  `system.shutting_down` cannot be triggered this way.
-- ⚠️ **`avid-pico` fails host-key verification** — only `avid`, `avid.local` and `100.127.197.112`
-  are in `known_hosts`, and all three dropped for ~10 minutes mid-session while Tailscale wrongly
-  reported the node offline. Try all three before concluding anything.
+**Closed:** #439 (all six ACs) · #407 · #450 · #442 (invalid, mine).
+**Filed:** **#452** (the wedge — `prio:must`) · **#447** (90% recall) · **#450** · #443 · #442.
+**Merged:** #440, #441, #444, #445, #446, #448, #449, #451, #453 + this one.
+**Still open deliberately:** #415 (AC-3 needs the rig) · #264 (what the 2026-08-14 miss actually
+was) · #447 (O2's verdict — never met, and the bar was **not** widened).
 
 ## What shipped earlier (2026-08-20, M9)
 
@@ -317,6 +226,24 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A green gate can mean the instrument never looked.** The M11 soak passed every graded
+  criterion for 26 hours while the robot was wedged and doing nothing. Before trusting a gate, ask
+  what it asserts the *subject* did — not what it asserts about the process running it.
+- ⚠️ **`gh issue comment` / `pr create` with an inline `--body "..."` runs backticks as command
+  substitution** and silently guts the text. Bit **three times in one session** despite the
+  git-commit version of the rule being written down. **Always `--body-file`.**
+- ⚠️ **The Bash tool's heredoc eats backslash sequences even when quoted (`<<'PY'`).** A Python
+  script written that way gets `\n` collapsed, so string matches silently fail. Use the Write
+  tool for anything containing backslashes, or anchor on backslash-free substrings.
+- ⚠️ **Copying a live SQLite DB with `cat` gives a stale snapshot** — the WAL is a separate file.
+  Use `sqlite3.backup()` over SSH for a consistent copy.
+- ⚠️ **`ssh alisleiman0@AVID` and `avid.local` both stopped resolving mid-session.**
+  `100.127.197.112` (Tailscale) kept working. Try all three before concluding the Pi is down.
+- ⚠️ **Restating a default and calling it a name is drift.** `_EQUAL = ScoreWeights()  # α=β=γ=1`
+  inherited the shipped weights and called them "equal"; when δ moved to 0.5 the name became false
+  and three tests failed on arithmetic that was never the point. A test's reference constant
+  belongs to the test — spell it out.
 
 - ⚠️ **On a no-RTC Pi, two boots' wall clocks are not the same timeline, and subtracting across
   them looks exactly like a measurement.** The M11 soak's `samples` table has consecutive rowids
