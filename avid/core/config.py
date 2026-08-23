@@ -245,8 +245,8 @@ class ServoConfig(_Section):
 class MicrophoneConfig(_Section):
     """Audio capture parameters, injected into the microphone adapter (P7, AVID-53).
 
-    Describes the *one* capture stream the M2 rig opens: the ALSA ``device`` (the ReSpeaker),
-    the ``sample_rate`` and ``channels``, and the ``chunk_ms`` frame size. 16 kHz mono is the
+    Describes the *one* capture stream the M2 rig opens: the ALSA ``device``, the
+    ``sample_rate`` and ``channels``, and the ``chunk_ms`` frame size. 16 kHz mono is the
     rate the Realtime API and the local VAD expect (§6.3); ``chunk_ms`` matches the 20 ms
     mic-capture budget (§... — "Mic capture → frame available | 20 ms"). Only the ``alsa``
     adapter reads ``device``; the ``FakeMicrophone`` synthesizes. The adapter never reaches for

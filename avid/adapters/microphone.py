@@ -8,7 +8,13 @@ async iterator of :class:`~avid.core.hal.AudioChunk` — and both adapters keep 
 * :class:`FakeMicrophone` streams synthesized PCM (or a WAV, via :meth:`from_wav`) and *is*
   the simulator, so the sim can never drift from the real mic — it is the real mic with no
   hardware behind it (SDS §3.9.2). Stdlib only.
-* :class:`AlsaMicrophone` captures from the ReSpeaker via ALSA (``pyalsaaudio``). That library
+* :class:`AlsaMicrophone` captures from whatever ALSA device it is given (``pyalsaaudio``) —
+  on the built rig a **USB PnP mic** at ``plughw:CARD=Device,DEV=0``, *not* the ReSpeaker this
+  module named until 2026-08-23 (AVID-407). Nothing was functionally wrong — the device comes
+  from config (P7), so the adapter opens whatever it is handed and the prose was inert — but a
+  ReSpeaker is a multi-channel array with onboard DSP and this is a single capsule, so anyone
+  reasoning about beamforming, channel selection or AEC (AVID-163) from these words was reasoning
+  about hardware the robot does not have. That library
   is pip-on-Pi and absent off it (ADR-008, like ``picamera2``/``adafruit_servokit``), so it is
   imported **only** inside this module and **lazily**, inside the worker-thread helper — the
   module itself imports cleanly on CI and a laptop, where the fake path and mypy still need it
@@ -25,7 +31,8 @@ Two invariants both adapters share:
 ``sample_rate``/``channels`` are advertised as plain attributes, deliberately **off** the
 ``Microphone`` port: no application reads them back, so they are not an application need — they
 are the contract suite's observation points (exactly as ``FakeCamera.captures`` is off the
-``Camera`` port). Audio is fixed at **S16_LE, 2 bytes/sample** — the ALSA/ReSpeaker standard;
+``Camera`` port). Audio is fixed at **S16_LE, 2 bytes/sample** — what the Realtime API and the
+local VAD both require (§6.3), not a house style borrowed from a particular capture device;
 :class:`~avid.core.hal.AudioChunk` carries no bit-depth field, so it is implicit. Constructed
 only by the composition root or a test fixture (P3); everything else depends on the port (P2).
 """
@@ -62,7 +69,9 @@ def _card_name(device: str) -> str | None:
 
 
 # The one PCM sample format the adapters exchange: signed 16-bit little-endian, 2 bytes per
-# sample per channel — what the ReSpeaker captures and what the Realtime API / VAD expect.
+# sample per channel — what the Realtime API and the local VAD require (§6.3). Justified by the
+# consumers, never by the capture device: a device that could not produce it would be resampled,
+# and one that produced something better would still be sent this.
 _SAMPLE_WIDTH_BYTES = 2
 
 
