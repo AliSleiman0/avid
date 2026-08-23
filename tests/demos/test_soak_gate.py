@@ -86,6 +86,7 @@ def _samples_db(
     *,
     builds: list[str] | None = None,
     uptimes: list[int | None] | None = None,
+    alive: bool = True,
 ) -> str:
     """Write samples in LIST ORDER, which is what makes rowid meaningful here.
 
@@ -93,18 +94,28 @@ def _samples_db(
     real defect #439 found: a rowid order that disagrees with the timestamps. ``uptimes`` carries
     the robot's own counter, ``None`` included, because an absent reading is a third answer and
     not a zero (#380).
+
+    ⚠️ ``alive`` writes a **healthy** liveness series by default (#452): a state that changes and a
+    transitions counter that rises. Every test in this file is about something else — the uptime
+    maths, the gaps, the clock — and a fixture that left the robot catatonic would make all of them
+    INCONCLUSIVE on LIVE for a reason having nothing to do with their subject. That is this
+    project's own lesson pointed at itself: *the thing a fixture leaves out is the thing that
+    breaks.* ``alive=False`` writes the pre-#452 shape, which is what an old build produces.
     """
     path = tmp_path / "samples.db"
+    states = ("IDLE", "LISTENING", "THINKING", "SPEAKING")
     conn = soak._open_samples(path)
     with conn:
         for i, at in enumerate(ats):
             conn.execute(
-                "INSERT INTO samples (at, reachable, build, uptime_s, dropped) "
-                "VALUES (?,1,?,?,0)",
+                "INSERT INTO samples (at, reachable, build, uptime_s, dropped, state, "
+                "transitions) VALUES (?,1,?,?,0,?,?)",
                 (
                     at,
                     (builds[i] if builds else _BUILD),
                     (uptimes[i] if uptimes else 60),
+                    (states[i % len(states)] if alive else None),
+                    (i if alive else None),
                 ),
             )
     conn.close()
