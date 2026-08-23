@@ -23,5 +23,31 @@
     "samples_db": "/var/lib/soak/samples.db",
     "robot_db": "/var/lib/robot/robot.db"
   },
-  "grade_command": "sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py --mode grade --since 1787404688 --config /etc/robot/config.toml"
+  "grade_command": "cd /opt/avid && sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py --mode grade --since 1787404688 --config /etc/robot/config.toml",
+  "_grade_command_cwd": "The leading `cd` is load-bearing. [ai] personality is a RELATIVE path and SDS §6.5 resolves relative paths against the process working directory, which for robot.service is WorkingDirectory=/opt/avid. The command recorded here from 2026-08-22 until 2026-08-23 omitted it and raised FileNotFoundError before grading a single criterion.",
+  "_first_grade_pass": {
+    "run_at_epoch": 1787476461,
+    "run_at_utc": "2026-08-23T09:14:21Z",
+    "elapsed": "0.83 days of 30",
+    "verdict": "4 passed, 1 failed, 0 inconclusive - exit 1",
+    "AC_0_coverage": "99.6420%, 1195 samples, one 209s gap",
+    "AC_2_uptime": "99.8914% (78s down; 717s permitted at the 99% bar)",
+    "AC_3_manual_restarts": "0 - PASS",
+    "AC_4_build": "v0.M10.0-47-g8d03690, single build - PASS",
+    "AC_3b_unplanned_stops": "1 - FAIL. Boot c7c6c3d5 last seen 1787406043, 22.5 minutes into the window, stopped_at NULL.",
+    "_does_this_end_the_window": "NO, and the reasoning is on the record so it is not re-litigated on day 29. O5 is '30-day soak, >=99% uptime, zero manual restarts' and SDS §12.6 defines an unclean stop as NOT manual: 'an unclean stop is a crash or watchdog kill and is not manual - but it is a defect, counted and reported separately.' Both of O5's own bars pass. §12.6 also says 'zero is the expectation; any occurrence is a finding with its own issue', which is what AC-3b is for - so this is filed, not absorbed, and the window keeps running.",
+    "_but_note_the_exit_code": "AC-3b failing makes the harness exit non-zero. A future operator must not read that exit code as 'O5 failed'. Read the per-criterion lines."
+  },
+  "_unplanned_stop_2026_08_22": {
+    "what": "The MACHINE rebooted about 22.5 minutes into the window. Robot boot c7c6c3d5 - the very boot named in boot_id_at_open above - died with stopped_at NULL; b566ffd9 came up 24s later and has run since.",
+    "not_the_deliberate_reboot": "The deliberate reboot under _restarted_once is a DIFFERENT and EARLIER event: boots 5e1009ea and e5e1d1ee stopped at 13:15:21 and 13:16:06 with stop_reason=signal, i.e. cleanly. The graceful path demonstrably records a signal on this machine, so the 13:40:43 stop was not graceful.",
+    "evidence_it_was_a_machine_reboot": [
+      "journald holds nothing before 13:40:53 - the previous boot's log is gone",
+      "robot.service and soak-sampler.service both ActiveEnter 13:40:53 / 13:41:13, NRestarts=0",
+      "boot_log.started_mono for b566ffd9 is 48.7s - a fresh boot - against 15726s for e5e1d1ee",
+      "systemd-timesyncd stepped the clock 13:17:20 -> 13:40:47 'restoring from recorded timestamp', and the kernel's first entry this boot is stamped 2026-04-27 19:48:59"
+    ],
+    "cause": "NOT ESTABLISHED, and probably unrecoverable. journald is volatile here (#381), which is the exact gap /var/lib/soak/interventions.jsonl exists to cover. A power cut and a kernel panic leave byte-identical records. vcgencmd get_throttled reads 0x0, but it resets at boot, so it covers only the run since.",
+    "clock_warning": "This Pi has no RTC. That boot came up reading 2026-04-27 - 118 days stale - before fake-hwclock and then timesyncd corrected it. Epoch arithmetic ACROSS a reboot here is not trustworthy; boot_log.started_mono is the column that survives it. This is AVID-345."
+  }
 }

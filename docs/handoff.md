@@ -29,9 +29,15 @@ It is the one time-sensitive item on the list, and it has still never been run a
 multi-day window.
 
 ```sh
-sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
+cd /opt/avid && sudo /opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_pi.py \
     --mode grade --since 1787404688 --config /etc/robot/config.toml
 ```
+
+⚠️ **The `cd` is load-bearing, not tidiness.** `[ai] personality` is a *relative* path, and
+SDS §6.5 resolves relative paths against the **process working directory** — which for
+`robot.service` is `WorkingDirectory=/opt/avid`. Run this from anywhere else and `load_config`
+raises `FileNotFoundError` before a single criterion is graded. The command recorded here from
+2026-08-22 until 2026-08-23 omitted it, and **could not run as written**.
 
 | | |
 |---|---|
