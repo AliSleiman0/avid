@@ -561,3 +561,49 @@ def test_an_unreachable_robot_is_recorded_not_raised(
         if line.strip()
     ]
     assert any(r["kind"] == "skipped_busy" for r in records)
+
+
+def test_a_clip_at_the_wrong_rate_is_a_corpus_defect_not_an_absent_vad(
+    tmp_path: Path,
+) -> None:
+    """⚠️ Found by running the validator against the shipped cue clips, on the rig.
+
+    They are 24 kHz. Silero supports 16 kHz and 8 kHz only, so the model raised — and the code
+    reported *"onnxruntime or the Silero model is absent here"* while both were installed and
+    working. That is a report describing something other than the run, which is the defect family
+    S7.1 exists to name, inside the tool written to prevent it.
+
+    The rate cannot be fixed by resampling either: the repo's own resampler **refuses to
+    downsample** without an anti-alias filter, deliberately. So a clip at the wrong rate is a
+    corpus defect, it fails GATE, and it is never confused with a missing dependency.
+    """
+    corpus = _corpus(
+        tmp_path, [{"key": "wrong", "file": "wrong.wav", "text": "recorded at 24k"}]
+    )
+    _wav(corpus / "wrong.wav", seconds=2.0, amplitude=12000, rate=24000)
+
+    criteria = {c.ac: c for c in load._validate(_validate_args(corpus))}
+    assert criteria["GATE"].verdict == "fail"
+    assert "wrong" in criteria["GATE"].detail
+    assert any("WRONG RATE" in row for row in criteria["CORPUS"].rows)
+    # ...and it must NOT be reported as an absent VAD, which is a different fact entirely.
+    assert "VAD" not in criteria, "a wrong-rate clip was blamed on a missing dependency"
+
+
+def test_a_clip_that_is_not_mono_16_bit_cannot_be_played_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """The speaker writes S16_LE mono; anything else is a corpus defect, not a playback surprise."""
+    corpus = _corpus(
+        tmp_path, [{"key": "stereo", "file": "stereo.wav", "text": "two channels"}]
+    )
+    path = corpus / "stereo.wav"
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x10" * 32000)
+
+    criteria = {c.ac: c for c in load._validate(_validate_args(corpus))}
+    assert criteria["GATE"].verdict == "fail"
+    assert any("NOT MONO 16-BIT" in row for row in criteria["CORPUS"].rows)
