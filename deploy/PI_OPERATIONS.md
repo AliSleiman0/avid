@@ -308,6 +308,30 @@ Mixer state that matters and is easy to lose: mic **gain 10/16 (+14.88 dB), AGC 
 `Device`); amp **Master 85%** (card `MAX98357A`). Note `amixer -D default sget Master` resolves to
 the *mic's* control — query the card explicitly (`amixer -c MAX98357A`).
 
+⚠️ **Master was found at 100% on 2026-08-24, not 85%** — and `alsactl store` is what makes a level
+survive a reboot. If a bench measurement disagrees with an earlier one by ~10 dB, check the mixer
+before you doubt the room.
+
+### 5.0 The room is a usable input path (#389)
+
+**A second process can drive the robot through its own microphone.** Measured 2026-08-24: a WAV
+played from a separate process at `Master 80%` arrived at the mic at **peak −22.3 dBFS / rms
+−42.7** — comfortably clear of the −40 dBFS floor `barge_in_margin_db` was calibrated against — and
+produced a complete turn: `speech_started → THINKING → a real Realtime session → a spoken reply →
+IDLE`.
+
+That is what `docs/demos/soak_load.py` and `soak-load.service` are built on, and it is why a soak
+window can contain work without anyone in the room. Two facts to carry:
+
+- ⚠️ **Playback is shareable; capture is not.** `[speaker] device = "default"` goes through dmix, so
+  a second process can play while the robot runs. The mic is `plughw:CARD=Device,DEV=0` — a raw hw
+  device with no `dsnoop` — so a second opener gets **EBUSY** while `robot.service` holds it. To
+  measure what the mic hears you must stop the robot first.
+- ⚠️ **A systemd unit that plays audio needs `SupplementaryGroups=audio`.** Without it the unit
+  opens no sound card at all while the identical command works from a login shell. `sudo -u robot`
+  shows the same symptom and is a good five-second check. This is the fourth time that omission has
+  cost this project time.
+
 ### ⚠️ 5.1 `Auto Gain Control` — the trap that cost a milestone (AVID-296)
 
 **The line above already said "AGC off". It was not enough, and the reason is worth the space.**

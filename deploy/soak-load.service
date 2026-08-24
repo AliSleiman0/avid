@@ -1,0 +1,86 @@
+# The soak LOAD GENERATOR (#389, SDS §12.6) — the sibling of soak-sampler.service.
+#
+# Install to /etc/systemd/system/soak-load.service.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THIS EXISTS
+#
+# The sampler next door answers "was the robot up". This answers "was there
+# anything to be up FOR". O5's software half is leaks, wedges, unbounded growth
+# and reconnection decay, and none of those appear in a robot that is doing
+# nothing — which is what an unattended robot does, by design: §10.4's presence
+# rule refuses to speak to an empty room. The first M11 window measured a
+# catatonic robot at 99.89% uptime, and a flat RSS curve over an idle process is
+# the ABSENCE of a test, not a passing one.
+#
+# So this plays recorded speech into the room and lets the robot's own
+# microphone, VAD and Realtime session do the rest. Nothing about the robot is
+# modified to accommodate it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Pico soak load generator (M11 / O5)
+Documentation=https://github.com/AliSleiman0/avid
+# Wants, not Requires — but for the OPPOSITE reason to the sampler's.
+#
+# The sampler must keep running when the robot is down, because recording that
+# it is down is the whole job. This one is USELESS when the robot is down: there
+# is nothing to talk to. It still uses Wants= rather than Requires= so that
+# systemd does not stop and start it underneath a robot restart, and it handles
+# the robot's absence itself — it polls /state, finds nothing, and logs
+# `skipped_busy` rather than playing into a void. An instrument that records why
+# it did nothing is worth more than one that is not running.
+Wants=robot.service
+After=network.target robot.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=/opt/avid
+ExecStart=/opt/avid/.venv/bin/python /opt/avid/docs/demos/soak_load.py \
+    --mode play \
+    --config /etc/robot/config.toml \
+    --corpus /opt/avid/assets/load \
+    --load-log /var/lib/soak/load.jsonl
+
+Restart=always
+RestartSec=10
+SyslogIdentifier=soak-load
+
+# ⚠️ Deliberately NO WatchdogSec, for the same reason the sampler has none: this
+# is an instrument, not the product. A watchdog would add a second thing that
+# can kill a process during the window, and an instrument that kills itself is
+# worse than one that misses an utterance.
+
+# ⚠️⚠️ SupplementaryGroups=audio IS LOAD-BEARING AND HAS BEEN LEARNED THE HARD
+# WAY THREE TIMES IN THIS REPO.
+#
+# Without it this unit opens no sound card at all, while the identical command
+# run by hand works perfectly — because a login shell is already in `audio` and
+# a systemd unit is not. That is the exact shape of the `audio` omission that
+# left robot.service deaf and mute for two milestones, the `i2c` one that meant
+# the servos could not move under the unit (#413), and the `video` one that cost
+# 942 restarts on /dev/fb0. It was hit AGAIN on 2026-08-24 while proving this
+# load path: `sudo -u robot` was refused the device and the login user played
+# fine, which is the same tell.
+#
+# If this unit is silent, check `id robot` before you touch anything else.
+SupplementaryGroups=audio
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Shares the sampler's state directory so load.jsonl lands beside samples.db and
+# the grade pass can read both. ProtectSystem=strict makes everything else
+# read-only, so this is the only writable path.
+StateDirectory=soak
+# The robot's database is never touched — not read, not written. This generator
+# speaks to the robot through the room and the loopback API, and nothing else.
+InaccessiblePaths=/var/lib/robot
+
+[Install]
+WantedBy=multi-user.target
