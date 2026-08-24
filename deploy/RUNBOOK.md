@@ -558,6 +558,37 @@ echo '{"at": 1787404800, "kind": "power_cut", "note": "unplugged the bench strip
 way. It exists because a power cut and a crash leave byte-identical records and the journal is
 volatile, so nothing else will remember which was which.
 
+### 4.0.1 The load generator — and why a window without one measures nothing
+
+`soak-load.service` plays recorded speech into the room on a schedule so the robot runs real turns.
+Without it a window measures an **unattended** robot, and §10.4's presence rule means an unattended
+robot does nothing: the first M11 window graded a catatonic robot at 99.89% uptime.
+
+```sh
+systemctl is-active soak-load
+sudo /opt/avid/.venv/bin/python -c "print(open('/var/lib/soak/load.jsonl').readlines()[-3:])"
+```
+
+It writes `/var/lib/soak/load.jsonl`, one JSON object per line, and the grade pass reads it as the
+**LOAD** criterion — graded, unlike `LIVE`'s transition count, because a generator removes the
+empty-house confound: if it says it played an utterance, the robot owed a turn.
+
+⚠️ **The caps in that unit are the only caps that exist.** §10.4's gate — quiet hours, the cooldown,
+the daily budget — throttles **proactive** turns only. Nothing in the robot rate-limits a reactive
+turn, because until now the only thing that could start one was a person in the room. If the
+generator is misconfigured it will spend until `--max-turns` or `--max-usd` stops it and nothing
+else will.
+
+⚠️ **Expect `triggers_fired` to collapse while it runs, and do not diagnose a proactivity
+regression.** Rule 4 vetoes on sustained ambient speech that opened no session — which is exactly
+what a generator manufactures. `proactive_log` will fill with `ambient_speech` and `state` reasons
+for the length of the run. The LOAD criterion says so in its own rows.
+
+⚠️ **If the unit is running and silent, check `id robot` before anything else.** Playing audio from
+a systemd unit needs `SupplementaryGroups=audio`; without it the unit opens no sound card while the
+identical command works by hand from a login shell. That is the same omission that left the robot
+deaf and mute for two milestones, and it was hit again while proving this load path.
+
 If a deploy genuinely must happen, that is a decision to **restart the window**, recorded as such in
 `docs/demos/m11_evidence/window.json`. Restarting is not a disaster; *silently* restarting is.
 
