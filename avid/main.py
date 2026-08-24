@@ -831,6 +831,16 @@ def _wire_services(
         ignore_streak_limit=config.behavior.ignore_streak_limit,
     )
 
+    # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
+    # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so
+    # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
+    # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
+    #
+    # ⚠️ Built HERE, above ConversationService, because that service now depends on it — as the
+    # `SpendSource` Protocol, never by name (P2). Before #472 nothing consumed the meter at all:
+    # it accumulated dollars and logged a tripwire that no code branched on, which is how the
+    # robot spent $0.50 in eight minutes with every other guard satisfied.
+    cost_meter = CostMeterService(bus=bus, clock=clock, model=config.ai.model)
     conversation = ConversationService(
         bus=bus,
         clock=clock,
@@ -849,6 +859,9 @@ def _wire_services(
         # tool dispatch rides the Realtime pump rather than the bus.
         gesture=motion,
         behavior=behavior,
+        spend=cost_meter,
+        hourly_ceiling_usd=config.ai.hourly_ceiling_usd,
+        spend_window_s=config.ai.spend_window_s,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone=config.behavior.timezone,
@@ -866,11 +879,12 @@ def _wire_services(
     # is a correctness bug is a direct awaited call, never an event. A soak rig sat in THINKING for
     # 24 hours because this arming lived on a code path a refused `open()` returns before reaching.
     state.watch(conversation.on_transition, name="ConversationService.think_deadline")
-    # The cost meter (#105, SDS §6.10.6): a reactive consumer of conversation.turn_ended — the
-    # observability subscriber the §9.1.3 catalog already lists for that fact. Owns no task, so
-    # like the two faces it is wired for its subscription and then dropped. Rates are keyed by the
-    # injected model name (a model swap stays a config edit); no vendor, no device (P1/P5).
-    cost_meter = CostMeterService(bus=bus, model=config.ai.model)
+    # The spend ceiling's own counter (#472). Registered here rather than beside the audio
+    # counters above because `conversation` does not exist yet at that point. A plain total, not
+    # a per-reason map like `admission_refusals`: there is exactly one rule, and a histogram with
+    # one bucket would imply otherwise.
+    if metrics is not None:
+        metrics.register("spend_refusals", conversation.spend_refusals)
     # The structured tap (#242, §3.12.2). Three §9.1.3 rows had an `Observability` subscriber in the
     # catalog and none in the code — state.transitioned's is even tagged (M10). Owns no task, so
     # like the two faces it is wired for its subscriptions and then dropped.

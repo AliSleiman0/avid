@@ -18,6 +18,7 @@ import time
 sys.path.insert(0, "/opt/avid")
 
 from avid.adapters.clock import SystemClock  # noqa: E402
+from avid.adapters.spend import FakeSpendSource  # noqa: E402
 from avid.core.config import load_config  # noqa: E402
 from avid.core.event_bus import AsyncioEventBus  # noqa: E402
 from avid.core.state_manager import StateManager  # noqa: E402
@@ -251,6 +252,11 @@ async def main() -> int:
         sink=audio,
         cues=_build_cue_bank(config, speaker=speaker),
         memory=_NoMemory(),
+        # A trace tool, not the robot: there is no cost meter here, so the ceiling is inert by
+        # construction rather than by a number someone has to keep in step (#472).
+        spend=FakeSpendSource(),
+        hourly_ceiling_usd=config.ai.hourly_ceiling_usd,
+        spend_window_s=config.ai.spend_window_s,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         think_timeout_s=config.gate.think_timeout_s,

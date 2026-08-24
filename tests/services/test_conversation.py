@@ -36,6 +36,7 @@ from avid.adapters.clock import FakeClock
 from avid.adapters.microphone import FakeMicrophone
 from avid.adapters.realtime import ReplayRealtimeClient
 from avid.adapters.speaker import FakeSpeaker
+from avid.adapters.spend import FakeSpendSource
 from avid.adapters.turn_sink import FakeTurnSink
 from avid.adapters.vad import FakeVoiceActivityDetector
 from avid.core.envelope import envelope
@@ -185,6 +186,7 @@ class Rig(NamedTuple):
     speaker: FakeSpeaker
     collector: _Collector
     memory: _StubMemory | MemoryService
+    spend: FakeSpendSource
 
 
 _ExtraSub = tuple[type[Event], Callable[[Event], Awaitable[None]], str]
@@ -204,6 +206,8 @@ async def _rig(
     server_turn_detection: bool = False,
     thinking_delay_ms: int = 0,
     hold_open_s: float = 30.0,
+    hourly_ceiling_usd: float = 1.00,
+    spend_window_s: float = 3600.0,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -226,6 +230,7 @@ async def _rig(
     cues = CueBank(speaker=speaker, asset_dir=_CUES)
     collector = _Collector()
     mem = memory if memory is not None else _StubMemory()
+    spend = FakeSpendSource()
     service = ConversationService(
         bus=bus,
         clock=clock,
@@ -237,6 +242,9 @@ async def _rig(
         affect=_StubAffect(),
         behavior=_StubBehavior(),
         gesture=_StubGesture(),
+        spend=spend,
+        hourly_ceiling_usd=hourly_ceiling_usd,
+        spend_window_s=spend_window_s,
         session_idle_close_s=session_idle_close_s,
         memory_inject_timeout_s=memory_inject_timeout_s,
         default_timezone="Asia/Beirut",
@@ -265,7 +273,9 @@ async def _rig(
     await bus.start()
     await service.start()
     try:
-        yield Rig(service, bus, clock, state, client, sink, speaker, collector, mem)
+        yield Rig(
+            service, bus, clock, state, client, sink, speaker, collector, mem, spend
+        )
     finally:
         await service.stop()
         await bus.stop()
@@ -606,6 +616,9 @@ async def test_remember_fact_lands_a_row_and_publishes_on_one_correlation_id() -
         sink=sink,
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=_CUES),
         memory=memory,
+        spend=FakeSpendSource(),
+        hourly_ceiling_usd=1.00,
+        spend_window_s=3600.0,
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         default_timezone="Asia/Beirut",
@@ -1040,6 +1053,9 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         sink=audio,
         cues=cues,
         memory=_StubMemory(),
+        spend=FakeSpendSource(),
+        hourly_ceiling_usd=1.00,
+        spend_window_s=3600.0,
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         default_timezone="Asia/Beirut",
@@ -2341,3 +2357,200 @@ class _StubGesture:
     ) -> LookAtResult:
         self.looks.append(direction)
         return LookAtResult.ACCEPTED
+
+
+# ── The spend ceiling (#472) ─────────────────────────────────────────────────────────────────
+
+
+async def test_a_reactive_turn_is_refused_once_the_ceiling_is_reached() -> None:
+    """⚠️ The guard that does not depend on guessing the failure in advance.
+
+    §10.4's policy gate and §6.2.4's admission gate both ask questions about the *room* and refuse
+    turns that look wrong. On 2026-08-24 every one of them was satisfied while the robot spent
+    $0.50 in eight minutes with nobody in it (#467). This asks what was actually billed, which is
+    the one question a novel defect cannot make look right.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client, initial=RobotState.IDLE, hourly_ceiling_usd=1.00
+    ) as rig:
+        rig.spend.usd = 1.50  # over the ceiling before the turn starts
+
+        await _utterance(rig, correlation_id=uuid4())
+
+        assert rig.service._session_open is False, (
+            "a paid session was opened over the ceiling"
+        )
+        assert rig.service.spend_refusals() == 1
+        assert client.opened is False, (
+            "the client was asked to open despite the ceiling"
+        )
+
+
+async def test_spending_under_the_ceiling_changes_nothing() -> None:
+    """The other half, and the one that keeps this from being a robot that never answers.
+
+    A ceiling that bites during ordinary use is worse than no ceiling: it turns a wallet guard
+    into an outage, and the owner has no way to tell which. The shipped default is ~29x §6.10.3's
+    modelled hourly rate for exactly this reason.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client, initial=RobotState.IDLE, hourly_ceiling_usd=1.00
+    ) as rig:
+        rig.spend.usd = 0.04  # a normal hour, per §6.10.3's ~20 turns/day
+
+        await _utterance(rig, correlation_id=uuid4())
+
+        assert rig.service._session_open is True
+        assert rig.service.spend_refusals() == 0
+
+
+async def test_the_ceiling_is_measured_over_the_configured_window_not_a_literal() -> (
+    None
+):
+    """⚠️ AVID-180's lesson, applied before it can be learned again here.
+
+    Every echo-gate figure ever recorded said "margin 6.0 dB" whatever the config held, because
+    the harness never passed the knob. A ceiling that asked its source for a hard-coded window
+    would fail the same way and just as invisibly — the number would look right and describe a
+    window nobody configured.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client,
+        initial=RobotState.IDLE,
+        hourly_ceiling_usd=1.00,
+        spend_window_s=900.0,
+    ) as rig:
+        await _utterance(rig, correlation_id=uuid4())
+
+        assert rig.spend.windows, "the ceiling never consulted the spend source at all"
+        assert set(rig.spend.windows) == {900.0}, (
+            f"asked about {set(rig.spend.windows)} rather than the configured window"
+        )
+
+
+async def test_the_user_is_told_once_per_episode_not_once_per_turn() -> None:
+    """⚠️ AC-4: a silent refusal is indistinguishable from a broken robot.
+
+    But a robot repeating "try again later" at every utterance is its own fault report, and the
+    reactive path next door already makes the same call for a dead connection: *"replaying a cue
+    on every utterance would be its own annoyance"*. The counter carries the real frequency; the
+    cue carries the news.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client, initial=RobotState.IDLE, hourly_ceiling_usd=1.00
+    ) as rig:
+        rig.spend.usd = 5.00
+
+        for _ in range(3):
+            await _utterance(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+
+        assert rig.service.spend_refusals() == 3, "not every refused turn was counted"
+        played = [f.name for f in rig.speaker.files_played]
+        assert played.count("try_again_later.wav") == 1, (
+            f"the cue played {played.count('try_again_later.wav')} times, not once per episode"
+        )
+
+
+async def test_the_announcement_re_arms_once_spend_falls_back_under() -> None:
+    """A ceiling episode that ends must be able to announce the next one.
+
+    Without the re-arm the robot tells you once, ever — so a second budget stop a week later is
+    silent, which is the failure mode this cue exists to prevent.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client, initial=RobotState.IDLE, hourly_ceiling_usd=1.00
+    ) as rig:
+        rig.spend.usd = 5.00
+        await _utterance(rig, correlation_id=uuid4())
+
+        rig.spend.usd = 0.0  # the window rolled on; spend fell back under
+        await _utterance(rig, correlation_id=uuid4())
+
+        rig.spend.usd = 5.00  # ...and a second episode begins
+        await _utterance(rig, correlation_id=uuid4())
+        await rig.collector.settle()
+
+        played = [f.name for f in rig.speaker.files_played]
+        assert played.count("try_again_later.wav") == 2, (
+            "the second ceiling episode was silent -- the announcement never re-armed"
+        )
+
+
+async def test_a_refused_turn_still_reaches_a_defined_state() -> None:
+    """⚠️ It cannot wedge, and the reason is #452 rather than anything written here.
+
+    On the reactive path the machine has already reached THINKING before the ceiling is consulted,
+    so a refusal leaves it there with no session to get it out. That is exactly the 24-hour wedge
+    #452 fixed, and the fix was to make §6.9's deadline fire on *time in THINKING* rather than on
+    a session existing. This asserts the guard inherits that, rather than trusting it.
+
+    ⚠️ It also means a budget stop **looks like a connection degrade in the state trace** — which
+    is why `spend_refusals` is counted separately and why the RUNBOOK entry leads with it.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client,
+        initial=RobotState.IDLE,
+        think_timeout_s=10.0,
+        hourly_ceiling_usd=1.00,
+    ) as rig:
+        rig.spend.usd = 5.00
+        await _utterance(rig, correlation_id=uuid4())
+        assert rig.state.state is RobotState.THINKING
+        assert rig.service._session_open is False
+
+        await rig.clock.advance(30.0)
+        await rig.collector.settle()
+
+        assert rig.state.state is RobotState.DEGRADED, (
+            "a turn refused on cost parked the robot in THINKING -- #452's deadline did not fire"
+        )
+
+
+async def test_the_ceiling_stops_a_runaway_riding_one_open_session() -> None:
+    """⚠️ The hole a first draft of this guard shipped with, and it was nearly total.
+
+    Checking the ceiling beside `client.open()` reads correctly and is almost useless: once a
+    socket is up, every following turn rides it and never reaches that branch. The rig ships
+    `session_idle_close_s = 300`, so **one session covers five minutes** — and the 2026-08-24
+    runaway was 29 turns in eight minutes. A ceiling guarding only cold opens would have refused
+    the first turn and billed the other twenty-eight.
+
+    So the check is per TURN, and a refusal tears down an open session: streaming audio to a
+    server that is going to answer is spending, whatever the guard says afterwards.
+    """
+    clock = FakeClock()
+    client = ReplayRealtimeClient(clock=clock, timeline=())
+
+    async with _rig(
+        client=client, initial=RobotState.IDLE, hourly_ceiling_usd=1.00
+    ) as rig:
+        await _utterance(rig, correlation_id=uuid4())
+        assert rig.service._session_open is True, "the premise of this test changed"
+
+        rig.spend.usd = 5.00  # the ceiling is passed mid-conversation
+        await _utterance(rig, correlation_id=uuid4())
+
+        assert rig.service.spend_refusals() == 1
+        assert rig.service._session_open is False, (
+            "the ceiling was passed and the paid socket stayed open -- audio is still being "
+            "streamed to a server that will answer, which is spending"
+        )

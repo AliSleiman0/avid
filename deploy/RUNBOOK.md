@@ -162,6 +162,7 @@ That is a deliberate trade — see
 | I talk to it and nothing happens | [The robot never answers me](#the-robot-never-answers-me) |
 | It spoke in the middle of the night, or hours after it should have | [The robot answers at the wrong time](#the-robot-answers-at-the-wrong-time) |
 | **It answers its own answers; turns and spend climb with nobody there** | [The robot is talking to itself](#the-robot-is-talking-to-itself) |
+| **It has stopped answering, and says "try again later"** | [The robot has stopped answering to save money](#the-robot-has-stopped-answering-to-save-money) |
 | The face keeps flashing the boot screen; it cycles | [The service keeps restarting](#the-service-keeps-restarting) |
 | systemctl says active and the robot is inert | [The service is active but nothing happens](#the-service-is-active-but-nothing-happens) |
 | It will not come up at all, and says why | [The robot will not start at all](#the-robot-will-not-start-at-all) |
@@ -326,6 +327,51 @@ knob; the two look identical in the turn count alone.
 `illegal_transitions` climbs on one `THINKING/...` pair; here turns and spend climb and
 `illegal_transitions` is quiet. One robot is stuck doing nothing, the other is stuck doing too
 much, and a glance at `/metrics turns` over two minutes separates them.
+
+### The robot has stopped answering to save money
+
+It answered fine earlier. Now it says *"try again later"* once and then goes quiet, or simply does
+not respond. Nothing in the log looks broken.
+
+**Confirm.**
+
+```sh
+curl -s localhost:8787/metrics | python3 -c 'import json,sys;m=json.load(sys.stdin)["metrics"];print("spend_refusals",m.get("spend_refusals"),"cost_usd",m.get("cost_usd"),"turns",m.get("turns"))'
+journalctl -u robot -b | grep "spend ceiling reached"
+grep -nE "hourly_ceiling_usd|spend_window_s" /etc/robot/config.toml
+```
+
+`spend_refusals` climbing is the whole diagnosis. The log line names the three numbers that
+decided: dollars billed, the window, and the ceiling they were measured against.
+
+**Fix.** Decide whether the spend was **legitimate** before touching the knob — that is the
+question, not whether the ceiling is too low.
+
+- If a person really did talk to the robot for an hour, raise `[ai] hourly_ceiling_usd`. The
+  shipped 1.00 is ~29x §6.10.3's modelled hourly rate, so this should be rare and is worth being
+  surprised by.
+- If nobody did, **the ceiling worked** and the question is what spent the money. Check
+  `admission_refusals` and the reply-to-speech gaps for a self-conversation
+  ([above](#the-robot-is-talking-to-itself)); if those are clean, you have a new defect and the
+  ceiling is the only thing that stopped it.
+- The ceiling clears itself: it is a rolling window, so the robot recovers on its own once
+  `spend_window_s` has passed with less spend in it. No restart is needed and a restart hides the
+  evidence.
+- `hourly_ceiling_usd = 0.0` is the emergency stop — no paid session at all, config only.
+
+⚠️ **Do not raise it to get a demo working.** A ceiling widened to fit a measurement, with no
+diagnosis attached, quietly becomes whatever was last spent.
+
+**Not to be confused with** a genuine connection failure — and they are **deliberately hard to
+tell apart from the state trace, which is why this entry exists**. A turn refused on cost leaves
+the machine to reach DEGRADED through §6.9's deadline, exactly as a dead socket does. The
+discriminators are the counter (`spend_refusals` rises; a network outage does not touch it) and
+the log line (`spend ceiling reached` versus a connect error naming `OSError`). The cue is even
+the same family. Read `/metrics`, not the face.
+
+**Not to be confused with** the robot being asleep or inside quiet hours, where it also does not
+answer — but there `spend_refusals` is flat, `/state` reads `SLEEPING`, and speech wakes it
+(§3.10.3). A budget stop leaves it in IDLE or DEGRADED and speech changes nothing.
 
 ### The service keeps restarting
 
