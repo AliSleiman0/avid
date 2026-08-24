@@ -6,36 +6,51 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **rig DEPLOYED and healthy on `v0.M10.0-77-gf1009a3`; #452, #456 and #447 all closed** · ⛔ M11 soak stopped, O5 amended · gh `AliSleiman0`.
+**As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ⛔ **rig ROBOT IS STOPPED — see #467 before starting it** · rig deployed at `5fea102` · M11 soak stopped, O5 amended · gh `AliSleiman0`.
 
-## ⭐ Next session — 🎤 RECORD 10 UTTERANCES, THEN RUN THE WINDOW
+## ⭐ Next session — ⛔ THE WINDOW IS BLOCKED, AND THE BLOCKER IS THE ROBOT
 
-**The generator is built and merged (#462). The only thing between here and a 72-hour window that
-measures something is ~10 minutes of recording**, because the repo contains **zero seconds of human
-speech** and the only speech assets are the robot's own SAPI cue voice — which
-`assets/cues/NOTICE.md` already flags as a redistribution problem, and which would fill the memory
-store with the robot answering itself saying *"hmm."* for three days.
+The corpus is recorded, the generator is built and its own defects are fixed (#462, #465, #466).
+**The 72-hour window still cannot start**, and the reason is not the tooling:
 
-```sh
-# 10 clips, 16 kHz mono, ~1-3 s each, NO trailing silence (the generator inserts the gap).
-# The wording and filenames are already declared in assets/load/manifest.json.
-uv run --frozen python docs/demos/soak_load.py --mode validate --corpus assets/load --config config/sim.toml
-```
+### ⛔ #467 — the robot converses with itself. The rig is stopped because of it.
 
-The validator grades duration, level and **real Silero speech frames** per clip, and says plainly
-that the file is not the room. Then the bounded dry run on the rig — 20 minutes, <= 5 turns,
-<= $0.50, whose entire point is that it stops itself:
+One hand-played clip drove one legitimate turn; the robot then answered its own replies for
+~8 minutes — **26 `audio.speech_started`, 0 `behavior.trigger_fired`, turns 8 → 37, spend
+$0.17 → $0.67**. It kept going after the amp was dropped to 70%.
 
-```sh
-cd /opt/avid && sudo /opt/avid/.venv/bin/python docs/demos/soak_load.py --mode play     --config /etc/robot/config.toml --corpus /opt/avid/assets/load     --interval 300 --for-seconds 1200 --max-turns 5 --max-usd 0.50
-```
+The tell is `SPEAKING → LISTENING` on `audio.speech_started`: it is **barging in on itself while
+still speaking**, and the echo gate logs `0 suppressed` every time. `barge_in_margin_db = 3.0` is
+marked **UNCALIBRATED** in the config it ships in.
 
-⚠️ **Deploy first** — the rig is behind again — and **start the real window from a `systemctl
-restart robot`, never a power-on** (`PI_OPERATIONS.md` §5.1).
+⚠️ **Nothing rate-limits a reactive turn** — `evaluate_policy` has one call site and it is the
+proactive path. At the observed rate an unattended night is hundreds of dollars. **Do not start a
+window, and do not leave the robot running unattended, until #467 is fixed.** The robot on the rig
+is deliberately `systemctl stop`ped and the amp is at 60%.
 
-⚠️ **The caps in that command are the only caps that exist.** §10.4's gate throttles *proactive*
-turns only; nothing in the robot rate-limits a reactive one, because until now the only thing that
-could start one was a person in the room.
+### ⛔ #468 — the corpus is too quiet to trip the gate at any safe volume
+
+`speech_started` was **0** at 80/85/90/95%; it only worked near 100%, which is what triggered
+#467. Ruled out by measurement, so do not re-investigate: the play path (`aplay` and `AlsaSpeaker`
+behave identically, `accepted 5200 ms`), the speaker device, AGC (off), and the robot's noise floor
+(the gate's *filtered* floor is −38.9 to −43.4 dBFS and healthy — the raw −22 dBFS figure is
+pre-high-pass and is **not** the quantity that decides).
+
+What is left is clip level: the corpus ships unnormalised at **rms −21 to −28**, and the validator
+grades **peak** against −30. Peak is the wrong statistic for "will a VAD see a run of voiced
+windows" — §7.1's *report the quantity you grade*, one layer down.
+
+### The order of work
+
+1. **#467** — self-conversation. Blocks everything, and is a live spend risk on its own.
+2. **#468** — normalise the corpus, grade rms, and verify against the rig rather than the files.
+3. Only then the bounded dry run, and only then the 72-hour window — started from a
+   `systemctl restart robot`, never a power-on (`PI_OPERATIONS.md` §5.1).
+
+⚠️ **The dry run is what found all of this**, including two defects in the generator itself
+(#466: it charged itself for the owner's prior conversation and capped at zero utterances; and
+`turn_ok` was unfalsifiable overnight, reporting `true` against a robot whose journal held no
+entries). Run it on every rig, every time, before anything long.
 
 ⚠️ **Expect `triggers_fired` to collapse while it runs.** Rule 4 vetoes on the ambient speech the
 generator manufactures. That is not a proactivity regression, and the LOAD criterion says so in its
