@@ -6,196 +6,167 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **#467's software half is MERGED (#470)** · ⛔ rig robot still stopped and **not yet deployed** · M11 soak stopped, O5 amended · gh `AliSleiman0`.
+**As of:** 2026-08-24 · `main` `d2c0032` · `v0.M10.0` tagged · ✅ **#467 fixed AND deployed** · ✅ **#472 fixed, NOT deployed** · rig **running, quiet, $0.00** · M11 window not started · gh `AliSleiman0`.
 
-## ⭐ Next session — DEPLOY #467, THEN #468, THEN THE WINDOW
+## ⭐ Next session — one deploy, then one audible test that answers three questions
 
-### ✅ #467 — the robot converses with itself. Fixed in code, NOT yet on the rig.
+### The rig, as left
 
-Merged as `3c299b6` (#470): five commits, 2015 tests, nine neuters each failing on an assertion.
-⚠️ **`/opt/avid` is still on `5fea102` and `robot.service` is stopped AND disabled.** Deploying is
-the first act of the next session:
+| | |
+|---|---|
+| `robot.service` | **active + enabled**, up since 2026-08-24 18:09 UTC, `NRestarts=0` |
+| build on the rig | `v0.M10.0-94-gbec4cff` — has **#467**, does **not** have #472 |
+| `/opt/avid` | `bec4cff` (main is now `d2c0032`) |
+| amp `Master` | **60%** — the provisioned value is **85%** (`PI_OPERATIONS` §5.1) |
+| spend | **$0.00**, `turns 0`, `reactive_turns 0`, `admission_refusals {}` over a 5-minute idle watch |
+| config backup | `/etc/robot/config.toml.pre467` |
+
+### 1. Deploy #472 — and ⚠️ **do not `install` the template**
+
+Two new keys ship with it (`[ai] hourly_ceiling_usd`, `[ai] spend_window_s`). They are absent on the
+machine, so it would fall back to schema defaults **silently**. The defaults happen to match today,
+so nothing would be *wrong* — but pin them anyway, because that is exactly the latent drift
+`PI_OPERATIONS` §3 is about.
+
+⚠️ **`sudo install /opt/avid/config/pi.toml /etc/robot/config.toml` would break the robot.** The
+template ships every adapter `"fake"` **on purpose**, and the machine also carries deliberate
+deltas. Measured 2026-08-24, the full list of what a wholesale install would clobber:
+
+```
+adapters.camera/servo/display/microphone/speaker/vad/face_detector/realtime → all "fake"
+behavior.quiet_hours  02:00-09:00 (machine)  vs  22:00-07:30 (repo)
+gate.session_idle_close_s  300 (machine)  vs  30 (repo)
+```
+
+The recipe that worked — **merge surgically, validate before installing**:
 
 ```sh
-ssh alisleiman0@192.168.10.172 'cd /opt/avid && git pull --ff-only'
-# ⚠️ REPROVISION /etc/robot/config.toml — four NEW [gate] keys, and a missing key falls back to a
-# schema default SILENTLY (PI_OPERATIONS §3). guard_window_ms/reactive_* are the whole fix.
-sudo install -m 644 -o root -g root /opt/avid/config/pi.toml /etc/robot/config.toml
-# ...then re-flip [adapters] to the real devices — the template ships every adapter "fake" ON
-# PURPOSE (PI_OPERATIONS §3), which is provisioning, not a bug to fix.
-sudo systemctl enable --now robot
+PI=192.168.10.172        # AVID / AVID.local both flap; pin the IP for a session
+ssh alisleiman0@$PI 'sudo cp -a /etc/robot/config.toml /etc/robot/config.toml.pre472'
+ssh alisleiman0@$PI 'cd /opt/avid && git pull --ff-only'
+# add the two [ai] keys by hand, then — BEFORE installing:
+ssh alisleiman0@$PI '/opt/avid/.venv/bin/python -c "from avid.core.config import load_config; c=load_config(\"/tmp/config.new.toml\"); print(c.ai.hourly_ceiling_usd, c.adapters.camera, c.gate.session_idle_close_s)"'
+ssh alisleiman0@$PI 'sudo install -m 644 -o root -g root /tmp/config.new.toml /etc/robot/config.toml'
+sudo systemctl restart robot
 ```
 
-Expect `admission_refusals` on `/metrics` to be **non-empty**. That is the gate working, not a
-fault — it was empty for eight minutes while the robot answered itself.
+⚠️ **Verify by looking for the counter, not by reading the file.** `spend_refusals` must appear on
+`/metrics`. Absent means the fix is not running — that is the whole silent-fallback trap, and it is
+the only check that cannot be fooled:
 
-**What the fix actually was**, so it is not re-derived: three holes, each sufficient alone.
-`_admits_barge_in` short-circuited to *admit* outside the echo tail, so the 370 ms re-trigger was
-never judged — ⚠️ **`0 suppressed` did not mean the gate worked, it meant the gate never ran**, and
-the log line could not tell those apart. The pre-roll replayed echo, so one marginal admit sent
-300 ms of the robot's own contiguous voice to the model as the user. And nothing downstream could
-refuse. `echo_tail_ms` (streaming) and the new `guard_window_ms` (origins) were one window doing
-two jobs that need different lengths.
-
-⚠️ **The backstop counts gaps, not turns, and the arithmetic is why:** the runaway ran at
-3.25 turns/min and a fast human exchange here is 5-6/min — it was *slower than a conversation*, so
-no rate cap separates them at any value. The gap to the robot's own reply does.
-
-### ⏭️ #471 — calibrate the two knobs on the rig (split out of #467 AC-3)
-
-`barge_in_margin_db = 3.0` was tuned with AGC in an unknown state; `guard_window_ms = 700` is a
-starting value, not a measurement. Needs the rig, the amp at its provisioned **85%**, and a person.
-⚠️ **If the two populations overlap, stop tuning** — §6.2.4 says no margin can be tuned into
-working and the honest answers are #163 (AEC) or full half-duplex.
-
-### ⏭️ #472 — nothing can refuse work on cost (split out of #467)
-
-The O7 tripwire only `_log.warning`s and nothing consumes it, and `projected_monthly_usd` read
-~$11/mo during a runaway spending $3.75/hour — so a tripwire on that figure would not have fired.
-⚠️ #467's backstop is **acoustic**: a future defect producing genuine-looking origins walks
-straight past it, which is why this is filed rather than absorbed.
-
-### ⛔ #468 — the corpus is too quiet to trip the gate at any safe volume
-
-`speech_started` was **0** at 80/85/90/95%; it only worked near 100%, which is what triggered
-#467. Ruled out by measurement, so do not re-investigate: the play path (`aplay` and `AlsaSpeaker`
-behave identically, `accepted 5200 ms`), the speaker device, AGC (off), and the robot's noise floor
-(the gate's *filtered* floor is −38.9 to −43.4 dBFS and healthy — the raw −22 dBFS figure is
-pre-high-pass and is **not** the quantity that decides).
-
-What is left is clip level: the corpus ships unnormalised at **rms −21 to −28**, and the validator
-grades **peak** against −30. Peak is the wrong statistic for "will a VAD see a run of voiced
-windows" — §7.1's *report the quantity you grade*, one layer down.
-
-### The order of work
-
-1. **#467** — self-conversation. Blocks everything, and is a live spend risk on its own.
-2. **#468** — normalise the corpus, grade rms, and verify against the rig rather than the files.
-3. Only then the bounded dry run, and only then the 72-hour window — started from a
-   `systemctl restart robot`, never a power-on (`PI_OPERATIONS.md` §5.1).
-
-⚠️ **The dry run is what found all of this**, including two defects in the generator itself
-(#466: it charged itself for the owner's prior conversation and capped at zero utterances; and
-`turn_ok` was unfalsifiable overnight, reporting `true` against a robot whose journal held no
-entries). Run it on every rig, every time, before anything long.
-
-⚠️ **Expect `triggers_fired` to collapse while it runs.** Rule 4 vetoes on the ambient speech the
-generator manufactures. That is not a proactivity regression, and the LOAD criterion says so in its
-own rows.
-
-**The measurement it all rests on: sound in the room drives a complete turn.** Proven on the rig 2026-08-24, 12:05:27, with nothing but a WAV played from a
-second process:
-
-```
-12:05:27  IDLE      -> LISTENING   audio.speech_started      <- recorded speech, played into the room
-12:05:28  LISTENING -> THINKING    audio.speech_ended
-12:05:30  realtime open: total 3948 ms (cold)                <- a real session
-12:05:31  THINKING  -> SPEAKING    audio.playback_started    <- it answered out loud
-12:05:35  SPEAKING  -> IDLE        audio.playback_finished
+```sh
+curl -s localhost:8787/metrics | python3 -c 'import json,sys;m=json.load(sys.stdin)["metrics"];print({k:m.get(k,"<<ABSENT>>") for k in ("build","spend_refusals","admission_refusals","reactive_turns")})'
 ```
 
-So a load generator does **not** need a relaxed config or a spoofed presence: it needs a speaker and
-a schedule. `~/probes/probe_room_audio.py` on the rig is the seed — it plays cue WAVs and, when the
-robot is stopped, reports what the mic captured.
+⚠️ `git pull` on the Pi must run **as the login user**, not under `sudo` — the credential helper is
+in the user's home, and `sudo git` fails with *"could not read Username"*.
 
-**The numbers that matter for designing it:**
+### 2. The audible test — one experiment, three answers
 
-- **Sound reaches the mic at peak −22.3 dBFS / rms −42.7** with `Master` at 80% — well clear of the
-  −40 dBFS floor `barge_in_margin_db` was calibrated against. Volume is not the constraint.
-- **A turn costs $0.045** — measured, not estimated (`cost_meter: 1 turns, $0.04509`, cached-input
-  0.0% on a cold first turn). So 4 turns/hour for 72 h is **~$13**, not the ~$6 I first guessed from
-  §6.10's daily figure. ⚠️ The meter also printed *"projected $27.05/mo — OVER O7 BUDGET"*, which is
-  a **one-sample extrapolation** and means nothing; O7 is graded on a real day's traffic.
-- ⚠️ **The robot holds the mic**, so a generator cannot record while the robot runs (`Device or
-  resource busy`). Measure capture with the service stopped, or not at all.
+**This is the highest-value thing left and it takes ten minutes.** Raise the amp to the provisioned
+85% and play a corpus clip with the robot running:
 
-⚠️ **Two traps this cost, both mine, both worth not repeating.** The probe looked like it failed
-three times: once because `/tmp` was cleared by the reboot, once because I grepped a 10-second
-window when the robot took **three minutes** to react, and once because I read `turns 0` from a
-process that was **not the one that ran the turn** — the counters are process-scoped, which is the
-same trap #456's own reader has to handle. **An instrument that is too impatient, or pointed at the
-wrong process, reports exactly what a broken robot reports.**
+```sh
+ssh alisleiman0@$PI 'amixer -M sset Master 85%; aplay -D default /opt/avid/assets/load/calendar.wav'
+# then watch: does it hear it, does it answer itself, what does the gate say
+ssh alisleiman0@$PI 'journalctl -u robot --since "@'"$(date +%s)"'" --no-pager | grep -E "speech_started|echo gate|SPEAKING.*LISTENING"'
+```
 
-## Also today
+It answers three open questions at once:
 
-🔴 **#461 filed — the robot went deaf for 12 seconds.** `capture has produced nothing for 12093 ms`,
-once, self-recovered. **Not a clock artefact** — the detector uses `monotonic_ns`, checked — though
-it landed 12 s after an 11.5-hour NTP step, which is a plausible cause and not a finding. ⚠️ `LIVE`
-would **not** catch this: a robot deaf in IDLE is legitimately in IDLE. The two instruments are
-complementary.
+1. **Is #467's gate proven on hardware?** It is currently **not** — nothing has made a sound since
+   the deploy, and `admission_refusals {}` in an empty room is *the absence of a test*, not a pass.
+   Expect it to become non-empty. **That is the gate working.**
+2. **#471's first data point.** The new `echo gate:` line now prints `%d tested` alongside
+   `%d suppressed`, plus the frozen guard floor and per-rule refusals — so an ordinary run is a
+   calibration run with no separate mode.
+3. **⚠️ It may close #468 outright.** That issue exists because the corpus only tripped the gate
+   near 100%, and 100% was what triggered the self-conversation. **The gate now refuses the robot's
+   own echo, so 85% should finally be testable.** If the clip trips the gate at 85% and the robot
+   does *not* answer itself, #468 closes with no code and no re-recording.
 
-## Then: the 72-hour window
+⚠️ Watch `turns` and `cost_usd` while doing it. Budget a few cents. If it self-converses anyway,
+`spend_refusals` will not save you until #472 is deployed — so **do step 1 first**.
 
-**Everything laptop-side in the queue is done.** Closed 2026-08-24: **#452** (the wedge, #455 +
-#457), **#456** (rejected transitions are countable outside the process), **#447** (the M7 recall
-defect — and a second defect in its own instrument), **#415** (rescoped, see below). The rig is
-deployed and healthy — but **one deploy behind again**: #456's counter and #447's fix both landed
-after it, and the counter is worth having *before* a 72-hour window, since it is the thing that
-names which move a wedged machine kept refusing.
+### 3. Then #471 (calibration), then #468 if it survives, then the window
 
-✅ **#415 closed too**, and the reasoning is worth carrying. AC-3 asked for *"no
-`response_cancel_not_active` at ERROR across a bench conversation with several barge-ins"* — and
-that bench run was **not done, deliberately**: the property is already asserted deterministically in
-`tests/contract/test_realtime_client.py`, and a bench run is the *weaker* instrument. #182 removed
-the only amplifier, so the race is **sub-RTT**: a conversation with zero ERROR-level occurrences is
-indistinguishable from one where the race never happened. **That AC could pass on silence**, which
-is what §7.1 forbids — the wire test *constructs* the race instead of hoping for it. The `bug` label
-came off with it: what remains under that title is an irreducible race that #446 decided to
-attribute rather than suppress, so the criterion was verifying a non-defect.
+`guard_window_ms = 700` and `barge_in_margin_db = 3.0` are both **uncalibrated and say so in the
+config**. #471 has the protocol. ⚠️ Its most important line: **if the two populations overlap, stop
+tuning** — §6.2.4 already says no margin can be tuned into working, and the honest answers are #163
+(AEC) or full half-duplex (a very large margin, config only).
 
-⚠️ `tools/probe_overlap.py` has still **never been run** and leaves no artefact in `docs/`. #446
-named it the cheapest next step: it answers whether `response.done` carries an id, which gates
-widening the cancel tracker from one slot to a set, and mapping `item_id → response_id` so we cancel
-the *right* response. Ten minutes, no mic, no speaker, no human.
+Then the 72-hour window, started from `systemctl restart robot`, **never a power-on** (a cold boot
+straddles two clock frames, `PI_OPERATIONS` §5.1).
 
-## Then: the 72-hour window
+---
 
-**#452 is CLOSED. Steps 1 and 2 of the three below are both done, and step 3 is the whole of
-what is left.**
+## What shipped 2026-08-24 (this session)
 
-- **#455** — the wedge. The §6.9 deadline is armed on **entry to THINKING** now, by a synchronous
-  observer on `StateManager`, never from the turn path, so the machine cannot occupy THINKING
-  without an armed way out whichever path drove it in. Three arcs, only one of them a network
-  fault: the refused reactive open, the refused **proactive** open (worse — `BehaviorService`
-  transitions before publishing, so no falling edge is ever coming), and plain cross-subscriber
-  ordering on a healthy bus. No new `Trigger` and no new table row.
-- **#457** — the soak can see a wedge now. `LIVE` records `GET /state` and `/metrics`'
-  `transitions` per sample and **fails** when a transient state is *provably* held past the bound
-  the design states for it. ⚠️ *Provably* is load-bearing: identical state readings 60 s apart are
-  equally consistent with a wedged robot and a conversing one, so a run counts only when the
-  transitions counter stood still across all of it. No state series → **INCONCLUSIVE, never a
-  pass**.
+### ✅ #467 — the robot converses with itself · merged `3c299b6`, deployed
 
-⛔ **`/opt/avid` is still on the WEDGED build**, and `robot.service` is the live repro. **Deploy
-before anything else** — a window on the old build measures the defect again, and the sampler's
-new columns do not exist there either. `PI_OPERATIONS.md` for the deploy; the venv rebuild recipe
-below if `uv sync` has been anywhere near it.
+26 self-triggered turns and **$0.50 in eight minutes**, unattended, continuing after the amp was
+dropped to 70%. Three holes, each sufficient alone:
 
-⚠️ **The ~26 hours already run still counts for nothing**, and `LIVE` run against that window's own
-database reports **INCONCLUSIVE, not FAIL** — the build predates the columns, so nothing was
-recorded. That is the honest answer, and the wedge stays evidenced by the journal rather than by a
-criterion that could not see it.
+1. `_admits_barge_in` short-circuited to **admit** outside `echo_tail_ms`, so the 370 ms re-trigger
+   was never compared with anything. ⚠️ **`0 suppressed` did not mean the gate worked — it meant the
+   gate never ran**, and the log line could not tell those apart. It now prints `%d tested`.
+2. The pre-roll ring is fed on every frame including echo and drained unconditionally, so one
+   marginal admit sent **300 ms of the robot's own contiguous voice** to the model as the user.
+3. Nothing downstream could refuse; refusal now happens at the origin.
 
-⚠️ **The finding underneath the finding, worth more than the fix.** The e2e test that would have
-caught this **could not be written**. The `ignored illegal transition` assertion only bites at full
-stack, and that harness builds its client through `ReplayRealtimeClient`, which could not express a
-refused `open()` at all — so the failure mode lived in a test-local subclass in `tests/services/`,
-i.e. exactly where the assertion does not work. It ships as an `open_error` knob on the fake now.
-**A fake that cannot fail the way the real transport routinely does is an incomplete port (P6) —
-and the gap is invisible until you go looking for the test you cannot write.**
+`echo_tail_ms` and the new `guard_window_ms` were **one window doing two jobs** — streaming vs
+origins — which is what forced the tail to be 150 ms. `echo_tail_ms` is now **computed** against
+`[speaker] sample_rate` (it was armed before the DAC drained, leaving ~43 ms of real slack).
 
-**Two issues were split out rather than bundled.** **#456** — what #452's AC-6 asked: 147 of 175
-log lines were one repeated illegal transition and *nothing outside the process could see it*,
-because `StateManager.transition` publishes nothing on rejection. #455 removes this wedge's cause,
-not the next one's silence. **#458** — the soak records **no temperature at all**, on a board whose
-R-09 risk *is* thermal throttling; `hardware-required`, because `/metrics` has no thermal provider
-so the sampler must read the host, and "works by hand, dead under systemd" has bitten five times
-here.
+⚠️ **Why a turn-rate cap cannot work, so it is not re-proposed:** the runaway ran at **3.25
+turns/min** and a fast human exchange here is **5–6/min** — it was *slower than a conversation*. The
+discriminator is the **gap to the robot's own reply** (370 ms, against a person who must hear it
+end), so the backstop counts back-to-back origins. A cap on turns that never proved they came from a
+human, not a cap on turns.
 
-Also worth carrying: `Config`'s `think_timeout_s < session_idle_close_s` assertion **was** the only
-thing preventing this wedge on the idle-close arc — its own comment describes #452 a milestone
-early. `_teardown_locked` no longer cancels the deadline, so that inequality is a preference now
-rather than a correctness guard, and it is kept and documented as one.
+### ✅ #472 — nothing could refuse work on cost · merged `d2c0032`, **not deployed**
+
+The O7 tripwire wrote a `WARNING` **nothing consumed**. Now a real ceiling: `$1.00/h` measured over
+a rolling **monotonic** window, refusing per turn and tearing down an open session, announced once
+per episode with `Cue.TRY_AGAIN_LATER`.
+
+⚠️ **Measured, never modelled.** `projected_monthly_usd` read **~$11/month during the runaway** — a
+tripwire on it would have watched the whole incident and reported a healthy robot.
+
+⚠️ **A budget stop looks EXACTLY like a connection degrade in the state trace** — the machine has
+already reached THINKING, so #452's deadline drives DEGRADED either way. `spend_refusals` is the
+only discriminator. The RUNBOOK entry leads with it.
+
+### Filed, still open
+
+- **#471** — calibrate the two knobs on hardware. Needs the rig, 85%, AGC verified *by measurement*,
+  and a person.
+- **#468** — the load corpus is too quiet. **May be moot after step 2.**
+
+---
+
+## Two things I got wrong this session, both caught by neuters
+
+⚠️ **A guard that cannot fail is not a guard, and I shipped two of them before catching them.**
+
+1. **`test_the_echo_tail_is_armed_exactly_once` passed with the fix neutered.** `FakeClock` moves
+   only when a test says so, so both arms computed the identical deadline. Fixed with a
+   `StateManager.watch` observer that moves the clock *synchronously* mid-`end_response` — the
+   not-yielding is the property under test, so `advance()` would have defeated it.
+2. **The `>=` boundary in `over_ceiling` was argued in a docstring and asserted nowhere.** Swapping
+   it for `>` left the whole suite green. A `>` lets every runaway spend one turn past the bar, and
+   breaks the `0.0` emergency stop entirely.
+
+**And one design error caught by a test rather than by review:** my first #472 draft checked the
+ceiling beside `client.open()`, which misses almost everything — once a socket is up every turn
+rides it, and `session_idle_close_s = 300` means one session covers five minutes. It would have
+refused turn one of the runaway and billed the other twenty-eight.
+
+⚠️ **I also committed the #467 domain step on a red suite** (`44b7f31`): a required `echo=` argument
+broke its callers until the next commit landed. I ran only `tests/domain` first. Run the **whole**
+suite before every commit, not the directory you just touched.
+
+---
 
 ## The soak is STOPPED and the rig is UNFROZEN
 
@@ -224,11 +195,15 @@ reported success for thirty days.
 
 ### ⛔ The old rule is GONE. Deploying is allowed again.
 
-The "do not `git pull` + restart on `/opt/avid`" freeze is **lifted**. `soak-sampler` is `inactive`
-**and `disabled`; `robot.service` is still running** and is the live repro of #452 — worth one look
-before you redeploy over it.
+The "do not `git pull` + restart on `/opt/avid`" freeze is **lifted**.
 
-### 🔴 Do these three, in this order
+⚠️ **Superseded 2026-08-24** — this paragraph used to say `robot.service` was "the live repro of
+#452". It is not any more: #452 is fixed, #467 is fixed and deployed, and the rig has been
+redeployed and restarted twice since. `soak-sampler` was `inactive` and `disabled` when the window
+was stopped, but **it was found `active` and `enabled` again on 2026-08-24** — unexplained, harmless
+while no window is open, and worth one look before starting the real one.
+
+### 🔴 Do these three, in this order — ✅ ALL THREE ARE DONE (kept for the reasoning)
 
 **1. ✅ DONE — #452's wedge is fixed (#455).** Kept here for the reasoning, which still holds. The
 defect: *entering* `THINKING` is driven by a bus fact
@@ -309,7 +284,7 @@ O1), **#207** AC-10/AC-11 (seal M9 — it needed the service stopped, which no l
 anything), **#400**, **#382**, **#414**, **#428**, **#310**. Laptop-side: **#447**'s O2 verdict and
 **#402**.
 
-## What shipped, 2026-08-23 (this session)
+## What shipped 2026-08-23
 
 Nine PRs. The M11 lane was emptied, then M11 itself was stopped.
 
@@ -442,6 +417,53 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **The machine's config is a MERGE, never an install — and diff it before you touch it.** A
+  wholesale `install config/pi.toml /etc/robot/config.toml` on this rig reverts **every adapter to
+  `fake`** (the template ships fake on purpose, `PI_OPERATIONS` §3) and clobbers the deliberate
+  machine deltas (`session_idle_close_s = 300`, quiet hours `02:00-09:00`). The safe shape, used
+  for #467: dump both to flat key/value, print *machine-only* / *template-only* / *different*, edit
+  only the keys you meant to, `load_config` the result **before** installing, and check the diff is
+  the hunks you expected. That one diff also surfaced two unrelated drifts nobody knew about.
+
+- ⚠️ **Verify a deploy by looking for the new COUNTER, not by reading the config file.** A missing
+  key falls back to a schema default silently, so a machine can read as configured while running
+  the old behaviour. `<<ABSENT>>` on `/metrics` is the only check that cannot be fooled — and it is
+  the reason both #467 and #472 added counters rather than only log lines.
+
+- ⚠️ **Two windows doing one job is a bug waiting for a name.** `echo_tail_ms` answered both *"may
+  this frame be sent to the model"* (the DAC's drain) and *"may this frame start a turn"* (the
+  room's echo decay). Those need different lengths, so the fused knob was set to the shorter one
+  and the robot answered itself for eight minutes. When a single number is being asked two
+  questions, split it before tuning it.
+
+- ⚠️ **A rate cannot separate populations that overlap in rate.** The self-conversation ran at 3.25
+  turns/min; a fast human exchange here is 5-6/min — the defect was *slower than* normal use, so no
+  threshold on turns-per-minute exists that catches one and spares the other. The separating
+  quantity was the **gap to the robot's own reply** (370 ms vs having to hear it end). Before
+  choosing a threshold, check the two populations actually separate on the axis you picked.
+
+- ⚠️ **`FakeClock` does not advance across `await`s, so "this happens exactly once" guards can pass
+  neutered.** `test_the_echo_tail_is_armed_exactly_once` was green with the duplicate arm restored,
+  because both arms read the same virtual instant. `StateManager.watch` is the seam for this: a
+  *synchronous* observer inside `transition()`, so it can move the clock mid-method without
+  yielding — which matters when not-yielding is the property under test.
+
+- ⚠️ **An operator argued in a docstring and asserted nowhere is not tested.** `over_ceiling`'s
+  `>=` had a paragraph explaining why it was not `>`; swapping it left the whole suite green. If a
+  comment explains a boundary, there is a boundary test owed.
+
+- ⚠️ **`gh` and `git` fail independently on this machine.** `git push` over HTTPS can work while
+  `api.github.com` is unreachable (so `gh pr create` fails and a push succeeds), and both flap for
+  minutes at a time. Probe with `gh api rate_limit` before concluding anything, and **check whether
+  a `gh pr merge` actually landed before retrying** — one of them had already merged when the
+  command reported a network error.
+
+- ⚠️ **`ssh alisleiman0@AVID` resolves intermittently.** `AVID`, `AVID.local` and the IP all fail at
+  different moments. Resolve the IP once at the start of a rig session and use it throughout.
+
+- ⚠️ **`pkill -f "soak_load.py"` matches its own `ssh` command line and kills the shell.** Use a
+  bracket to break the self-match: `pkill -f "[s]oak_load[.]py"`.
 
 - ⚠️ **Point a new instrument at real data before you trust it — the first thing it judges will
   find its bug.** `soak_load.py --mode validate`, aimed at the shipped cue clips on its first run,
