@@ -344,3 +344,220 @@ def test_the_metered_total_survives_a_restart() -> None:
 def test_an_absent_metric_is_none_not_zero() -> None:
     assert soak._metric_total(_samples([{"turns": 4}]), "cost_usd") is None
     assert soak._metric_total(_samples([None, None]), "turns") is None
+
+
+# ── the caps, driven through the real loop ───────────────────────────────────────────────────
+#
+# ⚠️ These exist because neutering the turn cap left the suite GREEN. The meter's arithmetic was
+# covered and the loop that consumes it was not, so the only thing standing between an unattended
+# generator and a weekend of billing had no test at all. A guard covered by nothing is a guard.
+
+
+def _tick(monkeypatch: pytest.MonkeyPatch, step: float = 1.0) -> None:
+    """Make the loop's monotonic deadline advance deterministically.
+
+    ⚠️ Both no-cap cases below hang without this, and that is the point of having it: with
+    ``--for-seconds 0`` the loop runs until a cap fires, and a robot that reports no turns can
+    never trip one. Writing these tests found that -- a generator pointed at an unreachable robot
+    spins forever, which is correct behaviour for an instrument that must outlive what it watches,
+    but it means a test must bound it by the clock rather than by the caps.
+    """
+    now = iter(float(i) * step for i in range(10_000))
+    monkeypatch.setattr(load.time, "monotonic", lambda: next(now))
+
+
+def _drive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    metrics: list[dict[str, Any]],
+    **over: Any,
+) -> list[dict[str, Any]]:
+    """Run the real `_run_load` against a scripted robot; return the log it wrote."""
+    corpus = _corpus(
+        tmp_path, [{"key": "ok", "file": "ok.wav", "text": "what's on my calendar"}]
+    )
+    _wav(corpus / "ok.wav", seconds=1.5, amplitude=12000)
+    log = tmp_path / "load.jsonl"
+
+    readings = iter(metrics)
+    last = {"turns": 0, "cost_usd": 0.0}
+
+    def fake_get_json(url: str, timeout: float) -> dict[str, Any] | None:
+        if url.endswith("/state"):
+            return {"state": "IDLE", "affect": "IDLE", "session": False}
+        nonlocal last
+        last = next(readings, last)
+        return {"metrics": last, "absent": []}
+
+    monkeypatch.setattr(load, "_get_json", fake_get_json)
+    monkeypatch.setattr(load, "_play", lambda *a, **k: None)
+    monkeypatch.setattr(load.time, "sleep", lambda _s: None)
+    # ⚠️ Bounded by the clock as well as by the cap, so that NEUTERING a cap produces a failed
+    # assertion instead of a hung suite. A hang is not a proof that the guard bites -- it is a
+    # test that never got to say anything, and it is worse to debug than a red.
+    _tick(monkeypatch)
+
+    args = argparse.Namespace(
+        config=_SIM_TOML,
+        corpus=str(corpus),
+        load_log=str(log),
+        host="127.0.0.1",
+        port=8787,
+        timeout=1.0,
+        interval=0.0,
+        max_turns=100,
+        max_usd=1000.0,
+        for_seconds=20.0,
+        settle_s=1.0,
+        turn_timeout_s=1.0,
+        poll_s=0.0,
+        ignore_quiet_hours=True,
+    )
+    for key, value in over.items():
+        setattr(args, key, value)
+
+    assert load._run_load(args) == 0
+    return [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_the_turn_cap_stops_the_run_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⚠️ THE ONLY CAP THAT EXISTS. S10.4's gate does not throttle reactive turns.
+
+    Nothing in the robot would stop a generator spending a weekend's budget in an afternoon, so
+    this loop is the whole of the protection — and it must also RECORD which cap fired, because a
+    run that stops silently is indistinguishable from one that crashed.
+    """
+    records = _drive(
+        monkeypatch,
+        tmp_path,
+        metrics=[{"turns": n, "cost_usd": 0.0} for n in range(0, 10)],
+        max_turns=3,
+    )
+    capped = [r for r in records if r["kind"] == "capped"]
+    assert capped, "the run never stopped -- the turn cap did not fire"
+    assert "max-turns" in capped[0]["note"]
+    assert len([r for r in records if r["kind"] == "played"]) <= 4
+
+
+def test_the_spend_cap_stops_the_run_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Capped on measured `cost_usd`, never on `projected_monthly_usd`.
+
+    The projection models 20 turns/day and ignores the observed rate, so at a generator's pace it
+    stays healthy-looking while real spend runs many times the model. Only the true figure can
+    bound a run.
+    """
+    records = _drive(
+        monkeypatch,
+        tmp_path,
+        metrics=[{"turns": n, "cost_usd": 0.5 * n} for n in range(0, 10)],
+        max_usd=1.2,
+    )
+    capped = [r for r in records if r["kind"] == "capped"]
+    assert capped, "the run never stopped -- the spend cap did not fire"
+    assert "max-usd" in capped[0]["note"]
+
+
+def test_a_busy_robot_defers_the_clip_instead_of_playing_over_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⚠️ A clip played over the robot's own reply is discarded against the echo floor.
+
+    The money is spent and no turn happens, so the generator would be paying to make the window
+    look busier than it was. `skipped_busy` is the honest record.
+    """
+    corpus = _corpus(
+        tmp_path, [{"key": "ok", "file": "ok.wav", "text": "what's on my calendar"}]
+    )
+    _wav(corpus / "ok.wav", seconds=1.5, amplitude=12000)
+    log = tmp_path / "load.jsonl"
+    played: list[str] = []
+
+    monkeypatch.setattr(
+        load,
+        "_get_json",
+        lambda url, timeout: (
+            {"state": "SPEAKING"}
+            if url.endswith("/state")
+            else {"metrics": {"turns": 0, "cost_usd": 0.0}}
+        ),
+    )
+    monkeypatch.setattr(load, "_play", lambda *a, **k: played.append("played") or None)
+    monkeypatch.setattr(load.time, "sleep", lambda _s: None)
+    _tick(monkeypatch)
+
+    args = argparse.Namespace(
+        config=_SIM_TOML,
+        corpus=str(corpus),
+        load_log=str(log),
+        host="127.0.0.1",
+        port=8787,
+        timeout=1.0,
+        interval=0.0,
+        max_turns=2,
+        max_usd=10.0,
+        for_seconds=0.0,
+        settle_s=0.0,
+        turn_timeout_s=0.0,
+        poll_s=0.0,
+        ignore_quiet_hours=True,
+    )
+    args.for_seconds = 5.0
+    load._run_load(args)
+
+    records = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert played == [], "a clip was played over the robot's own reply"
+    assert any(r["kind"] == "skipped_busy" for r in records)
+
+
+def test_an_unreachable_robot_is_recorded_not_raised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A generator that dies at 3 a.m. leaves a window that looks idle -- the failure it prevents."""
+    corpus = _corpus(
+        tmp_path, [{"key": "ok", "file": "ok.wav", "text": "what's on my calendar"}]
+    )
+    _wav(corpus / "ok.wav", seconds=1.5, amplitude=12000)
+    log = tmp_path / "load.jsonl"
+
+    monkeypatch.setattr(load, "_get_json", lambda url, timeout: None)
+    monkeypatch.setattr(load.time, "sleep", lambda _s: None)
+    _tick(monkeypatch)
+
+    args = argparse.Namespace(
+        config=_SIM_TOML,
+        corpus=str(corpus),
+        load_log=str(log),
+        host="127.0.0.1",
+        port=8787,
+        timeout=1.0,
+        interval=0.0,
+        max_turns=2,
+        max_usd=10.0,
+        for_seconds=0.0,
+        settle_s=0.0,
+        turn_timeout_s=0.0,
+        poll_s=0.0,
+        ignore_quiet_hours=True,
+    )
+    args.for_seconds = 5.0
+    assert load._run_load(args) == 0  # must not raise
+
+    records = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(r["kind"] == "skipped_busy" for r in records)
