@@ -207,7 +207,11 @@ def _speech_windows(pcm: bytes, *, sample_rate: int, threshold: float) -> int | 
                 speech += 1
         return speech
     except Exception as exc:  # noqa: BLE001 - a bench tool reports, it does not crash
-        _say(f"  (VAD unavailable: {type(exc).__name__}: {exc})")
+        # ⚠️ Distinct from the ImportError above, and the distinction is the point. That one means
+        # the VAD is ABSENT; this one means it was present and REFUSED the clip. Reporting both as
+        # "unavailable" is what made this validator's first run describe a missing dependency that
+        # was in fact installed.
+        _say(f"  (the VAD refused this clip: {type(exc).__name__}: {exc})")
         return None
 
 
@@ -215,6 +219,12 @@ def _validate(args: argparse.Namespace) -> list[_Criterion]:
     """Grade the corpus against the gate that will hear it, before a window depends on it."""
     config = load_config(args.config)
     threshold = config.gate.threshold
+    # ⚠️ The rate that matters is the MICROPHONE's, not the clip's. Silero supports 16 kHz and
+    # 8 kHz only, the robot captures at `[microphone] sample_rate`, and the repo's resampler
+    # deliberately **refuses to downsample** without an anti-alias filter. So a clip recorded at
+    # any other rate cannot be judged by the gate it will actually meet, and resampling it here
+    # would be inventing the measurement.
+    mic_rate = config.microphone.sample_rate
     corpus = Path(args.corpus)
     utterances = _read_corpus(corpus)
 
@@ -226,15 +236,29 @@ def _validate(args: argparse.Namespace) -> list[_Criterion]:
         seconds = len(pcm) / float(rate * channels * width)
         peak = _peak_dbfs(pcm) if width == 2 else float("nan")
         level = rms_dbfs(pcm) if width == 2 else float("nan")
+
+        playable = width == 2 and channels == 1
+        judgeable = playable and rate == mic_rate
         windows = (
             _speech_windows(pcm, sample_rate=rate, threshold=threshold)
-            if width == 2 and channels == 1
+            if judgeable
             else None
         )
-        if windows is None:
+        if judgeable and windows is None:
             unmeasured += 1
+
         verdict = "ok"
-        if peak < _MIN_PEAK_DBFS:
+        if not playable:
+            verdict = "NOT MONO 16-BIT"
+            unusable.append(utterance.key)
+        elif rate != mic_rate:
+            # A corpus defect, named as one. Reporting this as "the VAD was unavailable" is how
+            # the first run of this validator described something other than what happened: both
+            # onnxruntime and the model were present, and it was handed a rate no Silero build
+            # supports.
+            verdict = f"WRONG RATE (mic is {mic_rate})"
+            unusable.append(utterance.key)
+        elif peak < _MIN_PEAK_DBFS:
             verdict = "TOO QUIET"
             unusable.append(utterance.key)
         elif windows is not None and windows < _MIN_SPEECH_WINDOWS:
@@ -261,9 +285,10 @@ def _validate(args: argparse.Namespace) -> list[_Criterion]:
                 "VAD",
                 "every clip was judged by the real Silero adapter",
                 "inconclusive",
-                f"{unmeasured} clip(s) could not be measured — onnxruntime or the Silero model is "
-                f"absent here. ABSENT, not zero: a clip nothing judged is not a clip that passed. "
-                f"Re-run this on the Pi before trusting the corpus.",
+                f"{unmeasured} clip(s) at the right rate could not be measured — onnxruntime or "
+                f"the Silero model is absent here. ABSENT, not zero: a clip nothing judged is not "
+                f"a clip that passed. Re-run this on the Pi before trusting the corpus. (A clip "
+                f"at the WRONG rate is a different finding and fails GATE instead.)",
             )
         )
     criteria.append(
