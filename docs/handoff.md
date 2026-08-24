@@ -8,29 +8,29 @@
 
 **As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **rig DEPLOYED and healthy on `v0.M10.0-77-gf1009a3`; #452, #456 and #447 all closed** · ⛔ M11 soak stopped, O5 amended · gh `AliSleiman0`.
 
-## ⭐ Next session — 🔴 #415 AC-3 IS ONE BENCH CONVERSATION, THEN THE 72-HOUR WINDOW
+## ⭐ Next session — 🔴 REDEPLOY, THEN THE 72-HOUR WINDOW
 
-**Everything laptop-side in the queue is done.** Closed 2026-08-24: **#452** (the wedge, #455 + #457),
-**#456** (rejected transitions are countable outside the process), **#447** (the M7 recall defect —
-and a second defect in its own instrument). The rig is deployed and healthy.
+**Everything laptop-side in the queue is done.** Closed 2026-08-24: **#452** (the wedge, #455 +
+#457), **#456** (rejected transitions are countable outside the process), **#447** (the M7 recall
+defect — and a second defect in its own instrument), **#415** (rescoped, see below). The rig is
+deployed and healthy — but **one deploy behind again**: #456's counter and #447's fix both landed
+after it, and the counter is worth having *before* a 72-hour window, since it is the thing that
+names which move a wedged machine kept refusing.
 
-🔴 **#415 needs one thing and it is not code.** AC-1/2/4 shipped in #446; **AC-3 is a measurement**:
-*"no `response_cancel_not_active` at ERROR across a bench conversation with several barge-ins."*
-Hold a conversation with the robot and **talk over it mid-reply, several times**, then:
-
-```sh
-ssh alisleiman0@100.127.197.112 'journalctl -u robot -b | grep response_cancel_not_active'
-```
-
-⚠️ **The verdict is the LEVEL, not the count.** #446 decided the race is irreducible and is
-*attributed, not suppressed*: a rejection whose `event_id` matches the cancel we just sent drops to
-WARNING and carries the measured race window; anything unattributable **stays at ERROR**. So AC-3
-passes on **zero ERROR-level** occurrences — WARNINGs with a rising race count are the designed
-outcome and are a finding, not a failure.
+✅ **#415 closed too**, and the reasoning is worth carrying. AC-3 asked for *"no
+`response_cancel_not_active` at ERROR across a bench conversation with several barge-ins"* — and
+that bench run was **not done, deliberately**: the property is already asserted deterministically in
+`tests/contract/test_realtime_client.py`, and a bench run is the *weaker* instrument. #182 removed
+the only amplifier, so the race is **sub-RTT**: a conversation with zero ERROR-level occurrences is
+indistinguishable from one where the race never happened. **That AC could pass on silence**, which
+is what §7.1 forbids — the wire test *constructs* the race instead of hoping for it. The `bug` label
+came off with it: what remains under that title is an irreducible race that #446 decided to
+attribute rather than suppress, so the criterion was verifying a non-defect.
 
 ⚠️ `tools/probe_overlap.py` has still **never been run** and leaves no artefact in `docs/`. #446
 named it the cheapest next step: it answers whether `response.done` carries an id, which gates
-widening the cancel tracker from one slot to a set. Ten minutes, no mic, no human.
+widening the cancel tracker from one slot to a set, and mapping `item_id → response_id` so we cancel
+the *right* response. Ten minutes, no mic, no speaker, no human.
 
 ## Then: the 72-hour window
 
