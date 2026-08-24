@@ -763,9 +763,26 @@ def _wire_services(
         highpass_hz=config.gate.highpass_hz,
         highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
+        guard_window_ms=config.gate.guard_window_ms,
+        reactive_window_s=config.gate.reactive_window_s,
+        reactive_back_to_back_s=config.gate.reactive_back_to_back_s,
+        reactive_budget=config.gate.reactive_budget,
         capture_stall_s=config.gate.capture_stall_s,
         loopback=False,
     )
+    # The two counters that make a robot talking to itself visible from outside the process
+    # (#467, §3.12.2). Registered here rather than in `_register_service_metrics` because that
+    # helper exists for services which own no task and are dropped; `audio` is returned to the
+    # lifecycle, so this is simply the scope that holds it.
+    #
+    # ⚠️ Bound methods, like `state.illegal_transitions` — and the same reasoning applies to the
+    # shape: `admission_refusals` is per-rule rather than a total, because a single number cannot
+    # tell a genuinely loud room from a robot re-triggering itself, and those want opposite
+    # responses. An echo gate that refuses nothing and one that never runs printed identically
+    # for eight minutes; these two counters are what ended that.
+    if metrics is not None:
+        metrics.register("admission_refusals", audio.admission_refusals)
+        metrics.register("reactive_turns", audio.reactive_turns)
     # The memory service (#122): the sole writer/reader of persistent facts, reached by direct call, so
     # its subscriptions() is empty — it appears in the loop only for uniformity. Injected the store,
     # index, embedder and text model as ports (P2); it owns their rebuild/close lifecycle. Built

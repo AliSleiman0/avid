@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import wave
+from array import array
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -40,6 +42,11 @@ from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import AudioChunk, pcm_duration_ms
 from avid.core.state_manager import StateManager
 from avid.domain import (
+    ADMISSION_RULES,
+    ECHO_FLOOR,
+    ECHO_TAIL,
+    REACTIVE_BUDGET,
+    Admitted,
     AudioCaptureResumed,
     AudioCaptureStalled,
     AudioPlaybackFinished,
@@ -47,6 +54,7 @@ from avid.domain import (
     AudioSpeechEnded,
     AudioSpeechStarted,
     Event,
+    Refused,
     RobotState,
     SystemHandlerFailed,
     rms_dbfs,
@@ -156,7 +164,11 @@ async def _rig(
     highpass_hz: float = 150.0,
     highpass_order: int = 3,
     mic_pcm: bytes | None = None,
-    echo_tail_ms: int = 150,
+    echo_tail_ms: int = 250,
+    guard_window_ms: int = 700,
+    reactive_window_s: float = 120.0,
+    reactive_back_to_back_s: float = 1.5,
+    reactive_budget: int = 4,
     capture_stall_s: float = 5.0,
     loopback: bool = False,
     speaker_factory: Callable[[StateManager], FakeSpeaker] | None = None,
@@ -203,6 +215,10 @@ async def _rig(
         highpass_hz=highpass_hz,
         highpass_order=highpass_order,
         echo_tail_ms=echo_tail_ms,
+        guard_window_ms=guard_window_ms,
+        reactive_window_s=reactive_window_s,
+        reactive_back_to_back_s=reactive_back_to_back_s,
+        reactive_budget=reactive_budget,
         capture_stall_s=capture_stall_s,
         loopback=loopback,
     )
@@ -1075,7 +1091,7 @@ async def test_the_uplink_stays_shut_for_the_echo_tail_then_reopens() -> None:
     """``end_response`` means the model has finished *sending*, not that the room has gone
     quiet: the DAC is still clocking out up to a playback-buffer depth (§6.2.4). Those frames
     are still the robot, so the uplink holds shut over ``[gate] echo_tail_ms``."""
-    async with _rig(vad_script=[False], echo_tail_ms=150) as rig:
+    async with _rig(vad_script=[False], echo_tail_ms=250) as rig:
         rig.service._turn_id = uuid4()
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
         await rig.service.end_response()
@@ -1085,7 +1101,7 @@ async def test_the_uplink_stays_shut_for_the_echo_tail_then_reopens() -> None:
         )  # inside the tail — still the robot
         assert rig.service._mic_out.qsize() == 0
 
-        await rig.clock.advance(0.2)  # past the tail
+        await rig.clock.advance(0.3)  # past the 250 ms tail
         rig.service._capture(b"\x33" * _FRAME_BYTES)
         assert rig.service._mic_out.qsize() == 1
 
@@ -1116,8 +1132,11 @@ async def test_a_rising_edge_no_louder_than_the_echo_is_suppressed() -> None:
         rig.service._turn_id = uuid4()
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
 
-        assert not rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Refused)
+        assert verdict.rule == ECHO_FLOOR
         assert rig.service._suppressed_frames == 1
+        assert rig.service.admission_refusals() == {ECHO_FLOOR: 1}
 
 
 async def test_a_rising_edge_that_clears_the_margin_barges_in() -> None:
@@ -1126,7 +1145,9 @@ async def test_a_rising_edge_that_clears_the_margin_barges_in() -> None:
         rig.service._turn_id = uuid4()
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
 
-        assert rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Admitted)
+        assert verdict.tested, "a frame judged while the robot spoke was not tested"
         assert rig.service._suppressed_frames == 0
 
 
@@ -1135,8 +1156,13 @@ async def test_normal_turn_taking_is_never_tested_against_the_margin() -> None:
     while the robot is speaking. With a silent speaker every edge is the user's, whatever the
     margin — so an impossible margin cannot make the robot deaf in ordinary conversation."""
     async with _rig(vad_script=[False], barge_in_margin_db=999.0) as rig:
-        assert rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Admitted)
+        # Stronger than "admitted": nothing was even consulted. The two used to be
+        # indistinguishable, and that is exactly how #467 hid for eight minutes.
+        assert not verdict.tested
         assert rig.service._suppressed_frames == 0
+        assert rig.service.admission_refusals() == {}
 
 
 async def test_a_suppressed_edge_neither_mints_a_turn_nor_publishes() -> None:
@@ -1169,7 +1195,7 @@ async def test_the_echo_gate_reports_its_calibration_on_every_reply(
         async with _rig(vad_script=[False]) as rig:
             rig.service._turn_id = uuid4()
             await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
-            rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+            rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
             await rig.service.end_response()
 
     assert "1 suppressed" in caplog.text
@@ -1202,7 +1228,7 @@ async def test_the_echo_gate_reports_the_CONFIGURED_margin_not_the_default(
         async with _rig(vad_script=[False], barge_in_margin_db=3.5) as rig:
             rig.service._turn_id = uuid4()
             await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
-            rig.service._admits_barge_in(rms_dbfs(b"\x00" * _FRAME_BYTES))
+            rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
             await rig.service.end_response()
 
     assert "margin 3.5 dB" in caplog.text
@@ -1554,3 +1580,261 @@ async def test_a_barge_in_is_not_reported_as_the_device_dropping_audio(
         "the truncated write was neither warned about nor recorded as a barge-in — "
         "the epoch check did not fire and nothing else reported the shortfall"
     )
+
+
+def _square_pcm(*, amplitude: int, frames: int = _FRAME_BYTES // 2) -> bytes:
+    """A square wave at *amplitude* — RMS is exactly the amplitude, so the level is by hand.
+
+    The gate's whole discriminator is loudness, so a test that wants "a person, not the echo"
+    needs audio whose dBFS it can state rather than infer.
+    """
+    return array("h", [amplitude, -amplitude] * (frames // 2)).tobytes()
+
+
+# ── #467: the robot converses with itself ────────────────────────────────────────────────────
+
+
+async def test_the_room_still_ringing_after_a_reply_does_not_start_a_turn() -> None:
+    """⚠️ **The incident, as a test.** This is the frame that cost $0.50 in eight minutes.
+
+    On the rig 2026-08-24 the robot re-triggered itself **370 ms** after `playback_finished` —
+    past the 150 ms echo tail, so `_admits_barge_in` short-circuited to *admit* and nothing was
+    compared with anything. It did that 26 times, took 29 turns nobody asked for, and the echo
+    gate reported `0 suppressed` throughout, because a gate that refuses nothing and a gate that
+    never runs printed identically.
+
+    The guard window keeps judging after the tail has gone, against the floor **frozen** when the
+    reply ended — the live floor would have decayed toward ambience by now and a fading echo would
+    clear it trivially.
+    """
+    async with _rig(vad_script=[False], echo_tail_ms=250, guard_window_ms=700) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.end_response()
+
+        await rig.clock.advance(0.37)  # the measured re-trigger, past the tail
+
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Refused), (
+            "a frame 370 ms after the reply was admitted without being judged -- "
+            "this is #467 and it spent $0.50 in eight minutes"
+        )
+        assert verdict.rule == ECHO_TAIL
+        assert rig.service.admission_refusals() == {ECHO_TAIL: 1}
+
+
+async def test_the_owner_answering_promptly_is_still_heard() -> None:
+    """The other half, and the one that keeps this a fix rather than a mute button.
+
+    The same instant as the test above — 370 ms after the reply, inside the guard — but the frame
+    is well above the frozen floor. A person at conversational distance clears the margin
+    trivially (#106 measured real speech at -7.0 dBFS); the robot's own decay cannot, by
+    construction. A guard that refused this would be a robot that ignores its owner, which is a
+    worse defect than the one being fixed.
+    """
+    async with _rig(vad_script=[False], echo_tail_ms=250, guard_window_ms=700) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.end_response()
+        await rig.clock.advance(0.37)
+
+        loud = rms_dbfs(_square_pcm(amplitude=12000))
+        verdict = rig.service._admission(loud)
+        assert isinstance(verdict, Admitted), (
+            "the owner was refused inside the guard window"
+        )
+        assert verdict.tested, "a frame inside the guard window was not judged at all"
+        assert rig.service.admission_refusals() == {}
+
+
+async def test_a_suppressed_edge_inside_the_guard_publishes_nothing_and_moves_no_state() -> (
+    None
+):
+    """The refusal has to reach all the way, not merely be counted.
+
+    A gate that logs a refusal but still publishes `audio.speech_started` has changed nothing:
+    the state machine still moves to LISTENING, ConversationService still opens a billed session,
+    and the turn still happens. That is why this asserts on the bus and the state, not on the
+    counter.
+    """
+    async with _rig(
+        vad_script=[False, True, True], echo_tail_ms=250, guard_window_ms=700
+    ) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.end_response()
+        await rig.clock.advance(0.37)
+
+        before = rig.state.state
+        rig.collector.events.clear()
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+
+        assert isinstance(verdict, Refused)
+        assert not any(
+            isinstance(e, AudioSpeechStarted) for e in rig.collector.events
+        ), "a refused edge published audio.speech_started anyway"
+        assert rig.state.state is before
+
+
+async def test_the_guard_expires_so_ordinary_conversation_is_never_judged() -> None:
+    """§6.2.4's promise survives the fix: outside the window nothing is tested at all.
+
+    ⚠️ `tested` is the assertion, not the verdict — a quiet frame is *admitted* either way. The
+    distinction is the whole point: the gate must be able to say whether it ran.
+    """
+    async with _rig(vad_script=[False], echo_tail_ms=250, guard_window_ms=700) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.end_response()
+
+        await rig.clock.advance(1.0)  # well past the 700 ms guard
+
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Admitted)
+        assert not verdict.tested, (
+            "the guard was still judging after it should have expired"
+        )
+
+
+async def test_a_barge_in_arms_the_guard_even_though_it_arms_no_tail() -> None:
+    """⚠️ `interrupt()` used to arm nothing at all, and that was a hole rather than a decision.
+
+    The two windows do different jobs and only one of them belongs to `end_response`:
+
+    * the **streaming tail** is skipped after a barge-in on purpose — `Speaker.stop` closes the
+      ALSA handle so there is no drain to wait out, and the user is mid-utterance, so holding the
+      uplink shut would clip the very words that interrupted;
+    * the **origin guard** must still be armed, because a speaker that was audible a moment ago is
+      audible whether it stopped early or late. A self-triggered barge-in is *precisely* the case
+      where the guard matters, and it was the one case that skipped it.
+
+    Arming it inside `_take_playback` — the single-taker both finalizers pass through — makes that
+    structurally impossible rather than a rule someone has to remember at two call sites.
+    """
+    async with _rig(vad_script=[False], echo_tail_ms=250, guard_window_ms=700) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        await rig.service.interrupt()
+
+        # No tail: the uplink is open immediately, which is the documented barge-in behaviour.
+        rig.service._capture(b"\x33" * _FRAME_BYTES)
+        assert rig.service._mic_out.qsize() >= 1
+
+        # ...but the guard IS armed, so a quiet frame still cannot originate a fresh turn.
+        await rig.clock.advance(0.1)
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Refused), (
+            "interrupt() left the guard unarmed -- a self-triggered barge-in could chain"
+        )
+
+
+async def test_the_echo_tail_is_armed_exactly_once() -> None:
+    """⚠️ `end_response` armed it twice until #467, and the second arm was an AVID-174 regression.
+
+    The synchronous arm exists so the deadline can never be applied to a *later* episode a
+    concurrent `play()` opened meanwhile — a property that holds only because no `await` separates
+    the take from the arm. Re-arming after the publish and the transition put two awaits in the
+    middle and reintroduced exactly that race, while the comment above went on claiming otherwise.
+
+    Asserting on the deadline's *value* rather than counting calls is what makes this bite: with
+    the second arm restored the clock has advanced across the awaits, so the deadline lands later
+    than the one the synchronous arm set.
+    """
+    async with _rig(vad_script=[False], echo_tail_ms=250) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+
+        armed_from = rig.clock.monotonic_ns()
+        await rig.service.end_response()
+
+        expected = armed_from + 250 * 1_000_000
+        assert rig.service._uplink_shut_until_ns == expected, (
+            "the tail was re-armed after an await -- AVID-174's race, reintroduced"
+        )
+
+
+async def test_the_backstop_bites_on_turns_that_never_proved_they_were_human() -> None:
+    """⚠️ A cap on **unproven** origins, not a cap on turns, and the difference is the design.
+
+    The measured runaway ran at 3.25 turns/min; a fast human exchange with this robot is 5-6/min.
+    It was *slower than a conversation*, so no rate threshold separates them at any value — a cap
+    tight enough to catch it would silence a chatty owner. What separates them is the gap to the
+    robot's own reply: 370 ms, against a person who has to hear it end first.
+
+    So the budget counts only back-to-back origins, and once spent the guard stops expiring: every
+    origin must clear the frozen floor however long ago playback ended.
+    """
+    async with _rig(
+        vad_script=[False], echo_tail_ms=250, guard_window_ms=700, reactive_budget=2
+    ) as rig:
+        rig.service._turn_id = uuid4()
+
+        for _ in range(2):
+            await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+            await rig.service.end_response()
+            await rig.clock.advance(0.3)  # back-to-back: inside reactive_back_to_back_s
+            await rig.service._begin_speech()
+            rig.service._speaking = False
+
+        # Long past every window, so only the spent budget can still be holding the guard open.
+        await rig.clock.advance(30.0)
+        verdict = rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+        assert isinstance(verdict, Refused), "the backstop never bit"
+        assert verdict.rule == REACTIVE_BUDGET
+
+        # ...and it is still not a mute button: a person is heard regardless.
+        loud = rig.service._admission(rms_dbfs(_square_pcm(amplitude=12000)))
+        assert isinstance(loud, Admitted), "the backstop silenced a real person"
+
+
+async def test_the_metrics_survive_the_json_the_endpoint_puts_them_through() -> None:
+    """#456's lesson, paid once already: a key `json.dumps` cannot render 500s **all** of /metrics.
+
+    `illegal_transitions` uses pre-rendered string keys for exactly this reason — a tuple or enum
+    key raises inside the endpoint and takes every other counter down with it. Asserting the round
+    trip directly is cheaper than rediscovering it on a Pi at 03:00.
+    """
+    async with _rig(vad_script=[False]) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+
+        refusals = rig.service.admission_refusals()
+        assert json.loads(json.dumps(refusals)) == refusals
+        assert all(isinstance(k, str) for k in refusals)
+        assert set(refusals) <= ADMISSION_RULES
+        assert isinstance(rig.service.reactive_turns(), int)
+
+
+async def test_admission_refusals_returns_a_copy_the_caller_cannot_corrupt() -> None:
+    """A live map handed to `/metrics` is one a reader can mutate under the service."""
+    async with _rig(vad_script=[False]) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+        rig.service._admission(rms_dbfs(b"\x00" * _FRAME_BYTES))
+
+        snapshot = rig.service.admission_refusals()
+        snapshot["echo_floor"] = 99_999
+        assert rig.service.admission_refusals() != snapshot
+
+
+async def test_the_preroll_never_replays_the_robots_own_voice() -> None:
+    """⚠️ The amplifier: one marginal admit used to send 300 ms of the robot to the model.
+
+    The ring is fed on every captured frame, echo included, and the replay was unconditional — so
+    a single frame scraping past the margin did not send one frame of echo, it sent up to a full
+    pre-roll of the robot's contiguous speech, labelled as the user's utterance. That is
+    comfortably enough for the server to transcribe and answer, which is how one false admit
+    became a conversation.
+    """
+    async with _rig(vad_script=[False], echo_tail_ms=250, guard_window_ms=700) as rig:
+        rig.service._turn_id = uuid4()
+        await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
+
+        # Frames captured while the robot is audible are flagged and must not survive the drain.
+        rig.service._preroll.append(b"\x11" * _FRAME_BYTES, echo=True)
+        rig.service._preroll.append(b"\x22" * _FRAME_BYTES, echo=True)
+
+        assert rig.service._preroll.drain() == b"", (
+            "the robot's own voice was queued for replay as the user's utterance"
+        )

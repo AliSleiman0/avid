@@ -1022,7 +1022,11 @@ async def test_barge_in_full_chain_on_one_correlation_id() -> None:
         barge_in_margin_db=6.0,
         highpass_hz=150.0,
         highpass_order=3,
-        echo_tail_ms=150,
+        echo_tail_ms=250,
+        guard_window_ms=700,
+        reactive_window_s=120.0,
+        reactive_back_to_back_s=1.5,
+        reactive_budget=4,
         capture_stall_s=5.0,
         loopback=False,
     )

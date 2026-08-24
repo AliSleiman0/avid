@@ -113,7 +113,39 @@ session_idle_close_s = 30
 # until it is re-derived with AGC provisioned off and a person actually speaking. It is left at
 # the shipped value rather than guessed at: a guess would be indistinguishable from calibration.
 barge_in_margin_db   = 3.0
-echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
+# ⚠️ 150 -> 250 (#467). The tail is armed at `end_response`, which fires when the last delta is
+# handed to the speaker -- NOT when the room goes quiet. `Speaker.play()` counts frames the device
+# ACCEPTED into its ring, so ~107 ms of the reply (2560 frames at 24 kHz) is still being clocked
+# out when the tail starts counting. At 150 ms that left ~43 ms of real slack and the end of the
+# robot's own voice went up the uplink as user audio. Now asserted against `[speaker] sample_rate`
+# by Config, which computes the depth rather than trusting this comment.
+echo_tail_ms         = 250       # uplink stays shut this long after a reply ends (DAC drain)
+# How long after a reply a NEW turn origin is still judged against the echo floor (#467).
+#
+# ⚠️ A DIFFERENT JOB from echo_tail_ms, and fusing the two is what let the robot answer itself for
+# eight minutes on 2026-08-24. The tail is about STREAMING (do not send the DAC's drain to the
+# model); the guard is about ORIGINS (do not let the room's ringing start a turn). The rig
+# re-triggered 370 ms after `playback_finished` -- 220 ms past the tail -- so nothing was
+# consulted, the gate logged `0 suppressed`, and 26 self-triggered turns cost $0.50.
+#
+# ⚠️ UNCALIBRATED. 700 ms comfortably exceeds the one observed re-trigger; it is not a measurement.
+# The decay is a property of the amp, the mic, the room and the geometry. Derive it the way
+# barge_in_margin_db's table above was derived: 10 replies with nobody speaking, recording the
+# loudest frame in the 2 s after `playback_finished` and how long it takes to fall below
+# floor + margin; then set this to that time + 100 ms. ⚠️ If that population overlaps real speech
+# at 1 m, STOP TUNING -- §6.2.4 says no margin can be tuned into working, and the honest answers
+# are #163 (AEC) or full half-duplex (a very large margin, config only).
+guard_window_ms      = 700
+# The backstop (#467). ⚠️ A cap on turns that never proved they came from a human, NOT a cap on
+# turns. The runaway ran at 3.25 turns/min; a fast human exchange here is 5-6/min -- it was
+# SLOWER than a conversation, so no rate threshold separates them at any value. What separates
+# them is the gap to the robot's own reply: 370 ms, against a person who must hear it end first.
+# After this many back-to-back origins the guard stops expiring and every origin must clear the
+# frozen floor until a quiet window passes. An owner at conversational distance clears it
+# trivially and is never refused.
+reactive_window_s        = 120.0
+reactive_back_to_back_s  = 1.5
+reactive_budget          = 4
 capture_stall_s      = 5.0       # §10.5/#347 — mic silent this long = stalled, not ignored
 # §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
 # MUST be < session_idle_close_s, asserted in Config — the idle close cancels this timer and

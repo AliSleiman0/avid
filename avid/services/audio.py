@@ -83,6 +83,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
+from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -100,6 +102,11 @@ from avid.core.ports import (
 from avid.core.state_manager import StateManager
 from avid.core.tasks import spawn
 from avid.domain import (
+    ACOUSTIC_RULES,
+    AdmissionContext,
+    AdmissionLimits,
+    AdmissionResult,
+    Admitted,
     AudioCaptureResumed,
     AudioCaptureStalled,
     AudioPlaybackFinished,
@@ -109,7 +116,9 @@ from avid.domain import (
     AudioSpeechStarted,
     EchoFloor,
     HighPass,
+    Refused,
     Trigger,
+    evaluate_admission,
     rms_dbfs,
 )
 from avid.domain.audio import SILENCE_DBFS
@@ -183,6 +192,13 @@ class AudioService:
         highpass_hz: float,
         highpass_order: int,
         echo_tail_ms: int,
+        # The admission gate's other four knobs (#467). Required for the same AVID-180 reason:
+        # the gate that let the robot answer itself was one whose one testable knob was the only
+        # one anything ever passed.
+        guard_window_ms: int,
+        reactive_window_s: float,
+        reactive_back_to_back_s: float,
+        reactive_budget: int,
         # How long the mic may yield nothing before capture is declared stalled (#347). Required
         # for the AVID-180 reason above: a defaulted watchdog is one a harness silently never
         # passes, and this one decides whether an unanswered reminder counts against the user.
@@ -236,7 +252,32 @@ class AudioService:
         self._echo_tail_ns = echo_tail_ms * 1_000_000
         self._uplink_shut_until_ns = 0
         self._suppressed_frames = 0
+        self._tested_frames = 0
         self._loudest_suppressed_dbfs = SILENCE_DBFS
+
+        # The admission gate proper (#467). The thresholds cross into the domain as one frozen
+        # value so the decision can be argued with in a unit test — which the old fused version
+        # could not be, and which is why the hole in it survived to the rig.
+        self._admission_limits = AdmissionLimits(
+            barge_in_margin_db=barge_in_margin_db,
+            guard_window_s=guard_window_ms / 1000.0,
+            reactive_window_s=reactive_window_s,
+            reactive_back_to_back_s=reactive_back_to_back_s,
+            reactive_budget=reactive_budget,
+        )
+        # When the last playback episode closed, and what the floor read at that instant.
+        #
+        # ⚠️ The floor is FROZEN here rather than read live, and that is load-bearing. With no
+        # playback `EchoFloor` decays toward ambience within a few hundred ms, so a decaying echo
+        # judged against the live floor clears `floor + margin` trivially — the guard would admit
+        # exactly what it exists to refuse. Frozen, the bar stays where the robot's own voice put
+        # it, which a person at conversational distance clears and an echo cannot.
+        self._playback_ended_ns: int | None = None
+        self._guard_floor_dbfs = SILENCE_DBFS
+        # Monotonic ns of origins that began within `reactive_back_to_back_s` of a reply ending.
+        self._back_to_back: deque[int] = deque()
+        self._refusals: dict[str, int] = {}
+        self._reactive_turns = 0
 
         # True = M4 echo (the #91 transport gate); False = the M5 TurnSink seam (the running
         # robot). Named ``_loopback_mode`` so it does not shadow the :meth:`_loopback` method.
@@ -475,20 +516,26 @@ class AudioService:
         episode = self._take_playback()
         if episode is None:
             return
-        # The tail is armed in the same synchronous breath as the close, so there is no window in
-        # which the uplink is open over a still-draining DAC, and it can never be applied to a
-        # *later* episode a concurrent play() opened meanwhile (AVID-174). A barge-in that took
-        # the episode first returns above and still gets no tail — §6.2.4's rule, now true under
-        # a race as well as without one.
+        # Armed ONCE, in the same synchronous breath as the close. Two things depend on that:
+        #
+        # - there is no window in which the uplink is open over a still-draining DAC. The reply is
+        #   over as far as the model is concerned but not as far as the room is — the DAC is still
+        #   clocking out up to a playback-buffer depth of it, and those frames are still the robot
+        #   (§6.2.4, AVID-159). `[gate] echo_tail_ms` must cover that depth, which is no longer a
+        #   matter of trusting this comment: Config computes it from `[speaker] sample_rate` and
+        #   refuses to load a tail that is too short (#467).
+        # - it can never be applied to a *later* episode a concurrent play() opened meanwhile
+        #   (AVID-174), because no await separates the take from the arm.
+        #
+        # ⚠️ There was a SECOND arm below the transition until #467, and it undid the second
+        # property entirely: re-arming after two awaits reintroduces exactly the race the
+        # synchronous arm exists to close, while the comment above went on claiming otherwise.
+        # Do not re-add it. If the tail is too short, lengthen it — that is what the knob is for.
         self._uplink_shut_until_ns = self._clock.monotonic_ns() + self._echo_tail_ns
         await self._publish_finished(episode, truncated=False)
         await self._state.transition(
             Trigger.AUDIO_PLAYBACK_FINISHED, correlation_id=episode.corr
         )
-        # The reply is over as far as the model is concerned, but not as far as the room is: the
-        # DAC is still clocking out up to a playback-buffer depth of it (§6.2.4). Hold the uplink
-        # shut over that tail, or its last ~100 ms goes to the model as user audio (AVID-159).
-        self._uplink_shut_until_ns = self._clock.monotonic_ns() + self._echo_tail_ns
 
     async def interrupt(self) -> int:
         """Barge-in: cut playback immediately and report the ms the speaker **accepted**
@@ -581,6 +628,19 @@ class AudioService:
         self._playing_ms = 0
         self._playing_corr = None
         self._playback_epoch += 1
+        # Arm the ORIGIN guard here, in the one place both finalizers pass through (#467).
+        #
+        # ⚠️ This is why `interrupt()` needs no arming call of its own — and why it used to have
+        # none at all, which was a hole rather than a decision: a self-triggered barge-in leaves a
+        # speaker that was audible a moment ago, so the very case where the guard matters most was
+        # the one case that skipped it. Putting it in the single-taker section makes that
+        # structurally impossible instead of a rule someone has to remember at two call sites.
+        #
+        # The STREAMING tail is a different window and is still armed only by `end_response`: a
+        # barge-in closes the ALSA handle so the buffer is dropped, and holding the uplink shut
+        # afterwards would clip the very words that interrupted.
+        self._playback_ended_ns = self._clock.monotonic_ns()
+        self._guard_floor_dbfs = self._echo_floor.dbfs
         return episode
 
     # --- the mic loop --------------------------------------------------------------------
@@ -602,7 +662,6 @@ class AudioService:
             # (#347). Monotonic, so a clock correction cannot invent a stall.
             self._last_chunk_ns = self._clock.monotonic_ns()
             speech = self._vad.is_speech(chunk)
-            self._preroll.append(chunk.pcm)
             frame_ms = pcm_duration_ms(
                 chunk.pcm, sample_rate=chunk.sample_rate, channels=chunk.channels
             )
@@ -619,11 +678,22 @@ class AudioService:
             # 150 Hz x3 (445 -> 410 of 1000) and buys nothing, because Silero does not fire on
             # the hum in the first place — 0 frames in 250 on both recordings. The phantom
             # sessions AVID-283 was filed for were AGC (AVID-296), not this.
+            #
+            # ⚠️ MOVED ABOVE THE RING APPEND in #467, and only moved — the filter still stops at
+            # the level and the VAD above still gets raw PCM. The ring now needs this frame's
+            # verdict at append time, so the verdict has to exist first.
             frame_dbfs = rms_dbfs(self._level_filter.apply(chunk.pcm))
+            # One decision per frame, taken once and reused everywhere below (#467). The ring
+            # records it so the pre-roll never replays the robot's own voice as the user's.
+            verdict = self._admission(frame_dbfs)
+            self._preroll.append(
+                chunk.pcm,
+                echo=isinstance(verdict, Refused) and verdict.rule in ACOUSTIC_RULES,
+            )
             if speech:
                 if not self._speaking:
-                    if not self._admits_barge_in(frame_dbfs):
-                        continue  # our own speaker, not the user — see _admits_barge_in
+                    if isinstance(verdict, Refused):
+                        continue  # our own speaker, not the user — see _admission
                     await self._begin_speech()  # rising edge — replays the pre-roll
                 else:
                     # Mid-utterance barge-in (AVID-161). The reply started *while* they were
@@ -633,7 +703,7 @@ class AudioService:
                     # shut, and your words stop reaching the model until you give up and start
                     # again. Judged per frame here, so the interrupt lands as soon as they are
                     # loud enough, and ``interrupt`` re-opens the uplink for the rest of it.
-                    if self._uplink_shut() and self._admits_barge_in(frame_dbfs):
+                    if self._uplink_shut() and isinstance(verdict, Admitted):
                         await self.interrupt()
                         self._uplink_shut_until_ns = 0  # the rest of the turn is theirs
                     self._capture(chunk.pcm)  # subsequent speech frame
@@ -679,30 +749,108 @@ class AudioService:
             return True
         return self._clock.monotonic_ns() < self._uplink_shut_until_ns
 
-    def _admits_barge_in(self, frame_dbfs: float) -> bool:
-        """Is this rising edge the **user**, or our own speaker (AVID-159, SDS §6.2.4)?
+    def _admission(self, frame_dbfs: float) -> AdmissionResult:
+        """May this frame originate a turn — is it the **user**, or our own speaker (§6.2.4)?
 
-        Only ever asked while :meth:`_uplink_shut` — so **normal turn-taking is never tested
-        against the margin at all** and is bit-for-bit unaffected by this gate. That bound is
-        deliberate: the discriminator is crude, and it should only run where nothing better
-        exists.
+        The decision itself is :func:`~avid.domain.audio.evaluate_admission`, in the domain, where
+        it can be argued with. This assembles the context, records the outcome, and does the one
+        thing a pure function cannot: mutate the floor.
 
-        Asked at the rising edge, and — since AVID-161 — on every frame of an utterance the
+        ⚠️ **This used to answer "yes" for every frame the moment the uplink reopened**, and that
+        is the #467 defect in one line. The robot re-triggered itself 370 ms after a reply — past
+        `echo_tail_ms`, so nothing was consulted, and the gate reported `0 suppressed` while
+        answering itself twenty-six times. Now the guard window keeps judging after the tail has
+        gone, against the floor frozen when the reply ended.
+
+        Still asked at the rising edge and — since AVID-161 — on every frame of an utterance the
         robot started talking over, because such a user has no rising edge left to be judged on.
 
-        A rejected frame is fed to the floor precisely *because* it is the robot: while the
-        assistant speaks, what the mic hears is the echo, so those frames **are** the
-        calibration. A frame that clears the margin is judged to be the user and is deliberately
-        **not** observed — folding it in would raise the bar under the speaker mid-sentence.
+        A frame refused for an **acoustic** reason is fed to the floor precisely *because* it is
+        the robot: what the mic hears then is the echo, so those frames **are** the calibration. A
+        frame that clears the margin is judged to be the user and is deliberately not observed —
+        folding it in would raise the bar under the speaker mid-sentence. A frame refused by the
+        backstop is not observed either: that refusal is a statement about policy, not about the
+        room, and folding it in would let a runaway teach the floor its own voice.
         """
-        if not self._uplink_shut():
-            return True  # the robot is silent; every edge is the user's
-        if self._echo_floor.exceeds(frame_dbfs, margin_db=self._barge_in_margin_db):
-            return True
-        self._echo_floor.observe(frame_dbfs)
-        self._suppressed_frames += 1
-        self._loudest_suppressed_dbfs = max(self._loudest_suppressed_dbfs, frame_dbfs)
-        return False
+        playback_live = self._playing_item is not None
+        verdict = evaluate_admission(
+            AdmissionContext(
+                frame_dbfs=frame_dbfs,
+                # Live while the robot speaks; FROZEN once it stops. See `_guard_floor_dbfs`.
+                floor_dbfs=(
+                    self._echo_floor.dbfs if playback_live else self._guard_floor_dbfs
+                ),
+                playback_live=playback_live,
+                since_playback_s=self._since_playback_s(),
+                back_to_back_turns=len(self._back_to_back),
+            ),
+            limits=self._admission_limits,
+        )
+        if isinstance(verdict, Admitted):
+            if verdict.tested:
+                self._tested_frames += 1
+            return verdict
+
+        self._refusals[verdict.rule] = self._refusals.get(verdict.rule, 0) + 1
+        self._tested_frames += 1
+        if verdict.rule in ACOUSTIC_RULES:
+            self._echo_floor.observe(frame_dbfs)
+            self._suppressed_frames += 1
+            self._loudest_suppressed_dbfs = max(
+                self._loudest_suppressed_dbfs, frame_dbfs
+            )
+        return verdict
+
+    def _since_playback_s(self) -> float:
+        """Seconds since the last playback episode closed; ``inf`` if none ever has.
+
+        ``inf`` rather than ``None`` so the gate's comparisons read correctly without a branch —
+        the same choice ``PolicyContext``'s ages make, for the same reason.
+        """
+        if self._playback_ended_ns is None:
+            return math.inf
+        return (self._clock.monotonic_ns() - self._playback_ended_ns) / _NS_PER_S
+
+    def _note_origin(self) -> None:
+        """Record that a turn began, and whether it began on the heels of the robot's own reply.
+
+        ⚠️ **Back-to-back origins, not a turn rate, and the difference is the whole backstop.**
+        The measured runaway ran at 3.25 turns/min; a fast human exchange with this robot is
+        5-6/min. It was *slower than a conversation*, so no rate threshold separates them at any
+        value — a cap tight enough to catch it would silence a chatty owner. What separates them
+        is the gap to the robot's own reply: 370 ms on the rig, against a person who has to hear
+        the reply end before answering.
+        """
+        now_ns = self._clock.monotonic_ns()
+        window_ns = int(self._admission_limits.reactive_window_s * _NS_PER_S)
+        while self._back_to_back and now_ns - self._back_to_back[0] > window_ns:
+            self._back_to_back.popleft()
+        if self._since_playback_s() < self._admission_limits.reactive_back_to_back_s:
+            self._back_to_back.append(now_ns)
+        self._reactive_turns += 1
+
+    def admission_refusals(self) -> dict[str, int]:
+        """Turn origins refused, per rule — a copy, for ``/metrics`` (§3.12.2).
+
+        Per-rule rather than a total, and string-keyed, both for the reasons
+        ``StateManager.illegal_transitions`` gives (#456): a single counter cannot separate a room
+        that is genuinely loud from a robot re-triggering itself, and a tuple or enum key raises
+        in the ``json.dumps`` behind ``/metrics`` and takes the whole endpoint down with a 500.
+
+        Bounded by ``|ADMISSION_RULES|`` = 3, so there is nothing to evict. An empty map means
+        nothing was refused, which is a real reading — and distinguishable from the metric being
+        absent, which is not (#380).
+        """
+        return dict(self._refusals)
+
+    def reactive_turns(self) -> int:
+        """How many turns this process originated from speech (§3.12.2).
+
+        The quantity the soak's self-trigger criterion differences against the load generator's
+        own record: turns the robot took that no played utterance and no proactive trigger can
+        account for are turns it started by itself.
+        """
+        return self._reactive_turns
 
     def _report_echo_gate(self, corr: UUID) -> None:
         """One line per reply: the calibration datum #106's AC-3 requires (AVID-159).
@@ -727,18 +875,27 @@ class AudioService:
         # log distinguishable from a new one. The cutoff and order are READ from the configured
         # filter, never restated as literals: a banner quoting a value the run did not use is
         # drift with a delay fuse.
+        # ⚠️ `%d tested` is not decoration, and its absence is what made #467 invisible for eight
+        # minutes. This line read `0 suppressed` for every reply while the robot answered itself
+        # twenty-six times — because nothing was ever *tested*, and a gate that refused nothing
+        # prints identically to a gate that never ran. Reporting how many frames were judged is
+        # the difference between "the margin is fine" and "the margin was never consulted".
         _log.info(
             "echo gate: filtered floor %.1f dBFS (high-pass %.0f Hz x%d), loudest suppressed "
-            "frame %.1f dBFS (%d suppressed), margin %.1f dB [correlation_id=%s]",
+            "frame %.1f dBFS (%d suppressed of %d tested), margin %.1f dB, refusals %s "
+            "[correlation_id=%s]",
             self._echo_floor.dbfs,
             self._level_filter.cutoff_hz,
             self._level_filter.order,
             self._loudest_suppressed_dbfs,
             self._suppressed_frames,
+            self._tested_frames,
             self._barge_in_margin_db,
+            dict(self._refusals) or "none",
             corr,
         )
         self._suppressed_frames = 0
+        self._tested_frames = 0
         self._loudest_suppressed_dbfs = SILENCE_DBFS
 
     def _emit(self, pcm: bytes) -> None:
@@ -817,9 +974,17 @@ class AudioService:
         # still a pre-roll to replay. The other order silently swallows the leading phonemes of
         # the very barge-in the margin just admitted — the exact loss §6.3's ring buffer exists
         # to prevent, reintroduced by its own gate.
+        # ⚠️ Record the origin BEFORE `interrupt()` closes the episode, or `_since_playback_s`
+        # reads ~0 for a barge-in that was never back-to-back with anything — the interrupt would
+        # stamp the very episode it is ending, and every genuine mid-reply barge-in would count
+        # against the backstop's budget.
+        self._note_origin()
         if self._playing_item is not None:
             await self.interrupt()  # stops the speaker, finalizes the old playback
         self._uplink_shut_until_ns = 0
+        # This edge has been judged to be the user, so the guard is over: a person is talking and
+        # the next frames are theirs, not the room's decay.
+        self._playback_ended_ns = None
 
         self._capture(pre)  # §6.3: replay the ring buffer, then stream live
 
