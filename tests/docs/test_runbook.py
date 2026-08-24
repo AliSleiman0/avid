@@ -288,10 +288,14 @@ def test_recovery_procedures_say_what_they_destroy() -> None:
         # The soak subsections destroy nothing — they cost O5, which is a different currency and
         # is stated in their own terms. Each is pinned to the claim it exists to make, so the
         # exemption cannot become a hole that new sections quietly fall through.
-        if title.startswith("4.0 "):  # the preamble: what an intervention costs the window
+        if title.startswith(
+            "4.0 "
+        ):  # the preamble: what an intervention costs the window
             assert "AC-3" in body and "interventions.jsonl" in body
             continue
-        if title.startswith("4.0.1"):  # the load generator: why a window without one is empty
+        if title.startswith(
+            "4.0.1"
+        ):  # the load generator: why a window without one is empty
             assert "load.jsonl" in body, "the load section does not name its own log"
             assert "only caps that exist" in body, (
                 "the load section does not say that its caps are the only ones — S10.4 does not "
