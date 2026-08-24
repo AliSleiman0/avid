@@ -8,7 +8,51 @@
 
 **As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **rig DEPLOYED and healthy on `v0.M10.0-77-gf1009a3`; #452, #456 and #447 all closed** · ⛔ M11 soak stopped, O5 amended · gh `AliSleiman0`.
 
-## ⭐ Next session — 🔴 REDEPLOY, THEN THE 72-HOUR WINDOW
+## ⭐ Next session — 🟢 THE LOAD PATH WORKS; BUILD THE GENERATOR, THEN RUN THE WINDOW
+
+**The question that was blocking the 72-hour window is answered: sound in the room drives a
+complete turn.** Proven on the rig 2026-08-24, 12:05:27, with nothing but a WAV played from a
+second process:
+
+```
+12:05:27  IDLE      -> LISTENING   audio.speech_started      <- recorded speech, played into the room
+12:05:28  LISTENING -> THINKING    audio.speech_ended
+12:05:30  realtime open: total 3948 ms (cold)                <- a real session
+12:05:31  THINKING  -> SPEAKING    audio.playback_started    <- it answered out loud
+12:05:35  SPEAKING  -> IDLE        audio.playback_finished
+```
+
+So a load generator does **not** need a relaxed config or a spoofed presence: it needs a speaker and
+a schedule. `~/probes/probe_room_audio.py` on the rig is the seed — it plays cue WAVs and, when the
+robot is stopped, reports what the mic captured.
+
+**The numbers that matter for designing it:**
+
+- **Sound reaches the mic at peak −22.3 dBFS / rms −42.7** with `Master` at 80% — well clear of the
+  −40 dBFS floor `barge_in_margin_db` was calibrated against. Volume is not the constraint.
+- **A turn costs $0.045** — measured, not estimated (`cost_meter: 1 turns, $0.04509`, cached-input
+  0.0% on a cold first turn). So 4 turns/hour for 72 h is **~$13**, not the ~$6 I first guessed from
+  §6.10's daily figure. ⚠️ The meter also printed *"projected $27.05/mo — OVER O7 BUDGET"*, which is
+  a **one-sample extrapolation** and means nothing; O7 is graded on a real day's traffic.
+- ⚠️ **The robot holds the mic**, so a generator cannot record while the robot runs (`Device or
+  resource busy`). Measure capture with the service stopped, or not at all.
+
+⚠️ **Two traps this cost, both mine, both worth not repeating.** The probe looked like it failed
+three times: once because `/tmp` was cleared by the reboot, once because I grepped a 10-second
+window when the robot took **three minutes** to react, and once because I read `turns 0` from a
+process that was **not the one that ran the turn** — the counters are process-scoped, which is the
+same trap #456's own reader has to handle. **An instrument that is too impatient, or pointed at the
+wrong process, reports exactly what a broken robot reports.**
+
+## Also today
+
+🔴 **#461 filed — the robot went deaf for 12 seconds.** `capture has produced nothing for 12093 ms`,
+once, self-recovered. **Not a clock artefact** — the detector uses `monotonic_ns`, checked — though
+it landed 12 s after an 11.5-hour NTP step, which is a plausible cause and not a finding. ⚠️ `LIVE`
+would **not** catch this: a robot deaf in IDLE is legitimately in IDLE. The two instruments are
+complementary.
+
+## Then: the 72-hour window
 
 **Everything laptop-side in the queue is done.** Closed 2026-08-24: **#452** (the wedge, #455 +
 #457), **#456** (rejected transitions are countable outside the process), **#447** (the M7 recall
@@ -326,6 +370,24 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **A process-scoped counter read after a restart reports zero, and zero is what a broken robot
+  reports too.** I read `turns 0` / `cost_usd 0.0` from `/metrics` and nearly filed a defect —
+  the turn had been counted correctly (`cost_meter: 1 turns, $0.04509`) by a process I had since
+  restarted **twice**. Every counter on `/metrics` except `build` is process-scoped. **Before
+  believing a zero, check `uptime_s` against the event you are asking about**; if the process is
+  younger than the event, the zero is about the wrong subject. This is the same arithmetic
+  `_rejected_pairs` handles by taking the max across a window rather than the last reading (#456).
+
+- ⚠️ **An instrument that is too impatient reports exactly what a broken robot reports.** A probe
+  that plays audio and greps ten seconds later "failed" three times before I noticed the robot had
+  answered at **three minutes**. Nothing was wrong with the robot; the window was wrong. When a
+  stimulus produces no reaction, widen the window and re-read the whole boot before concluding —
+  and prefer a grep over the *entire* boot to a `--since` window whose bound you chose by guessing.
+
+- ⚠️ **`/tmp` on the Pi does not survive a reboot**, so a probe uploaded there is gone the next
+  morning and its absence looks like a failed run. Put anything you want to keep in `~/probes/` or
+  `~/journals/` — both now exist on the machine.
 
 - ⚠️ **An aggregate is not a diagnosis, and this project has now been misled by one twice.** #447
   chased "18/20" and found **three different pairs of misses wearing that number**: the M7 seal's
