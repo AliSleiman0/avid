@@ -18,6 +18,15 @@ from avid.domain.affect import (
     AffectTier,
 )
 from avid.domain.audio import (
+    ACOUSTIC_RULES,
+    ADMISSION_RULES,
+    ECHO_FLOOR,
+    ECHO_TAIL,
+    REACTIVE_BUDGET,
+    AdmissionContext,
+    AdmissionLimits,
+    AdmissionResult,
+    Admitted,
     AudioCaptureResumed,
     AudioCaptureStalled,
     AudioPlaybackFinished,
@@ -27,6 +36,8 @@ from avid.domain.audio import (
     AudioSpeechStarted,
     EchoFloor,
     HighPass,
+    Refused,
+    evaluate_admission,
     rms_dbfs,
 )
 from avid.domain.behavior import (
@@ -183,6 +194,18 @@ __all__ = [
     "EchoFloor",
     "HighPass",
     "rms_dbfs",
+    # the admission gate — who may start a turn (§6.2.4, #467)
+    "ACOUSTIC_RULES",
+    "ADMISSION_RULES",
+    "ECHO_FLOOR",
+    "ECHO_TAIL",
+    "REACTIVE_BUDGET",
+    "AdmissionContext",
+    "AdmissionLimits",
+    "AdmissionResult",
+    "Admitted",
+    "Refused",
+    "evaluate_admission",
     # conversation.* events + TokenUsage value (#99)
     "ConversationAssistantResponded",
     "ConversationSessionLost",
