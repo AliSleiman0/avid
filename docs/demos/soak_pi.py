@@ -663,6 +663,19 @@ def _transition_total(samples: Sequence[sqlite3.Row]) -> int | None:
     return total
 
 
+# How many reactive turns a window may leave unexplained before SELF fails (#467).
+#
+# ⚠️ Not zero, and the reason is honesty rather than leniency: a person speaking to the
+# robot produces exactly the same signature as an echo, and no instrument in this harness
+# can tell them apart. A criterion that failed every time somebody said good morning is
+# one people learn to ignore, which is the failure LIVE's docstring already warns about.
+# The refusal histogram beside it is the half that is not ambiguous.
+#
+# Five is a judgement, not a measurement: comfortably above a short unscripted exchange
+# and far below the 29 turns the 2026-08-24 runaway produced in eight minutes.
+_SELF_TRIGGER_ALLOWANCE = 5
+
+
 def _rejected_pairs(samples: Sequence[sqlite3.Row]) -> dict[str, int]:
     """The worst reading of each rejected `(state, trigger)` pair across the window (#456).
 
@@ -753,6 +766,123 @@ def _metric_total(samples: Sequence[sqlite3.Row], key: str) -> float | None:
     for before, after in zip(readings, readings[1:]):
         total += after - before if after >= before else after
     return total
+
+
+def _refusal_totals(samples: Sequence[sqlite3.Row]) -> dict[str, int]:
+    """The worst reading of each admission-refusal rule across the window (#467).
+
+    Read out of the stored ``/metrics`` body rather than a column, exactly as
+    :func:`_rejected_pairs` is and for the same reason: the sampler has kept the whole payload
+    since #383 *"for questions not yet asked"*, so this works retroactively on any window sampled
+    by a build that carries the counter, with no schema change.
+
+    ⚠️ **Max, not last and not sum** — the same process-scoped arithmetic. Summing double-counts a
+    window that restarted; the last reading reports a fresh process's zero over a runaway that ran
+    for hours before it.
+
+    Never raises: a malformed payload is a sample with nothing to say, not a failed report.
+    """
+    worst: dict[str, int] = {}
+    for row in samples:
+        if row["payload"] is None:
+            continue
+        try:
+            metrics = json.loads(row["payload"]).get("metrics", {})
+            refusals = metrics.get("admission_refusals") or {}
+            for rule, count in refusals.items():
+                worst[str(rule)] = max(worst.get(str(rule), 0), int(count))
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            continue
+    return worst
+
+
+def _self_trigger_criterion(
+    entries: Sequence[dict[str, Any]],
+    samples: Sequence[sqlite3.Row],
+    *,
+    window: tuple[int, int],
+) -> _Criterion:
+    """SELF — did the robot start turns nobody asked for (#467, SDS §6.2.4)?
+
+    ⚠️ **`LOAD` next door structurally cannot see this, and it is worth being precise about why:
+    a self-triggered turn makes `LOAD` look HEALTHIER.** That criterion grades *"every utterance
+    played produced a turn"* off the generator's own `no_turn` verdict, and the generator decides
+    a turn happened by watching the robot's turn counter rise. A robot answering itself raises
+    that counter. So the failure mode this criterion exists for is one that inflates the other
+    criterion's evidence — which is the shape of defect CLAUDE.md §7.1 keeps naming: the report
+    describing something other than the run.
+
+    The quantity graded here is the **unexplained excess**: turns the robot originated from speech
+    that neither a played utterance nor a proactive trigger can account for.
+
+        excess = reactive_turns - (utterances played + triggers_fired)
+
+    ⚠️ **A positive excess is not automatically a defect, and the criterion says so rather than
+    pretending otherwise.** A human speaking to the robot during the window produces exactly this
+    signature, and there is no instrument here that can tell a person from an echo. So the bar is
+    an *allowance* rather than zero, and the row reports the raw numbers beside the verdict so a
+    reader who knows somebody was in the room can dismiss it. What is NOT dismissible is the
+    refusal histogram: `admission_refusals` climbing on `echo_tail` or `reactive_budget` means the
+    gate was actively turning away origins, which an empty room does not produce.
+
+    ⚠️ **Absent is not zero** (#380). A build without the counters reports nothing, and nothing
+    must not read as a clean window — that is precisely how the first M11 window passed every
+    criterion while wedged.
+    """
+    since, until = window
+    reactive = _metric_total(samples, "reactive_turns")
+    triggers = _metric_total(samples, "triggers_fired")
+    refusals = _refusal_totals(samples)
+
+    if reactive is None:
+        return _Criterion(
+            "SELF",
+            "the robot started no turns nobody asked for (#467)",
+            "inconclusive",
+            "⚠️ ABSENT, not zero: this window was sampled by a build with no `reactive_turns` "
+            "counter, so nothing here can say whether the robot answered itself. A window that "
+            "cannot answer the question is not a window that answered it 'no' (#380).",
+            rows=[f"admission_refusals={refusals or 'ABSENT'}"],
+        )
+
+    played = sum(
+        1
+        for e in entries
+        if e.get("kind") == "played" and since <= int(e["at"]) < until
+    )
+    accounted = played + (0 if triggers is None else int(triggers))
+    excess = int(reactive) - accounted
+
+    rows = [
+        f"reactive_turns={reactive:.0f}  played={played}  "
+        f"triggers_fired={'ABSENT' if triggers is None else f'{triggers:.0f}'}  "
+        f"unexplained={excess}",
+        f"admission_refusals={refusals or 'none'}",
+        "⚠️ a person in the room produces this signature too - nothing here can tell a human "
+        "from an echo. The refusal histogram is the half that can: an empty room does not make "
+        "the gate turn origins away.",
+    ]
+
+    # The allowance exists because the excess is genuinely ambiguous; the refusals are not. A
+    # window with refusals on the two echo rules is one where the gate was working *and* being
+    # exercised, which on an unattended rig means something was talking to the robot.
+    verdict: _Verdict = "pass"
+    detail = f"{reactive:.0f} reactive turn(s), {accounted} accounted for"
+    if excess > _SELF_TRIGGER_ALLOWANCE:
+        verdict = "fail"
+        detail = (
+            f"{excess} reactive turn(s) unaccounted for - more than the {_SELF_TRIGGER_ALLOWANCE} "
+            f"allowed. Read the transcripts before concluding: a person in the room looks like "
+            f"this too (#467)."
+        )
+
+    return _Criterion(
+        "SELF",
+        "the robot started no turns nobody asked for (#467)",
+        verdict,
+        detail,
+        rows=rows,
+    )
 
 
 def _load_criterion(
@@ -1399,10 +1529,16 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
     # Beside LIVE and above the boot_log early-return, for the third time and the same reason: it
     # depends only on `samples` and a sidecar log. LIVE says the robot was not wedged; this says
     # there was something for it not to be wedged *at*.
+    load_entries = _read_load_log(Path(args.load_log))
+    criteria.append(_load_criterion(load_entries, samples, window=(since, until)))
+
+    # ── SELF: turns nobody asked for (#467) — GRADED ──────────────────────────────────────────
+    #
+    # ⚠️ Beside LOAD deliberately, because LOAD **cannot** see this: a robot answering itself
+    # raises the turn counter the generator reads, so a self-conversation makes LOAD look
+    # healthier. The two criteria grade opposite failures off the same evidence.
     criteria.append(
-        _load_criterion(
-            _read_load_log(Path(args.load_log)), samples, window=(since, until)
-        )
+        _self_trigger_criterion(load_entries, samples, window=(since, until))
     )
 
     records = _boot_records(args.robot_db, since, until)
