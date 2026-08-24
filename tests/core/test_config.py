@@ -728,3 +728,97 @@ def test_a_collapsed_micro_motion_band_is_rejected_at_load() -> None:
                 }
             }
         )
+
+
+# ── The echo tail and the guard window (#467) ────────────────────────────────────────────────
+
+
+def test_an_echo_tail_shorter_than_the_dac_drain_is_rejected() -> None:
+    """⚠️ The relation nothing asserted, and it cost $0.50 in eight minutes.
+
+    ``echo_tail_ms`` is armed at ``end_response``, which fires when the last delta is handed to
+    the *speaker* — not when the room goes quiet. ``Speaker.play()`` counts frames the device
+    **accepted into its ring buffer**, so ~107 ms of the reply at 24 kHz is still being clocked
+    out when the tail starts counting. The shipped 150 ms therefore left ~43 ms of real slack, and
+    the end of the robot's own voice went up the uplink as user audio — AVID-159's defect
+    returning through a door nobody was watching.
+    """
+    with pytest.raises(ValidationError, match=r"echo_tail_ms"):
+        Config.model_validate(
+            {
+                "speaker": {"sample_rate": 24000},
+                "gate": {"echo_tail_ms": 150, "guard_window_ms": 700},
+            }
+        )
+
+
+def test_the_required_tail_is_computed_from_the_speakers_rate_not_restated() -> None:
+    """A rig at a different rate is checked against **its own** number (CLAUDE.md §7.1).
+
+    Halving the sample rate doubles how long the same 2560-frame ring takes to drain, so a tail
+    that is comfortable at 24 kHz is not at 12 kHz. A literal "107 ms" in the validator would pass
+    that rig silently, which is drift with a delay fuse.
+    """
+    # 2560 frames at 12 kHz is ~213 ms, so 250 ms no longer clears it with 100 ms of slack.
+    with pytest.raises(ValidationError, match=r"echo_tail_ms"):
+        Config.model_validate(
+            {
+                "speaker": {"sample_rate": 12000},
+                "gate": {"echo_tail_ms": 250, "guard_window_ms": 700},
+            }
+        )
+    # ...and the same tail is fine at 48 kHz, where the ring drains in ~53 ms.
+    ok = Config.model_validate(
+        {
+            "speaker": {"sample_rate": 48000},
+            "gate": {"echo_tail_ms": 250, "guard_window_ms": 700},
+        }
+    )
+    assert ok.gate.echo_tail_ms == 250
+
+
+def test_a_guard_window_inside_the_echo_tail_is_rejected() -> None:
+    """A guard shorter than the tail is a knob that does nothing while appearing to.
+
+    The tail already refuses every frame while it runs, so a guard window inside it never judges
+    anything. That is the failure ``_think_timeout_precedes_the_idle_close`` exists to prevent for
+    its own pair: a timer that can never fire is worse than no timer, because someone believes in
+    it.
+    """
+    with pytest.raises(ValidationError, match=r"guard_window_ms"):
+        Config.model_validate(
+            {
+                "speaker": {"sample_rate": 24000},
+                "gate": {"echo_tail_ms": 250, "guard_window_ms": 200},
+            }
+        )
+
+
+def test_both_shipped_profiles_carry_the_guard_and_the_backstop_explicitly() -> None:
+    """⚠️ Explicit in both profiles, because a missing key on the Pi falls back **silently**.
+
+    ``deploy/PI_OPERATIONS.md``'s standing rule, and these four keys are exactly the kind it was
+    written about: absent, the robot still runs, still answers, and still self-triggers — it just
+    does it on schema defaults nobody chose, which reads identically to a rig that was configured.
+    """
+    for profile in (_SIM_TOML, _PI_TOML):
+        config = load_config(profile)
+        assert config.gate.guard_window_ms == 700
+        assert config.gate.reactive_window_s == 120.0
+        assert config.gate.reactive_back_to_back_s == 1.5
+        assert config.gate.reactive_budget == 4
+        assert config.gate.echo_tail_ms == 250
+        # The guard must outlast the tail on every shipped rig, not merely be permitted to.
+        assert config.gate.guard_window_ms >= config.gate.echo_tail_ms
+
+
+def test_the_guard_window_covers_the_observed_re_trigger() -> None:
+    """The one measurement there is: the rig re-triggered **370 ms** after `playback_finished`.
+
+    Not a proof that 700 ms is right — it is uncalibrated and says so — but a floor under it. A
+    guard that does not span the single self-trigger anyone has actually watched would be a knob
+    chosen to look reasonable rather than to catch the defect it was added for.
+    """
+    observed_re_trigger_ms = 370
+    for profile in (_SIM_TOML, _PI_TOML):
+        assert load_config(profile).gate.guard_window_ms > observed_re_trigger_ms

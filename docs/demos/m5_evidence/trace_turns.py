@@ -235,6 +235,10 @@ async def main() -> int:
         highpass_hz=config.gate.highpass_hz,
         highpass_order=config.gate.highpass_order,
         echo_tail_ms=config.gate.echo_tail_ms,
+        guard_window_ms=config.gate.guard_window_ms,
+        reactive_window_s=config.gate.reactive_window_s,
+        reactive_back_to_back_s=config.gate.reactive_back_to_back_s,
+        reactive_budget=config.gate.reactive_budget,
         capture_stall_s=config.gate.capture_stall_s,
         loopback=False,
     )

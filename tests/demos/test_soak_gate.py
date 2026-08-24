@@ -102,21 +102,37 @@ def _samples_db(
     INCONCLUSIVE on LIVE for a reason having nothing to do with their subject. That is this
     project's own lesson pointed at itself: *the thing a fixture leaves out is the thing that
     breaks.* ``alive=False`` writes the pre-#452 shape, which is what an old build produces.
+
+    ⚠️ ``payload`` carries a **healthy** ``/metrics`` body for the same reason, and it was added
+    the same way — by SELF (#467) turning every test in this file INCONCLUSIVE the moment it
+    landed, because a fixture with no payload has no ``reactive_turns`` and absent is not zero
+    (#380). The body is deliberately minimal and self-consistent: two reactive turns, one
+    proactive trigger, nothing refused.
     """
     path = tmp_path / "samples.db"
     states = ("IDLE", "LISTENING", "THINKING", "SPEAKING")
+    healthy = json.dumps(
+        {
+            "metrics": {
+                "reactive_turns": 2,
+                "triggers_fired": 1,
+                "admission_refusals": {},
+            }
+        }
+    )
     conn = soak._open_samples(path)
     with conn:
         for i, at in enumerate(ats):
             conn.execute(
                 "INSERT INTO samples (at, reachable, build, uptime_s, dropped, state, "
-                "transitions) VALUES (?,1,?,?,0,?,?)",
+                "transitions, payload) VALUES (?,1,?,?,0,?,?,?)",
                 (
                     at,
                     (builds[i] if builds else _BUILD),
                     (uptimes[i] if uptimes else 60),
                     (states[i % len(states)] if alive else None),
                     (i if alive else None),
+                    healthy,
                 ),
             )
     conn.close()

@@ -60,7 +60,19 @@ session_idle_close_s = 30
 # guess and gated out real speech; the rig, the table and the caveats live beside the same key in
 # config/pi.toml, which is where the measurement was actually taken.
 barge_in_margin_db   = 3.0
-echo_tail_ms         = 150       # uplink stays shut this long after a reply ends (DAC drain)
+# 150 -> 250 (#467): the tail is armed before the DAC has drained, so 150 left ~43 ms of real
+# slack. Asserted against [speaker] sample_rate by Config.
+echo_tail_ms         = 250       # uplink stays shut this long after a reply ends (DAC drain)
+# How long after a reply a new turn ORIGIN is still judged against the frozen echo floor (#467).
+# A different job from the tail: that one is about streaming, this one is about who may start a
+# turn. The rig re-triggered 370 ms after a reply, past the tail, and was never tested.
+guard_window_ms      = 700
+# The backstop: after this many origins arriving back-to-back with the robot's own replies, the
+# guard stops expiring until a quiet window passes. A cap on turns that never proved they came
+# from a human, not a cap on turns.
+reactive_window_s        = 120.0
+reactive_back_to_back_s  = 1.5
+reactive_budget          = 4
 capture_stall_s      = 5.0       # §10.5/#347 — mic silent this long = stalled, not ignored
 # §6.9's escape hatch: no first audio delta this long after the falling edge -> DEGRADED (#171).
 # MUST be < session_idle_close_s, asserted in Config — the idle close cancels this timer and

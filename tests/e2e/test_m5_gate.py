@@ -95,7 +95,8 @@ _FRAME_BYTES = 320  # 16000 * 1 * 2 * 10 // 1000
 _SILENCE_HOLD_MS = 20
 # The uplink's DAC-drain tail (§6.2.4). Passed explicitly since AVID-180: a value this rig
 # never varies is still a value the harness must state, or it silently reports someone else's.
-_ECHO_TAIL_MS = 150
+_ECHO_TAIL_MS = 250
+_GUARD_WINDOW_MS = 700
 _RING_BUFFER_MS = 300
 
 # A recognizable, non-silent frame: explicit pcm skips FakeMicrophone's tone synth, so the P8
@@ -383,6 +384,10 @@ async def _drive_session(
         highpass_hz=highpass_hz,
         highpass_order=highpass_order,
         echo_tail_ms=_ECHO_TAIL_MS,
+        guard_window_ms=_GUARD_WINDOW_MS,
+        reactive_window_s=120.0,
+        reactive_back_to_back_s=1.5,
+        reactive_budget=4,
         capture_stall_s=5.0,
         # The M5 seam: assistant PCM arrives through the TurnSink, not an M4 echo (#103).
         loopback=False,

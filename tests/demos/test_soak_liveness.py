@@ -780,3 +780,153 @@ def test_the_bound_is_read_from_config_not_restated(tmp_path: Path) -> None:
     args = _args(tmp_path, _samples_db(tmp_path, healthy), since=since, until=until)
     live = {c.ac: c for c in soak._grade(args)}["LIVE"]
     assert any(f"'THINKING': {_THINK_BOUND}" in row for row in live.rows)
+
+
+# ── SELF: turns nobody asked for (#467) ──────────────────────────────────────────────────────
+
+
+def _metrics_samples(
+    rows: list[dict[str, object]], *, start: int = 1_787_000_000
+) -> list[sqlite3.Row]:
+    """Samples carrying a `/metrics` payload and nothing else — SELF reads only the payload."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE samples (at INTEGER, payload TEXT)")
+    for i, body in enumerate(rows):
+        conn.execute(
+            "INSERT INTO samples (at, payload) VALUES (?,?)",
+            (start + i * 60, None if body is None else json.dumps({"metrics": body})),
+        )
+    return list(conn.execute("SELECT * FROM samples ORDER BY at"))
+
+
+def _played(count: int, *, start: int = 1_787_000_000) -> list[dict[str, object]]:
+    return [{"at": start + i, "kind": "played"} for i in range(count)]
+
+
+def test_self_is_inconclusive_when_the_build_has_no_counter() -> None:
+    """⚠️ Absent is not zero, and this is the exact shape that voided the first M11 window.
+
+    A build predating the counter reports nothing. Nothing must not read as "the robot answered
+    itself zero times" — a window that cannot ask the question has not answered it (#380).
+    """
+    samples = _metrics_samples([{"turns": 4}, {"turns": 5}])
+    criterion = soak._self_trigger_criterion(
+        [], samples, window=(1_787_000_000, 1_787_999_999)
+    )
+    assert criterion.verdict == "inconclusive"
+    assert "ABSENT" in criterion.detail
+
+
+def test_self_fails_when_turns_cannot_be_accounted_for() -> None:
+    """The 2026-08-24 runaway, in the shape the grader would have seen it.
+
+    29 turns nobody asked for, no load utterances, no proactive triggers. The excess is the whole
+    of it.
+    """
+    samples = _metrics_samples(
+        [
+            {"reactive_turns": 8, "triggers_fired": 0, "admission_refusals": {}},
+            {"reactive_turns": 37, "triggers_fired": 0, "admission_refusals": {}},
+        ]
+    )
+    criterion = soak._self_trigger_criterion(
+        [], samples, window=(1_787_000_000, 1_787_999_999)
+    )
+    assert criterion.verdict == "fail"
+    assert "unaccounted for" in criterion.detail
+
+
+def test_a_window_of_honest_work_passes() -> None:
+    """Every reactive turn explained by an utterance the generator played."""
+    samples = _metrics_samples(
+        [{"reactive_turns": 10, "triggers_fired": 0, "admission_refusals": {}}]
+    )
+    criterion = soak._self_trigger_criterion(
+        _played(10), samples, window=(1_787_000_000, 1_787_999_999)
+    )
+    assert criterion.verdict == "pass"
+
+
+def test_proactive_turns_are_accounted_for_and_do_not_count_against_the_robot() -> None:
+    """A robot that spoke first because §10.4 let it is not a robot talking to itself.
+
+    Without this, a window with healthy proactivity would fail SELF — which would teach a reader
+    to ignore the criterion, the failure LIVE's own docstring warns about.
+    """
+    samples = _metrics_samples(
+        [{"reactive_turns": 12, "triggers_fired": 12, "admission_refusals": {}}]
+    )
+    criterion = soak._self_trigger_criterion(
+        [], samples, window=(1_787_000_000, 1_787_999_999)
+    )
+    assert criterion.verdict == "pass"
+
+
+def test_the_ambiguity_with_a_real_person_is_stated_rather_than_hidden() -> None:
+    """⚠️ The criterion cannot tell a human from an echo, and must say so where it is read.
+
+    Reporting a verdict whose limits live only in a docstring is how a number gets quoted as
+    stronger evidence than it is. The caveat belongs in the rows, beside the figure.
+    """
+    samples = _metrics_samples(
+        [{"reactive_turns": 3, "triggers_fired": 0, "admission_refusals": {}}]
+    )
+    criterion = soak._self_trigger_criterion(
+        [], samples, window=(1_787_000_000, 1_787_999_999)
+    )
+    assert any("human" in row and "echo" in row for row in criterion.rows)
+
+
+def test_the_refusal_histogram_survives_a_restart_without_double_counting() -> None:
+    """Process-scoped, like every counter here: max per rule, never sum and never last.
+
+    Summing would double-count a window that restarted; the last reading reports a fresh
+    process's zero over a runaway that ran for hours before it.
+    """
+    samples = _metrics_samples(
+        [
+            {"admission_refusals": {"echo_tail": 40}},
+            {"admission_refusals": {"echo_tail": 55}},
+            {"admission_refusals": {"echo_tail": 2}},  # restarted
+        ]
+    )
+    assert soak._refusal_totals(samples) == {"echo_tail": 55}
+
+
+def test_a_malformed_payload_costs_the_refusal_histogram_nothing() -> None:
+    """Never raises: one corrupt row must not cost the report every other row."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE samples (at INTEGER, payload TEXT)")
+    conn.execute("INSERT INTO samples VALUES (1, 'not json')")
+    conn.execute("INSERT INTO samples VALUES (2, ?)", (json.dumps({"metrics": None}),))
+    conn.execute(
+        "INSERT INTO samples VALUES (3, ?)",
+        (json.dumps({"metrics": {"admission_refusals": {"echo_floor": 7}}}),),
+    )
+    rows = list(conn.execute("SELECT * FROM samples ORDER BY at"))
+    assert soak._refusal_totals(rows) == {"echo_floor": 7}
+
+
+def test_load_and_self_grade_opposite_failures_off_the_same_evidence() -> None:
+    """⚠️ Why SELF has to exist at all: a self-conversation makes LOAD look HEALTHIER.
+
+    LOAD grades "every utterance played produced a turn", and the generator decides a turn
+    happened by watching the robot's turn counter rise. A robot answering itself raises that
+    counter — so the very defect SELF exists for improves the other criterion's evidence. That is
+    §7.1's report-describing-something-other-than-the-run, one criterion over.
+    """
+    played = _played(3)
+    samples = _metrics_samples(
+        [{"reactive_turns": 40, "triggers_fired": 0, "admission_refusals": {}}]
+    )
+    window = (1_787_000_000, 1_787_999_999)
+
+    load = soak._load_criterion(played, samples, window=window)
+    self_trigger = soak._self_trigger_criterion(played, samples, window=window)
+
+    assert load.verdict == "pass", "the premise of this test changed"
+    assert self_trigger.verdict == "fail", (
+        "SELF passed a window LOAD could not see through -- the two must not agree here"
+    )

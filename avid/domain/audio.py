@@ -27,7 +27,7 @@ import math
 from array import array
 from collections import deque
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, TypeAlias
 
 from avid.domain.events import Event
 
@@ -180,31 +180,51 @@ class AudioPreRoll:
     def __init__(self, *, capacity_ms: int, bytes_per_ms: int) -> None:
         self._capacity_bytes = capacity_ms * bytes_per_ms
         self._bytes_per_ms = bytes_per_ms
-        self._frames: deque[bytes] = deque()
+        self._frames: deque[tuple[bytes, bool]] = deque()
         self._buffered_bytes = 0
 
-    def append(self, pcm: bytes) -> None:
+    def append(self, pcm: bytes, *, echo: bool) -> None:
         """Add a captured frame, evicting the oldest frames until back within capacity.
 
         The newest frame is never evicted — a frame on its own larger than the whole
         capacity is kept, so the buffer is never emptied by a single oversized append.
+
+        *echo* is the caller's verdict on this frame: ``True`` when the admission gate judged it
+        to be the robot's own voice rather than a person. It is recorded rather than acted on
+        here, because :meth:`drain` is where it changes anything.
         """
-        self._frames.append(pcm)
+        self._frames.append((pcm, echo))
         self._buffered_bytes += len(pcm)
         while self._buffered_bytes > self._capacity_bytes and len(self._frames) > 1:
-            self._buffered_bytes -= len(self._frames.popleft())
+            self._buffered_bytes -= len(self._frames.popleft()[0])
 
     def drain(self) -> bytes:
-        """Return all buffered audio oldest-first as one blob, then clear the buffer.
+        """Return the trailing run of **non-echo** audio oldest-first, then clear the buffer.
 
         This is the replay step: on ``audio.speech_started`` the pre-roll is drained into
         the opening session ahead of the live stream, and emptied so the next silence
         starts fresh.
+
+        ⚠️ **Echo-flagged frames are dropped, and that is what stops one bad admit becoming a
+        conversation (#467).** The ring is fed on every captured frame, the robot's own voice
+        included, and the replay used to be unconditional — so a single frame that scraped past
+        the margin did not send *one* frame of echo to the model, it sent up to 300 ms of the
+        robot's own contiguous speech, labelled as the user. That is more than enough to
+        transcribe and answer, which is how a false admit became twenty-six turns.
+
+        Only the **trailing contiguous run** is returned, so a genuine mid-reply barge-in keeps
+        its leading phonemes (AVID-161): those frames cleared the margin, so they are not flagged,
+        and they are exactly the ones adjacent to the rising edge. Everything the robot said
+        before the user cut in sits earlier in the ring and is discarded.
         """
-        blob = b"".join(self._frames)
+        keep: deque[bytes] = deque()
+        for pcm, echo in reversed(self._frames):
+            if echo:
+                break
+            keep.appendleft(pcm)
         self._frames.clear()
         self._buffered_bytes = 0
-        return blob
+        return b"".join(keep)
 
     @property
     def buffered_ms(self) -> int:
@@ -380,3 +400,164 @@ class EchoFloor:
         on real hardware, reachable by config alone (SDS §6.3).
         """
         return frame_dbfs >= self._dbfs + margin_db
+
+
+# ── The admission gate — who is allowed to start a turn (SDS §6.2.4, #467) ────────────────────
+
+#: The frame did not clear the echo floor while playback was in flight. §6.2.4's step 0.
+ECHO_FLOOR = "echo_floor"
+#: The frame did not clear the floor frozen at the last playback episode's close, inside
+#: ``[gate] guard_window_ms``. The room is still ringing; the robot is not a second speaker.
+ECHO_TAIL = "echo_tail"
+#: The backstop: too many origins arrived back-to-back with the robot's own replies, so the guard
+#: has stopped expiring and this frame was tested when it otherwise would not have been.
+REACTIVE_BUDGET = "reactive_budget"
+
+#: Every rule that can refuse a turn origin, pinned in one place — the sibling of
+#: :data:`~avid.domain.behavior.POLICY_RULES`, and pinned for the same reason.
+#:
+#: These strings are not internal. They are the keys of the ``admission_refusals`` map on
+#: ``/metrics`` (§3.12.2) and the vocabulary the soak's self-trigger criterion groups by (§12.6).
+#: A rename on one side and not the other splits a histogram bucket in two, and this histogram is
+#: the only instrument that can tell a working gate from one that never ran.
+ADMISSION_RULES: frozenset[str] = frozenset({ECHO_FLOOR, ECHO_TAIL, REACTIVE_BUDGET})
+
+#: The refusals whose frame is *calibration data* and must be folded back into the floor.
+#:
+#: Deliberately a subset. An acoustic refusal means "this was the robot", and §6.2.4 requires such
+#: a frame to feed :meth:`EchoFloor.observe` — a rejected frame **is** the coupling measurement.
+#: :data:`REACTIVE_BUDGET` is not acoustic: it says the *policy* held the guard open, and folding
+#: those frames in would let a runaway teach the floor its own voice.
+ACOUSTIC_RULES: frozenset[str] = frozenset({ECHO_FLOOR, ECHO_TAIL})
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AdmissionLimits:
+    """The thresholds :func:`evaluate_admission` compares against — injected from ``[gate]``.
+
+    Parameters rather than constants, for the reason :class:`~avid.domain.behavior.PolicyLimits`
+    gives: these get tuned against a real rig, and a threshold baked into a function body makes
+    that a code change instead of a config edit. ⚠️ ``barge_in_margin_db`` in particular is marked
+    UNCALIBRATED in ``config/pi.toml`` — it was tuned at one amp volume with the capture mixer's
+    AGC in an unknown state (AVID-296).
+    """
+
+    barge_in_margin_db: float  # how far above the floor a frame must be to be the user
+    guard_window_s: float  # how long after a reply a new origin is still judged
+    reactive_window_s: float  # the backstop's rolling window
+    reactive_back_to_back_s: (
+        float  # an origin this soon after a reply is "back-to-back"
+    )
+    reactive_budget: int  # this many back-to-back origins hold the guard open
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AdmissionContext:
+    """Everything the admission rules read, and nothing else.
+
+    Assembled by ``AudioService`` per captured frame. Ages are **seconds since**, not timestamps,
+    so the rules never subtract and never need to know what kind of clock produced them — ``inf``
+    is the honest value for "no reply has ever finished", and it makes every comparison read
+    correctly without a ``None`` branch per rule.
+
+    ⚠️ ``floor_dbfs`` is **not** always the live floor. While playback is in flight it is; inside
+    the guard window it is the floor **frozen at the moment the episode closed**. That distinction
+    is load-bearing and is the caller's job: with no playback :class:`EchoFloor` decays toward
+    ambience, so a decaying echo would clear ``live floor + margin`` trivially and the guard would
+    admit exactly what it exists to refuse.
+    """
+
+    frame_dbfs: float
+    floor_dbfs: float
+    playback_live: bool
+    since_playback_s: float  # inf until the first episode closes
+    back_to_back_turns: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Admitted:
+    """No rule refused: this frame may start (or continue) a turn.
+
+    ``tested`` records whether any margin was actually consulted. ⚠️ It exists because on
+    2026-08-24 the gate's report could not distinguish **"nothing was suppressed"** from
+    **"nothing was tested"**: it logged ``0 suppressed`` for eight minutes while the robot
+    answered itself twenty-six times, and both readings print identically (#467). A gate that
+    cannot say whether it ran is not a gate.
+    """
+
+    tested: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Refused:
+    """A rule refused the origin. ``rule`` is always a member of :data:`ADMISSION_RULES`.
+
+    ``headroom_db`` is how far short the frame fell — negative, and the *calibration datum*: the
+    distance between the two populations §6.2.4 warns may not separate. Reporting the closest
+    near-miss is what makes an ordinary bench run a calibration run.
+    """
+
+    rule: str
+    headroom_db: float
+
+
+AdmissionResult: TypeAlias = Admitted | Refused
+
+
+def evaluate_admission(
+    ctx: AdmissionContext, *, limits: AdmissionLimits
+) -> AdmissionResult:
+    """Decide whether a frame may originate a turn (SDS §6.2.4 step 0); first refusal wins.
+
+    Pure — no I/O, no clock, no globals. Returns :class:`Admitted` or :class:`Refused`; the caller
+    counts either way.
+
+    ⚠️ **This function exists because the decision it makes used to be four concerns fused inside
+    ``AudioService``** — the uplink predicate, the margin, the floor mutation and the telemetry —
+    and exactly one of the four was reachable from a unit test. The one that failed on the rig was
+    the predicate: outside the "uplink shut" window the service short-circuited to *admit*, so a
+    rising edge 370 ms after a reply was never compared with anything (#467).
+
+    The order is normative and each rule earns its position:
+
+    1. **Echo floor** — playback is live, so §6.2.4's step 0 applies unchanged: the frame is the
+       user only if it clears the running echo floor by the margin.
+    2. **Echo tail** — playback ended recently. The model is finished but *the room is not*: the
+       DAC is still draining and the room is still ringing. Judged against the frozen floor.
+    3. **Reactive budget** — the backstop. When origins keep arriving back-to-back with the
+       robot's own replies, the guard **stops expiring** and every origin must prove itself,
+       however long ago playback ended.
+
+    Rules 2 and 3 share a comparison but not a meaning, and they report separately on purpose: a
+    refusal under :data:`ECHO_TAIL` says the room was still loud, and one under
+    :data:`REACTIVE_BUDGET` says the robot had been re-triggering itself. Collapsing them would
+    leave the metric unable to say which.
+
+    ⚠️ **Rule 3 is a cap on turns that never proved they came from a human — not a cap on turns.**
+    The measured runaway ran at 3.25 turns/min; a fast human exchange with this robot is 5-6/min,
+    so it was *slower than a conversation* and **no rate threshold separates them at any value**.
+    What separates them is the gap to the robot's own reply: the runaway re-triggered 370 ms after
+    ``playback_finished``, and a person has to hear the reply end first. An owner at conversational
+    distance clears the margin trivially; the robot's own decay cannot, by construction — which is
+    the entire premise of :class:`EchoFloor`.
+    """
+    headroom = ctx.frame_dbfs - (ctx.floor_dbfs + limits.barge_in_margin_db)
+
+    if ctx.playback_live:
+        if headroom < 0.0:
+            return Refused(rule=ECHO_FLOOR, headroom_db=headroom)
+        return Admitted(tested=True)
+
+    in_guard = ctx.since_playback_s < limits.guard_window_s
+    budget_spent = ctx.back_to_back_turns >= limits.reactive_budget
+    if in_guard or budget_spent:
+        if headroom < 0.0:
+            # The guard window is the acoustic reason; an exhausted budget on its own is the
+            # policy one. Naming the acoustic reason first keeps the histogram honest — a
+            # refusal inside the window would have happened whatever the budget said.
+            rule = ECHO_TAIL if in_guard else REACTIVE_BUDGET
+            return Refused(rule=rule, headroom_db=headroom)
+        return Admitted(tested=True)
+
+    # Ordinary turn-taking, and §6.2.4's promise that it is never tested against the margin.
+    return Admitted(tested=False)

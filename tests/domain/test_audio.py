@@ -14,6 +14,14 @@ import pytest
 
 from avid.core.config import Config, load_config
 from avid.domain import (
+    ADMISSION_RULES,
+    ECHO_FLOOR,
+    ECHO_TAIL,
+    REACTIVE_BUDGET,
+    AdmissionContext,
+    AdmissionLimits,
+    AdmissionResult,
+    Admitted,
     AudioPlaybackFinished,
     AudioPlaybackStarted,
     AudioPreRoll,
@@ -22,6 +30,8 @@ from avid.domain import (
     EchoFloor,
     Event,
     HighPass,
+    Refused,
+    evaluate_admission,
     rms_dbfs,
 )
 from avid.domain.audio import SILENCE_DBFS
@@ -131,18 +141,18 @@ _BPMS = 1
 
 def test_drains_in_order_within_capacity() -> None:
     buf = AudioPreRoll(capacity_ms=10, bytes_per_ms=_BPMS)
-    buf.append(b"aa")
-    buf.append(b"bb")
-    buf.append(b"cc")
+    buf.append(b"aa", echo=False)
+    buf.append(b"bb", echo=False)
+    buf.append(b"cc", echo=False)
     assert buf.buffered_ms == 6
     assert buf.drain() == b"aabbcc"
 
 
 def test_capacity_honoured_and_oldest_dropped_on_overflow() -> None:
     buf = AudioPreRoll(capacity_ms=4, bytes_per_ms=_BPMS)
-    buf.append(b"aa")  # 2
-    buf.append(b"bb")  # 4 — at capacity
-    buf.append(b"cc")  # 6 -> evict "aa" -> 4
+    buf.append(b"aa", echo=False)  # 2
+    buf.append(b"bb", echo=False)  # 4 — at capacity
+    buf.append(b"cc", echo=False)  # 6 -> evict "aa" -> 4
     assert buf.buffered_ms == 4
     assert buf.buffered_ms <= 4  # capacity in ms honoured
     assert buf.drain() == b"bbcc"  # oldest ("aa") gone, order preserved
@@ -150,7 +160,7 @@ def test_capacity_honoured_and_oldest_dropped_on_overflow() -> None:
 
 def test_drain_clears_the_buffer() -> None:
     buf = AudioPreRoll(capacity_ms=10, bytes_per_ms=_BPMS)
-    buf.append(b"aa")
+    buf.append(b"aa", echo=False)
     assert buf.drain() == b"aa"
     assert buf.buffered_ms == 0
     assert buf.drain() == b""
@@ -160,7 +170,7 @@ def test_single_oversized_frame_is_retained() -> None:
     """A frame larger than the whole capacity is kept — the buffer is never emptied to
     nothing by one oversized append (the newest frame is never evicted)."""
     buf = AudioPreRoll(capacity_ms=2, bytes_per_ms=_BPMS)
-    buf.append(b"aaaaa")  # 5 ms into a 2 ms buffer
+    buf.append(b"aaaaa", echo=False)  # 5 ms into a 2 ms buffer
     assert buf.buffered_ms == 5
     assert buf.drain() == b"aaaaa"
 
@@ -168,8 +178,8 @@ def test_single_oversized_frame_is_retained() -> None:
 def test_bytes_per_ms_scales_buffered_ms() -> None:
     """buffered_ms reflects the injected frame size, not raw byte count."""
     buf = AudioPreRoll(capacity_ms=300, bytes_per_ms=48)  # 24 kHz mono 16-bit
-    buf.append(b"\x00" * 48)  # exactly 1 ms
-    buf.append(b"\x00" * 96)  # 2 ms
+    buf.append(b"\x00" * 48, echo=False)  # exactly 1 ms
+    buf.append(b"\x00" * 96, echo=False)  # 2 ms
     assert buf.buffered_ms == 3
 
 
@@ -464,3 +474,254 @@ def test_the_shipped_filter_is_what_the_config_defaults_ship() -> None:
     for profile in (_SIM_TOML, _PI_TOML):
         loaded = load_config(profile).gate
         assert (loaded.highpass_hz, loaded.highpass_order) == (150.0, 3)
+
+
+# ── The admission gate (§6.2.4 step 0, #467) ─────────────────────────────────────────────────
+#
+# Table-driven off tests/domain/test_behavior.py's shape, because this IS that gate's sibling and
+# it exists for the same reason: the decision used to be four concerns fused inside AudioService,
+# and exactly one of them was reachable from a test. The one that failed was not.
+
+_ADMISSION_LIMITS = AdmissionLimits(
+    barge_in_margin_db=3.0,
+    guard_window_s=0.7,
+    reactive_window_s=120.0,
+    reactive_back_to_back_s=1.5,
+    reactive_budget=4,
+)
+
+
+def actx(**overrides: object) -> AdmissionContext:
+    """A context that is **admitted untested** — ordinary turn-taking — minus one thing.
+
+    The baseline is a person speaking in a quiet room a long time after the robot last said
+    anything: nothing is playing, the guard has long expired, and the backstop is nowhere near
+    its budget. Every case below is that moment minus exactly one thing, which is what makes a
+    failure point at a rule rather than at a fixture.
+    """
+    base: dict[str, object] = {
+        "frame_dbfs": -20.0,
+        "floor_dbfs": -40.0,
+        "playback_live": False,
+        "since_playback_s": math.inf,
+        "back_to_back_turns": 0,
+    }
+    base.update(overrides)
+    return AdmissionContext(**base)  # type: ignore[arg-type]
+
+
+def admit(ctx: AdmissionContext) -> AdmissionResult:
+    return evaluate_admission(ctx, limits=_ADMISSION_LIMITS)
+
+
+ADMISSION_CASES = [
+    # name, overrides, expected refusal rule (None == admitted)
+    ("quiet_room_ordinary_turn", {}, None),
+    (
+        "robot_is_speaking_and_the_frame_is_its_own_echo",
+        {"playback_live": True, "frame_dbfs": -39.0},
+        ECHO_FLOOR,
+    ),
+    (
+        "robot_is_speaking_and_the_user_is_louder",
+        {"playback_live": True, "frame_dbfs": -30.0},
+        None,
+    ),
+    (
+        "the_reply_just_ended_and_the_room_is_still_ringing",
+        {"since_playback_s": 0.37, "frame_dbfs": -39.0},
+        ECHO_TAIL,
+    ),
+    (
+        "the_reply_just_ended_and_a_person_answers",
+        {"since_playback_s": 0.37, "frame_dbfs": -30.0},
+        None,
+    ),
+    (
+        "the_backstop_holds_the_guard_open_long_after_the_reply",
+        {"since_playback_s": 60.0, "back_to_back_turns": 4, "frame_dbfs": -39.0},
+        REACTIVE_BUDGET,
+    ),
+    (
+        "the_backstop_still_lets_a_person_through",
+        {"since_playback_s": 60.0, "back_to_back_turns": 4, "frame_dbfs": -30.0},
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "rule"),
+    [(o, r) for _, o, r in ADMISSION_CASES],
+    ids=[name for name, _, _ in ADMISSION_CASES],
+)
+def test_the_admission_table(overrides: dict[str, object], rule: str | None) -> None:
+    verdict = admit(actx(**overrides))
+    if rule is None:
+        assert isinstance(verdict, Admitted), f"expected admission, got {verdict}"
+    else:
+        assert isinstance(verdict, Refused), f"expected {rule}, got {verdict}"
+        assert verdict.rule == rule
+
+
+def test_every_refusal_names_a_rule_from_the_pinned_vocabulary() -> None:
+    """The strings travel to `/metrics` and to the soak's criterion. One vocabulary, both sides.
+
+    Asserted at the write site, exactly as `evaluate_policy`'s reasons are: a rule renamed on one
+    side and not the other silently splits a histogram bucket in two, and this histogram is the
+    only instrument that can tell a working gate from one that never ran.
+    """
+    for name, overrides, rule in ADMISSION_CASES:
+        if rule is None:
+            continue
+        verdict = admit(actx(**overrides))
+        assert isinstance(verdict, Refused), name
+        assert verdict.rule in ADMISSION_RULES, name
+
+
+def test_the_margin_boundary_admits_and_one_epsilon_below_refuses() -> None:
+    """Exactly at floor + margin is the user; a hair under is the robot. Both directions."""
+    at_the_line = actx(playback_live=True, floor_dbfs=-40.0, frame_dbfs=-37.0)
+    assert isinstance(admit(at_the_line), Admitted)
+
+    just_under = actx(playback_live=True, floor_dbfs=-40.0, frame_dbfs=-37.001)
+    verdict = admit(just_under)
+    assert isinstance(verdict, Refused)
+    assert verdict.rule == ECHO_FLOOR
+
+
+def test_the_guard_window_boundary_stops_testing_exactly_when_it_expires() -> None:
+    """At `guard_window_s` the frame is ordinary turn-taking; a hair inside, it is judged.
+
+    ⚠️ The `tested` flag is the assertion, not the verdict. A quiet frame is *admitted* on both
+    sides of the boundary — what changes is whether anything was consulted, and conflating those
+    is precisely the failure that let the rig log `0 suppressed` for eight minutes.
+    """
+    quiet = {"frame_dbfs": -50.0, "floor_dbfs": -40.0}
+
+    expired = admit(actx(since_playback_s=0.7, **quiet))
+    assert isinstance(expired, Admitted)
+    assert not expired.tested, (
+        "the guard was still testing after it should have expired"
+    )
+
+    inside = admit(actx(since_playback_s=0.699, **quiet))
+    assert isinstance(inside, Refused)
+    assert inside.rule == ECHO_TAIL
+
+
+def test_the_backstop_bites_at_the_budget_and_not_one_origin_earlier() -> None:
+    quiet = {"frame_dbfs": -50.0, "floor_dbfs": -40.0, "since_playback_s": 60.0}
+
+    under = admit(actx(back_to_back_turns=3, **quiet))
+    assert isinstance(under, Admitted)
+    assert not under.tested
+
+    at_budget = admit(actx(back_to_back_turns=4, **quiet))
+    assert isinstance(at_budget, Refused)
+    assert at_budget.rule == REACTIVE_BUDGET
+
+
+def test_the_acoustic_reason_is_reported_when_both_would_refuse() -> None:
+    """Inside the guard AND over budget reports `echo_tail`, because that is the true reason.
+
+    The order matters to the histogram rather than to the robot: a refusal inside the window would
+    have happened whatever the budget said, so attributing it to the backstop would overstate how
+    often the backstop was needed.
+    """
+    verdict = admit(
+        actx(
+            since_playback_s=0.1,
+            back_to_back_turns=99,
+            frame_dbfs=-50.0,
+            floor_dbfs=-40.0,
+        )
+    )
+    assert isinstance(verdict, Refused)
+    assert verdict.rule == ECHO_TAIL
+
+
+def test_headroom_is_the_signed_distance_to_the_bar() -> None:
+    """`headroom_db` is the calibration datum: how close the closest near-miss came.
+
+    Negative on a refusal, and its magnitude is what a rig session reads to decide whether the two
+    populations §6.2.4 warns about actually separate.
+    """
+    verdict = admit(actx(playback_live=True, floor_dbfs=-40.0, frame_dbfs=-39.0))
+    assert isinstance(verdict, Refused)
+    assert verdict.headroom_db == pytest.approx(-2.0)
+
+
+def test_a_huge_margin_is_full_half_duplex_by_config_alone() -> None:
+    """SDS §6.3's documented fallback: no code change, no barge-in, nothing self-triggered."""
+    deaf = AdmissionLimits(
+        barge_in_margin_db=200.0,
+        guard_window_s=0.7,
+        reactive_window_s=120.0,
+        reactive_back_to_back_s=1.5,
+        reactive_budget=4,
+    )
+    verdict = evaluate_admission(
+        actx(playback_live=True, frame_dbfs=0.0, floor_dbfs=-40.0), limits=deaf
+    )
+    assert isinstance(verdict, Refused)
+
+
+def test_the_gate_is_pure_and_deterministic() -> None:
+    """Same context, same limits, same answer — no clock, no globals, nothing accumulated."""
+    context = actx(playback_live=True, frame_dbfs=-39.0)
+    first = admit(context)
+    second = admit(context)
+    assert first == second
+
+
+# ── The pre-roll no longer replays the robot's own voice (#467) ──────────────────────────────
+
+
+def test_echo_frames_are_never_replayed_into_the_session() -> None:
+    """⚠️ The mechanism that turned one bad admit into twenty-six turns.
+
+    The ring is fed on EVERY captured frame, the robot's own voice included, and the replay used
+    to be unconditional. So a single frame scraping past the margin did not send one frame of echo
+    to the model -- it sent up to 300 ms of the robot's contiguous speech, labelled as the user.
+    That is comfortably enough to transcribe and answer.
+    """
+    buf = AudioPreRoll(capacity_ms=100, bytes_per_ms=_BPMS)
+    buf.append(b"rr", echo=True)  # the robot
+    buf.append(b"rr", echo=True)
+    buf.append(b"uu", echo=False)  # the user, who cleared the margin
+
+    assert buf.drain() == b"uu", "the robot's own voice was replayed as the user's"
+
+
+def test_a_genuine_barge_in_keeps_its_leading_phonemes() -> None:
+    """AVID-161 must survive the fix: the trailing non-echo run is exactly the user's words.
+
+    A user who cuts in mid-reply produces frames that clear the margin, so they are not flagged --
+    and they are the ones adjacent to the rising edge. Dropping the whole ring instead would cost
+    them their first word, which is the entire reason the pre-roll exists.
+    """
+    buf = AudioPreRoll(capacity_ms=100, bytes_per_ms=_BPMS)
+    buf.append(b"rr", echo=True)
+    buf.append(b"aa", echo=False)
+    buf.append(b"bb", echo=False)
+
+    assert buf.drain() == b"aabb"
+
+
+def test_a_ring_of_nothing_but_echo_drains_empty() -> None:
+    buf = AudioPreRoll(capacity_ms=100, bytes_per_ms=_BPMS)
+    buf.append(b"rr", echo=True)
+    buf.append(b"rr", echo=True)
+
+    assert buf.drain() == b""
+
+
+def test_only_the_trailing_run_survives_an_interleaving() -> None:
+    """Echo *after* user audio ends the run — the user stopped and the robot was heard again."""
+    buf = AudioPreRoll(capacity_ms=100, bytes_per_ms=_BPMS)
+    buf.append(b"aa", echo=False)
+    buf.append(b"rr", echo=True)
+    buf.append(b"bb", echo=False)
+
+    assert buf.drain() == b"bb"

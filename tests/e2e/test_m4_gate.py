@@ -135,7 +135,11 @@ async def _drive_one_turn(speaker: Speaker) -> _Collector:
         barge_in_margin_db=6.0,
         highpass_hz=150.0,
         highpass_order=3,
-        echo_tail_ms=150,
+        echo_tail_ms=250,
+        guard_window_ms=700,
+        reactive_window_s=120.0,
+        reactive_back_to_back_s=1.5,
+        reactive_budget=4,
         capture_stall_s=5.0,
         # The M4 gate proves the transport loopback (no AI client), so echo mode (#103).
         loopback=True,

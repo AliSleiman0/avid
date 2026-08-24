@@ -410,6 +410,20 @@ class AiConfig(_Section):
 # change — it is not itself a finding, and nothing between 0 and 200 has been tried.
 _MIN_VAD_MARGIN_MS = 200
 
+# The ALSA playback ring's depth in frames — the figure SDS §6.2.4 and SDS:1084 both quote when
+# they say `Speaker.play()` is "optimistic by up to one buffer depth (~107 ms at 24 kHz)".
+#
+# ⚠️ It is a frame count, not a duration, and that is the point: the duration falls out of
+# `[speaker] sample_rate`, so a rig at a different rate gets a different answer without anyone
+# remembering to update a comment. Restating "107 ms" as a literal is drift with a delay fuse
+# (CLAUDE.md §7.1 — read config, never restate it).
+_PLAYBACK_BUFFER_FRAMES = 2560
+
+# How much slack the echo tail must have *beyond* the buffer depth. The depth is what the DAC has
+# yet to emit; this is for the room between the speaker and the microphone, and for the fact that
+# the depth itself is an upper bound rather than a measurement.
+_TAIL_SLACK_MS = 100
+
 
 class GateConfig(_Section):
     """The local attention gate (SDS §6.3 / ADR-007).
@@ -453,7 +467,45 @@ class GateConfig(_Section):
     # in-flight item, and those frames are still the robot. Not applied after a barge-in —
     # ``Speaker.stop`` closes the handle so ALSA drops the buffer outright, and the user is
     # mid-utterance, so re-opening the uplink late would clip the very words that interrupted.
-    echo_tail_ms: int = Field(default=150, ge=0)
+    #
+    # ⚠️ 150 → 250 (#467). 150 ms was never enough and nothing said so: the tail is armed at
+    # ``end_response``, which fires when the last delta is handed to the speaker — up to one
+    # buffer depth BEFORE the DAC drains. Real slack at 24 kHz was ~43 ms. It is now checked
+    # against the speaker's own rate by ``_echo_tail_covers_the_playback_buffer``, which computes
+    # the depth rather than restating it (CLAUDE.md §7.1).
+    echo_tail_ms: int = Field(default=250, ge=0)
+    # How long after a reply a NEW turn origin is still judged against the echo floor (#467).
+    #
+    # ⚠️ This is not the same job as ``echo_tail_ms`` and fusing them is what let the robot answer
+    # itself. The tail is about STREAMING — do not send the DAC's drain to the model. The guard is
+    # about ORIGINS — do not let the room's ringing start a turn. On the rig the robot re-triggered
+    # 370 ms after ``playback_finished``, which was 220 ms past the tail, so nothing was consulted
+    # and the gate logged ``0 suppressed`` while spending $0.50 in eight minutes.
+    #
+    # They need different lengths, which is why they are different knobs: lengthening the tail to
+    # cover a room's echo decay would also swallow 700 ms of a fast user's reply.
+    #
+    # ⚠️ UNCALIBRATED. 700 ms is a starting value chosen to comfortably exceed the observed 370 ms
+    # re-trigger, not a measurement. It is a property of the amp, the mic, the room and the
+    # geometry, and §7 of the #467 plan gives the rig protocol that derives it. Judged against the
+    # floor FROZEN at the episode's close, never the live floor — with no playback the floor
+    # decays toward ambience and a decaying echo would clear it trivially.
+    guard_window_ms: int = Field(default=700, ge=0)
+    # The backstop (#467): the rolling window the back-to-back origin count is kept over.
+    reactive_window_s: float = Field(default=120.0, gt=0)
+    # An origin arriving this soon after a reply ended is "back-to-back" — i.e. it did not wait
+    # for the robot to finish being audible. The runaway's gap was 370 ms; a person must hear the
+    # reply end before answering, so this separates the two populations that a turn RATE cannot.
+    reactive_back_to_back_s: float = Field(default=1.5, gt=0)
+    # This many back-to-back origins inside the window and the guard stops expiring: every origin
+    # must then clear the frozen floor, however long ago playback ended, until a full window
+    # passes without one.
+    #
+    # ⚠️ This is a cap on turns that never proved they came from a human, NOT a cap on turns. The
+    # measured runaway ran at 3.25 turns/min and a fast human exchange here is 5-6/min — it was
+    # *slower than a conversation*, so no rate threshold separates them at any value. An owner at
+    # conversational distance clears the margin trivially and is never refused.
+    reactive_budget: int = Field(default=4, ge=1)
     # How long the microphone may yield nothing before capture is declared stalled (#347).
     #
     # This is not a tuning knob for audio quality — it decides whether an unanswered proactive
@@ -1005,6 +1057,53 @@ class Config(_Section):
                 f"gate.session_idle_close_s ({self.gate.session_idle_close_s}): the idle close "
                 f"cancels the think timer and drives no transition, so a think timeout at or "
                 f"past it never fires and the robot wedges in THINKING (SDS §6.9)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _echo_tail_covers_the_playback_buffer(self) -> Config:
+        """The uplink must stay shut until the DAC has actually drained (#467, SDS §6.2.4).
+
+        ⚠️ **The relation this asserts is the one nothing asserted, and it cost $0.50 in eight
+        minutes.** ``echo_tail_ms`` is armed at ``end_response``, which fires when the last delta
+        is handed to the *speaker* — not when the room goes quiet. ``Speaker.play()`` reports
+        frames the device **accepted into its ring buffer**, so up to one buffer depth of the
+        reply is still being clocked out when the tail starts counting. At the shipped 150 ms and
+        24 kHz that left ~43 ms of real slack, and the last of the robot's own voice went up the
+        uplink as user audio — AVID-159's defect, reappearing through the back door.
+
+        The depth is **computed** from ``[speaker] sample_rate`` rather than restated, so a rig at
+        a different rate is checked against its own number.
+        """
+        depth_ms = 1000.0 * _PLAYBACK_BUFFER_FRAMES / self.speaker.sample_rate
+        required = depth_ms + _TAIL_SLACK_MS
+        if self.gate.echo_tail_ms < required:
+            raise ValueError(
+                f"gate.echo_tail_ms ({self.gate.echo_tail_ms} ms) must be >= "
+                f"{required:.0f} ms at speaker.sample_rate {self.speaker.sample_rate}: the "
+                f"playback ring holds {_PLAYBACK_BUFFER_FRAMES} frames ({depth_ms:.0f} ms) that "
+                f"the DAC has not emitted yet when end_response arms the tail, plus "
+                f"{_TAIL_SLACK_MS} ms for the room. A shorter tail reopens the uplink over the "
+                f"robot's own voice and sends it to the model as the user (SDS §6.2.4, #467)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_guard_outlasts_the_echo_tail(self) -> Config:
+        """A guard shorter than the tail is a knob that does nothing (#467).
+
+        The tail already refuses *every* frame while it runs — nothing is streamed and no origin
+        survives it. So a guard window inside the tail never gets to judge anything, and the
+        setting would read as protection while providing none. That is the same failure
+        ``_think_timeout_precedes_the_idle_close`` exists to prevent for its own pair: a timer
+        that can never fire is worse than no timer, because someone believes in it.
+        """
+        if self.gate.guard_window_ms < self.gate.echo_tail_ms:
+            raise ValueError(
+                f"gate.guard_window_ms ({self.gate.guard_window_ms}) must be >= "
+                f"gate.echo_tail_ms ({self.gate.echo_tail_ms}): the tail already refuses every "
+                f"frame while it runs, so a guard inside it never judges anything and protects "
+                f"nothing while appearing to (SDS §6.2.4, #467)."
             )
         return self
 
