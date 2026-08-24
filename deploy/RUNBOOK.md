@@ -161,6 +161,7 @@ That is a deliberate trade — see
 | It says nothing at all, ever | [The robot does not speak at all](#the-robot-does-not-speak-at-all) |
 | I talk to it and nothing happens | [The robot never answers me](#the-robot-never-answers-me) |
 | It spoke in the middle of the night, or hours after it should have | [The robot answers at the wrong time](#the-robot-answers-at-the-wrong-time) |
+| **It answers its own answers; turns and spend climb with nobody there** | [The robot is talking to itself](#the-robot-is-talking-to-itself) |
 | The face keeps flashing the boot screen; it cycles | [The service keeps restarting](#the-service-keeps-restarting) |
 | systemctl says active and the robot is inert | [The service is active but nothing happens](#the-service-is-active-but-nothing-happens) |
 | It will not come up at all, and says why | [The robot will not start at all](#the-robot-will-not-start-at-all) |
@@ -264,6 +265,67 @@ grep -n quiet /etc/robot/config.toml
 
 ⚠️ The machine's quiet window is **deliberately different** from the repo's
 (see [§5](#5-what-not-to-do)). A mismatch there is not the bug.
+
+### The robot is talking to itself
+
+It answers, then answers its own answer, and keeps going. Nobody is in the room, or the person who
+is has stopped speaking. Turns and spend climb the whole time.
+
+**Confirm.**
+
+```sh
+curl -s localhost:8787/metrics | python3 -m json.tool | grep -A4 admission_refusals
+curl -s localhost:8787/metrics | python3 -c 'import json,sys;m=json.load(sys.stdin)["metrics"];print("turns",m["turns"],"cost",m["cost_usd"],"reactive",m["reactive_turns"])'
+journalctl -u robot -b | grep -c audio.speech_started
+journalctl -u robot -b | grep -c behavior.trigger_fired
+```
+
+The signature is **`speech_started` climbing while `trigger_fired` stays at zero** — every turn is
+reactive, and nobody is speaking. Then the two tells that name it exactly:
+
+```sh
+# 1. Is it barging in on ITSELF? SPEAKING -> LISTENING means yes.
+journalctl -u robot -b | grep '"from_": "SPEAKING", "to": "LISTENING"'
+# 2. How long after its own reply does the next turn start?
+journalctl -u robot -b | grep -E 'playback_finished|speech_started' | tail -20
+```
+
+On 2026-08-24 (#467) that gap clustered at **370 ms** and there were 26 `speech_started` in eight
+minutes against 0 `trigger_fired`, for 29 turns and \$0.50.
+
+**Fix.** Raise `[gate] guard_window_ms` first — it is how long after a reply a new turn origin is
+still judged against the frozen echo floor, and it is the knob this symptom is about. If refusals
+appear (`admission_refusals` gains `echo_tail`) but turns still climb, raise
+`[gate] barge_in_margin_db` next. A very large margin is **full half-duplex** — barge-in off, no
+code change — and is the documented fallback (SDS §6.3).
+
+⚠️ **Do not reach for the volume knob.** Dropping the amp from 100% to 70% did **not** stop it on
+2026-08-24; the floor is adaptive, so speaker volume largely cancels out of the comparison by
+design. Check `[speaker]`'s level against the provisioned 85% (`PI_OPERATIONS.md` §5.1) because
+that is where the margin was calibrated, not because turning it down is a fix.
+
+⚠️ **Verify AGC is off by measuring, not by believing the docs.** `PI_OPERATIONS.md` said "AGC off"
+for weeks while nothing checked, and it moves this rig's empty-room floor by ~20 dB (AVID-296):
+
+```sh
+amixer -c Device sget "Auto Gain Control"    # want: Playback [off]
+```
+
+To stop the bleeding right now, `sudo systemctl stop robot`. Nothing in this system rate-limits a
+reactive turn other than the §6.2.4 admission gate, so an unattended night of this is expensive.
+
+**Not to be confused with** a genuinely chatty room — a television, a meeting, a housemate. There
+the `conversation.user_transcribed` texts are *distinct utterances* rather than echoes of the
+robot's own last reply, `admission_refusals` stays near zero, and the `playback_finished` →
+`speech_started` gaps are **over a second and irregular**. A self-conversation's gaps cluster
+tightly and its transcripts quote the robot back to itself. Read the transcripts before touching a
+knob; the two look identical in the turn count alone.
+
+**Not to be confused with** the THINKING wedge ([#452](#the-robot-never-answers-me)), which is the
+*opposite* reading on the same two instruments: there turns and spend are **flat** and
+`illegal_transitions` climbs on one `THINKING/...` pair; here turns and spend climb and
+`illegal_transitions` is quiet. One robot is stuck doing nothing, the other is stuck doing too
+much, and a glance at `/metrics turns` over two minutes separates them.
 
 ### The service keeps restarting
 
