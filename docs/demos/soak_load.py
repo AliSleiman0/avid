@@ -421,16 +421,37 @@ def _play(path: Path, device: str, rate: int) -> str | None:
     return None
 
 
+# The states a robot can be spoken to from, and the states a finished turn settles into.
+#
+# ⚠️ **SLEEPING belongs here, and leaving it out made this generator useless at the only time it
+# runs.** §3.10.3 has `(SLEEPING, audio.speech_started) -> LISTENING`: speech wakes the robot,
+# which is the whole of M8's nap. The robot sleeps ten minutes after the room empties — and an
+# empty room is precisely when an unattended window runs. Waiting for IDLE would have skipped
+# **every utterance overnight** and produced a window measuring an idle robot: the void window
+# again, caused this time by the tool built to prevent it. Found by looking at the rig and seeing
+# it asleep at 18:01, before the first dry run rather than after a silent one.
+_SPEAKABLE = frozenset({"IDLE", "SLEEPING"})
+
+
 def _wait_for(
-    base: str, timeout: float, want: str, deadline_s: float, poll_s: float
+    base: str,
+    timeout: float,
+    want: frozenset[str],
+    deadline_s: float,
+    poll_s: float,
 ) -> tuple[bool, str | None]:
-    """Poll ``/state`` until it reads *want*. Returns ``(reached, last_state)``."""
+    """Poll ``/state`` until it reads one of *want*. Returns ``(reached, last_state)``.
+
+    ⚠️ *deadline_s* must allow at least one poll. A zero deadline reports "not ready" without ever
+    asking, which is indistinguishable from a busy robot — two of this file's own tests passed
+    that way before it was noticed.
+    """
     end = time.monotonic() + deadline_s
     last: str | None = None
     while time.monotonic() < end:
         reading = _get_json(f"{base}/state", timeout)
         last = None if reading is None else reading.get("state")
-        if last == want:
+        if last in want:
             return True, last
         time.sleep(poll_s)
     return False, last
@@ -495,10 +516,10 @@ def _run_load(args: argparse.Namespace) -> int:
             if not args.ignore_quiet_hours and _quiet_now(config, now):
                 kind, note = "skipped_quiet", "inside the configured quiet window"
             else:
-                idle, seen = _wait_for(
-                    base, args.timeout, "IDLE", args.settle_s, args.poll_s
+                ready, seen = _wait_for(
+                    base, args.timeout, _SPEAKABLE, args.settle_s, args.poll_s
                 )
-                if not idle:
+                if not ready:
                     kind, note = "skipped_busy", f"robot was {seen or 'unreachable'}"
                 else:
                     started = time.monotonic()
@@ -507,12 +528,19 @@ def _run_load(args: argparse.Namespace) -> int:
                         kind, note = "play_failed", failure
                     else:
                         turn_ok, _ = _wait_for(
-                            base, args.timeout, "IDLE", args.turn_timeout_s, args.poll_s
+                            base,
+                            args.timeout,
+                            _SPEAKABLE,
+                            args.turn_timeout_s,
+                            args.poll_s,
                         )
                         latency = time.monotonic() - started
                         if not turn_ok:
                             kind = "no_turn"
-                            note = f"no return to IDLE within {args.turn_timeout_s:g}s"
+                            note = (
+                                f"no return to a settled state within "
+                                f"{args.turn_timeout_s:g}s"
+                            )
 
             _log_line(
                 log,
@@ -621,8 +649,10 @@ def main() -> int:
         "--settle-s",
         type=float,
         default=60.0,
-        help="how long to wait for the robot to be IDLE before playing. Never play over a reply: "
-        "the clip is judged against the echo floor and discarded.",
+        help="how long to wait for the robot to be settled (IDLE or SLEEPING) before playing. "
+        "Never play over a reply: the clip is judged against the echo floor and discarded. "
+        "SLEEPING counts - S3.10.3 wakes the robot on speech, and an empty room is exactly when "
+        "an unattended window runs. Must allow at least one poll.",
     )
     parser.add_argument(
         "--turn-timeout-s",

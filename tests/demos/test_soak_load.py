@@ -504,13 +504,14 @@ def test_a_busy_robot_defers_the_clip_instead_of_playing_over_it(
         interval=0.0,
         max_turns=2,
         max_usd=10.0,
-        for_seconds=0.0,
-        settle_s=0.0,
-        turn_timeout_s=0.0,
+        for_seconds=8.0,
+        # ⚠️ Must exceed the tick step, or `_wait_for` never polls even ONCE and reports
+        # "not ready" whatever the state is -- passing for the wrong reason.
+        settle_s=3.0,
+        turn_timeout_s=3.0,
         poll_s=0.0,
         ignore_quiet_hours=True,
     )
-    args.for_seconds = 5.0
     load._run_load(args)
 
     records = [
@@ -546,13 +547,14 @@ def test_an_unreachable_robot_is_recorded_not_raised(
         interval=0.0,
         max_turns=2,
         max_usd=10.0,
-        for_seconds=0.0,
-        settle_s=0.0,
-        turn_timeout_s=0.0,
+        for_seconds=8.0,
+        # ⚠️ Must exceed the tick step, or `_wait_for` never polls even ONCE and reports
+        # "not ready" whatever the state is -- passing for the wrong reason.
+        settle_s=3.0,
+        turn_timeout_s=3.0,
         poll_s=0.0,
         ignore_quiet_hours=True,
     )
-    args.for_seconds = 5.0
     assert load._run_load(args) == 0  # must not raise
 
     records = [
@@ -607,3 +609,70 @@ def test_a_clip_that_is_not_mono_16_bit_cannot_be_played_and_says_so(
     criteria = {c.ac: c for c in load._validate(_validate_args(corpus))}
     assert criteria["GATE"].verdict == "fail"
     assert any("NOT MONO 16-BIT" in row for row in criteria["CORPUS"].rows)
+
+
+def test_a_sleeping_robot_is_spoken_to_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⚠️ The state an unattended robot is actually IN, and the one this generator exists for.
+
+    S3.10.3 has `(SLEEPING, audio.speech_started) -> LISTENING`: speech wakes the robot, which is
+    the whole of M8's nap. The robot goes to SLEEPING ten minutes after the room empties -- so an
+    empty room, which is exactly when an unattended window runs, means a SLEEPING robot for nearly
+    all of it.
+
+    Waiting only for IDLE would therefore have skipped **every utterance overnight** and produced a
+    window that measured an idle robot: the void window again, this time caused by the tool built
+    to prevent it. Found on the rig by finding it asleep at 18:01, before the first dry run rather
+    than after a silent one.
+    """
+    corpus = _corpus(
+        tmp_path, [{"key": "ok", "file": "ok.wav", "text": "what's on my calendar"}]
+    )
+    _wav(corpus / "ok.wav", seconds=1.5, amplitude=12000)
+    log = tmp_path / "load.jsonl"
+    played: list[str] = []
+
+    monkeypatch.setattr(
+        load,
+        "_get_json",
+        lambda url, timeout: (
+            {"state": "SLEEPING"}
+            if url.endswith("/state")
+            else {"metrics": {"turns": 0, "cost_usd": 0.0}}
+        ),
+    )
+    monkeypatch.setattr(load, "_play", lambda *a, **k: played.append("played") or None)
+    monkeypatch.setattr(load.time, "sleep", lambda _s: None)
+    _tick(monkeypatch)
+
+    args = argparse.Namespace(
+        config=_SIM_TOML,
+        corpus=str(corpus),
+        load_log=str(log),
+        host="127.0.0.1",
+        port=8787,
+        timeout=1.0,
+        interval=0.0,
+        max_turns=2,
+        max_usd=10.0,
+        for_seconds=8.0,
+        # ⚠️ Must exceed the tick step, or `_wait_for` never polls even ONCE and reports
+        # "not ready" whatever the state is -- passing for the wrong reason.
+        settle_s=3.0,
+        turn_timeout_s=3.0,
+        poll_s=0.0,
+        ignore_quiet_hours=True,
+    )
+    load._run_load(args)
+
+    records = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert played, (
+        "a SLEEPING robot was treated as busy -- nothing would ever play overnight"
+    )
+    assert any(r["kind"] == "played" for r in records)
+    assert not any(r["kind"] == "skipped_busy" for r in records)
