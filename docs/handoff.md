@@ -6,27 +6,54 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ⛔ **rig ROBOT IS STOPPED — see #467 before starting it** · rig deployed at `5fea102` · M11 soak stopped, O5 amended · gh `AliSleiman0`.
+**As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **#467's software half is MERGED (#470)** · ⛔ rig robot still stopped and **not yet deployed** · M11 soak stopped, O5 amended · gh `AliSleiman0`.
 
-## ⭐ Next session — ⛔ THE WINDOW IS BLOCKED, AND THE BLOCKER IS THE ROBOT
+## ⭐ Next session — DEPLOY #467, THEN #468, THEN THE WINDOW
 
-The corpus is recorded, the generator is built and its own defects are fixed (#462, #465, #466).
-**The 72-hour window still cannot start**, and the reason is not the tooling:
+### ✅ #467 — the robot converses with itself. Fixed in code, NOT yet on the rig.
 
-### ⛔ #467 — the robot converses with itself. The rig is stopped because of it.
+Merged as `3c299b6` (#470): five commits, 2015 tests, nine neuters each failing on an assertion.
+⚠️ **`/opt/avid` is still on `5fea102` and `robot.service` is stopped AND disabled.** Deploying is
+the first act of the next session:
 
-One hand-played clip drove one legitimate turn; the robot then answered its own replies for
-~8 minutes — **26 `audio.speech_started`, 0 `behavior.trigger_fired`, turns 8 → 37, spend
-$0.17 → $0.67**. It kept going after the amp was dropped to 70%.
+```sh
+ssh alisleiman0@192.168.10.172 'cd /opt/avid && git pull --ff-only'
+# ⚠️ REPROVISION /etc/robot/config.toml — four NEW [gate] keys, and a missing key falls back to a
+# schema default SILENTLY (PI_OPERATIONS §3). guard_window_ms/reactive_* are the whole fix.
+sudo install -m 644 -o root -g root /opt/avid/config/pi.toml /etc/robot/config.toml
+# ...then re-flip [adapters] to the real devices — the template ships every adapter "fake" ON
+# PURPOSE (PI_OPERATIONS §3), which is provisioning, not a bug to fix.
+sudo systemctl enable --now robot
+```
 
-The tell is `SPEAKING → LISTENING` on `audio.speech_started`: it is **barging in on itself while
-still speaking**, and the echo gate logs `0 suppressed` every time. `barge_in_margin_db = 3.0` is
-marked **UNCALIBRATED** in the config it ships in.
+Expect `admission_refusals` on `/metrics` to be **non-empty**. That is the gate working, not a
+fault — it was empty for eight minutes while the robot answered itself.
 
-⚠️ **Nothing rate-limits a reactive turn** — `evaluate_policy` has one call site and it is the
-proactive path. At the observed rate an unattended night is hundreds of dollars. **Do not start a
-window, and do not leave the robot running unattended, until #467 is fixed.** The robot on the rig
-is deliberately `systemctl stop`ped and the amp is at 60%.
+**What the fix actually was**, so it is not re-derived: three holes, each sufficient alone.
+`_admits_barge_in` short-circuited to *admit* outside the echo tail, so the 370 ms re-trigger was
+never judged — ⚠️ **`0 suppressed` did not mean the gate worked, it meant the gate never ran**, and
+the log line could not tell those apart. The pre-roll replayed echo, so one marginal admit sent
+300 ms of the robot's own contiguous voice to the model as the user. And nothing downstream could
+refuse. `echo_tail_ms` (streaming) and the new `guard_window_ms` (origins) were one window doing
+two jobs that need different lengths.
+
+⚠️ **The backstop counts gaps, not turns, and the arithmetic is why:** the runaway ran at
+3.25 turns/min and a fast human exchange here is 5-6/min — it was *slower than a conversation*, so
+no rate cap separates them at any value. The gap to the robot's own reply does.
+
+### ⏭️ #471 — calibrate the two knobs on the rig (split out of #467 AC-3)
+
+`barge_in_margin_db = 3.0` was tuned with AGC in an unknown state; `guard_window_ms = 700` is a
+starting value, not a measurement. Needs the rig, the amp at its provisioned **85%**, and a person.
+⚠️ **If the two populations overlap, stop tuning** — §6.2.4 says no margin can be tuned into
+working and the honest answers are #163 (AEC) or full half-duplex.
+
+### ⏭️ #472 — nothing can refuse work on cost (split out of #467)
+
+The O7 tripwire only `_log.warning`s and nothing consumes it, and `projected_monthly_usd` read
+~$11/mo during a runaway spending $3.75/hour — so a tripwire on that figure would not have fired.
+⚠️ #467's backstop is **acoustic**: a future defect producing genuine-looking origins walks
+straight past it, which is why this is filed rather than absorbed.
 
 ### ⛔ #468 — the corpus is too quiet to trip the gate at any safe volume
 
