@@ -432,6 +432,47 @@ out what was changed by hand and why.
 windows on it, so that guard could never fire. If you ever see `0.0.0` here again on a machine that
 *is* a checkout, the resolver has regressed and the guard is inert again.
 
+### ⚠️ 5.1 And which *clock frame* — a cold boot always straddles two (#439)
+
+The sibling question, and it decides whether any timestamped result means anything. **This board has
+no RTC.** A power-on therefore runs in this order, every time:
+
+```
+00:30:33  fake-hwclock restores the stamp saved at the last shutdown  <- stale, and plausible
+00:31:04  robot.service starts and writes its boot_log row            <- STILL in the stale frame
+12:01:48  systemd-timesyncd: "Initial clock synchronization"          <- an 11.5-hour step
+```
+
+Measured on 2026-08-24 from a real cold boot. The damage is not subtle — 90 seconds after boot the
+robot reported:
+
+| | |
+|---|---|
+| kernel uptime | **149 s** |
+| the robot's own `uptime_s` | **41,553 s** (11.5 h) |
+| `boot_log.started_at` | in the stale frame; `last_seen_at` in the true one |
+
+Both figures are wall-clock subtractions **across a frame boundary**, which is exactly the defect
+AVID-439 was filed for, reproduced from nothing more exotic than switching the machine on.
+
+**So, before any run whose evidence is a timestamp:**
+
+```sh
+timedatectl | grep -E 'synchronized|NTP service'     # must read: synchronized: yes
+awk '{print int($1)}' /proc/uptime                   # kernel seconds
+curl -s 127.0.0.1:8787/metrics | python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["uptime_s"])'
+```
+
+⚠️ **`synchronized: yes` on its own is not enough** — it is true *after* the step, while the robot's
+own record is still stamped before it. The two uptimes must **agree**. If the robot's is hours
+larger, it booted in the stale frame.
+
+⚠️ **Start a measured window from a `systemctl restart robot`, never from a power-on.** With the
+clock already correct, the restart writes a fresh `boot_log` row entirely inside the true frame; it
+costs five seconds and it is the difference between a window whose first record is honest and one
+that is hours wrong before it has measured anything. The contaminated row stays in the log, closed
+with `stop_reason='signal'` — a clean, deliberate stop, and the evidence of what a cold boot does.
+
 ---
 
 ## 5a. Vision (M8)

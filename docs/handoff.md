@@ -424,6 +424,16 @@ so it is gross and corroborated many times over.
   and three tests failed on arithmetic that was never the point. A test's reference constant
   belongs to the test — spell it out.
 
+- ⚠️ **A COLD BOOT straddles two clock frames, every time — so start a measured window from a
+  `systemctl restart robot`, never from a power-on (#439).** Measured 2026-08-24: `fake-hwclock`
+  restores the stamp saved at the last shutdown, `robot.service` starts ~30 s later and writes its
+  `boot_log` row **in that stale frame**, and `systemd-timesyncd` steps the clock ~90 s after that —
+  here by **11.5 hours**. Ninety seconds after boot the kernel reported 149 s of uptime and the
+  robot reported **41,553**. ⚠️ **`timedatectl` saying `synchronized: yes` does not clear this** — it
+  is true *after* the step, while the robot's own record is still stamped before it. **Compare the
+  two uptimes; they must agree.** A restart on an already-synchronised machine costs five seconds
+  and writes a boot record entirely inside the true frame. Full recipe in `PI_OPERATIONS.md` §5.1.
+
 - ⚠️ **On a no-RTC Pi, two boots' wall clocks are not the same timeline, and subtracting across
   them looks exactly like a measurement.** The M11 soak's `samples` table has consecutive rowids
   whose `at` goes *backwards*. When something spans a reboot, order by **rowid** or reason from
