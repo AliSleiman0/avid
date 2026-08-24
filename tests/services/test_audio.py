@@ -1744,6 +1744,18 @@ async def test_the_echo_tail_is_armed_exactly_once() -> None:
         rig.service._turn_id = uuid4()
         await rig.service.play(_out_chunk(ms=20, fill=1), item_id="item_0")
 
+        # ⚠️ The clock must MOVE between the two arms or the test cannot tell them apart, and a
+        # first draft of it could not: `FakeClock` advances only when a test says so, so both
+        # arms computed the identical deadline and the neutered guard passed. A transition
+        # observer is the seam -- `StateManager.watch` is a direct synchronous call inside
+        # `transition()`, which is exactly the await the second arm hid behind. Bumping the
+        # fake's counter in place is deliberate: `advance()` is a coroutine and this has to
+        # happen without yielding, which is the whole property under test.
+        def _tick(**_: object) -> None:
+            rig.clock._elapsed_ns += 50_000_000  # 50 ms, mid-`end_response`
+
+        rig.state.watch(_tick, name="test.tail_arm_clock")
+
         armed_from = rig.clock.monotonic_ns()
         await rig.service.end_response()
 
