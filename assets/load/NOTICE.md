@@ -29,6 +29,22 @@ pollutes the thing it is measuring is a poor trade for ten minutes of recording.
 - **Ordinary speaking volume, ~50 cm from the mic** — the same conditions `config/pi.toml`'s gate
   comments describe.
 
+## Recorded 2026-08-24
+
+Ten clips, 16 kHz mono 16-bit, 2.8–5.3 s each, peak −3.2 to −6.9 dBFS / rms −21 to −28. Captured
+with `tools/record_load_corpus.py`, which records at the microphone's rate directly so there is
+nothing to convert — and nothing *can* be converted, since the repo's resampler refuses to
+downsample without an anti-alias filter.
+
+⚠️ One clip was re-recorded. `howareyou` first came out at peak −14.8 / **rms −35.4**, which is
+essentially the empty room's own floor (−36 dBFS measured with AGC off) — it would probably not
+have tripped the gate, and the failure would have shown up as a quiet gap in a 72-hour window
+rather than as an error. **The level check exists for exactly that clip.**
+
+The durations include a second or two of dead air at each end, from the operator's key presses.
+Harmless: leading silence only delays `speech_started`, and trailing silence is what the falling
+edge needs anyway.
+
 Validate before trusting them:
 
 ```sh
