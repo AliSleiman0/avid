@@ -51,13 +51,24 @@ load = _load_generator()
 # ── the meter: process-scoped counters across a restart ──────────────────────────────────────
 
 
-def test_the_meter_accumulates_rises_not_readings() -> None:
-    """An ordinary run: the counters only ever go up, so the total is the last reading."""
+def test_the_meter_charges_the_run_for_its_own_work_and_no_one_elses() -> None:
+    """⚠️ The first reading is a BASELINE. It is not work this run did.
+
+    The generator caps on "turns this run drove", and it meets a robot that has been up for hours
+    talking to its owner. Counting that first reading charged the run for every one of those
+    turns: on the rig it produced `max-turns (2) reached -- turns 8` before a single clip played,
+    and over a 72-hour window one evening's conversation would silently stop the generator for the
+    remaining three days -- the void window again, this time caused by the instrument.
+    """
     meter = load._Meter()
-    for turns, usd in ((3, 0.10), (7, 0.30), (11, 0.55)):
+    meter.observe(8, 0.17)  # the robot was already busy before we arrived
+    assert meter.turns == 0, "the run was charged for turns it did not drive"
+    assert meter.usd == pytest.approx(0.0)
+
+    for turns, usd in ((11, 0.30), (15, 0.55)):
         meter.observe(turns, usd)
-    assert meter.turns == 11
-    assert meter.usd == pytest.approx(0.55)
+    assert meter.turns == 7, "rises after the baseline are this run's own work"
+    assert meter.usd == pytest.approx(0.38)
 
 
 def test_the_meter_survives_a_restart_without_forgetting_or_double_counting() -> None:
@@ -69,22 +80,23 @@ def test_the_meter_survives_a_restart_without_forgetting_or_double_counting() ->
     run early. Only the rises are new work.
     """
     meter = load._Meter()
-    meter.observe(40, 1.80)
+    meter.observe(40, 1.80)  # baseline — the robot was already at 40 turns
     meter.observe(50, 2.25)
     meter.observe(2, 0.09)  # restarted: the counter began again
     meter.observe(6, 0.27)
 
-    assert meter.turns == 56, "a restart lost the earlier turns or replayed them"
-    assert meter.usd == pytest.approx(2.52)
+    assert meter.turns == 16, "a restart lost the earlier turns or replayed them"
+    assert meter.usd == pytest.approx(0.72)
 
 
 def test_an_absent_counter_moves_nothing() -> None:
     """A robot that did not report is not a robot that did nothing (#380)."""
     meter = load._Meter()
-    meter.observe(5, 0.20)
+    meter.observe(5, 0.20)  # baseline
+    meter.observe(9, 0.44)
     meter.observe(None, None)
-    assert meter.turns == 5
-    assert meter.usd == pytest.approx(0.20)
+    assert meter.turns == 4, "an absent reading moved the total"
+    assert meter.usd == pytest.approx(0.24)
 
 
 # ── the corpus validator ─────────────────────────────────────────────────────────────────────
@@ -633,15 +645,15 @@ def test_a_sleeping_robot_is_spoken_to_not_skipped(
     log = tmp_path / "load.jsonl"
     played: list[str] = []
 
-    monkeypatch.setattr(
-        load,
-        "_get_json",
-        lambda url, timeout: (
-            {"state": "SLEEPING"}
-            if url.endswith("/state")
-            else {"metrics": {"turns": 0, "cost_usd": 0.0}}
-        ),
-    )
+    # The robot stays SLEEPING throughout -- it is woken by speech and naps straight back, which
+    # is what an empty room looks like. The TURN COUNTER is what says a turn happened; the state
+    # reading cannot, and that is the point of the second assertion below.
+    def _reading(url: str, timeout: float) -> dict[str, object]:
+        if url.endswith("/state"):
+            return {"state": "SLEEPING"}
+        return {"metrics": {"turns": len(played), "cost_usd": 0.01 * len(played)}}
+
+    monkeypatch.setattr(load, "_get_json", _reading)
     monkeypatch.setattr(load, "_play", lambda *a, **k: played.append("played") or None)
     monkeypatch.setattr(load.time, "sleep", lambda _s: None)
     _tick(monkeypatch)
@@ -676,3 +688,134 @@ def test_a_sleeping_robot_is_spoken_to_not_skipped(
     )
     assert any(r["kind"] == "played" for r in records)
     assert not any(r["kind"] == "skipped_busy" for r in records)
+
+
+def test_a_prior_conversation_does_not_cap_the_run_before_it_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⚠️ Found on the rig, and it stopped a dry run at ZERO utterances.
+
+    The generator meets a robot that has been up for hours. `/metrics turns` is process-scoped, so
+    it already read 8 -- turns a human drove. Charging the run for them printed
+    `STOP  max-turns (2) reached -- turns 8, $0.1730` before a clip played.
+
+    Over a window that is the whole failure: the owner has a conversation on the first evening, the
+    generator caps, and the remaining three days measure an idle process. The instrument produces
+    the void window it was built to prevent, and does it quietly -- `capped` looks like a working
+    cap, not a defect.
+    """
+    corpus = _corpus(
+        tmp_path, [{"key": "ok", "file": "ok.wav", "text": "what's on my calendar"}]
+    )
+    _wav(corpus / "ok.wav", seconds=1.5, amplitude=12000)
+    log = tmp_path / "load.jsonl"
+    played: list[str] = []
+
+    def _reading(url: str, timeout: float) -> dict[str, object]:
+        if url.endswith("/state"):
+            return {"state": "IDLE"}
+        # 8 turns and $0.17 were already on the clock when we arrived.
+        return {
+            "metrics": {"turns": 8 + len(played), "cost_usd": 0.17 + 0.01 * len(played)}
+        }
+
+    monkeypatch.setattr(load, "_get_json", _reading)
+    monkeypatch.setattr(load, "_play", lambda *a, **k: played.append("played") or None)
+    monkeypatch.setattr(load.time, "sleep", lambda _s: None)
+    _tick(monkeypatch)
+
+    args = argparse.Namespace(
+        config=_SIM_TOML,
+        corpus=str(corpus),
+        load_log=str(log),
+        host="127.0.0.1",
+        port=8787,
+        timeout=1.0,
+        interval=0.0,
+        max_turns=2,
+        max_usd=10.0,
+        for_seconds=8.0,
+        settle_s=3.0,
+        turn_timeout_s=3.0,
+        poll_s=0.0,
+        ignore_quiet_hours=True,
+    )
+    load._run_load(args)
+
+    records = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert played, (
+        "the run capped on a prior conversation's turns and played nothing at all"
+    )
+    capped = [r for r in records if r["kind"] == "capped"]
+    assert not capped or capped[0]["turns"] <= 2, (
+        "the cap fired on turns this run did not drive"
+    )
+
+
+def test_a_turn_is_proved_by_the_counter_not_by_a_settled_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⚠️ `turn_ok` used to be unfalsifiable overnight, and the rig recorded it as `true`.
+
+    An unattended robot is SLEEPING before the clip and SLEEPING after it. Asking `/state` whether
+    the robot is "settled again" therefore answers yes whether it ran a turn or heard nothing --
+    and the first rig dry run duly logged `turn_ok: true, latency_s: 5.28` against a robot whose
+    journal held NO ENTRIES for the surrounding eight minutes.
+
+    That is a report describing something other than the run (CLAUDE.md §7.1), and it is the
+    dangerous direction: a silent window full of `turn_ok: true` reads as a working load path.
+    Here the robot never meters a turn, and the record must say so.
+    """
+    corpus = _corpus(
+        tmp_path, [{"key": "ok", "file": "ok.wav", "text": "what's on my calendar"}]
+    )
+    _wav(corpus / "ok.wav", seconds=1.5, amplitude=12000)
+    log = tmp_path / "load.jsonl"
+
+    monkeypatch.setattr(
+        load,
+        "_get_json",
+        lambda url, timeout: (
+            {"state": "SLEEPING"}  # settled before AND after — deaf, not idle
+            if url.endswith("/state")
+            else {"metrics": {"turns": 0, "cost_usd": 0.0}}
+        ),
+    )
+    monkeypatch.setattr(load, "_play", lambda *a, **k: None)
+    monkeypatch.setattr(load.time, "sleep", lambda _s: None)
+    _tick(monkeypatch)
+
+    args = argparse.Namespace(
+        config=_SIM_TOML,
+        corpus=str(corpus),
+        load_log=str(log),
+        host="127.0.0.1",
+        port=8787,
+        timeout=1.0,
+        interval=0.0,
+        max_turns=5,
+        max_usd=10.0,
+        for_seconds=8.0,
+        settle_s=3.0,
+        turn_timeout_s=3.0,
+        poll_s=0.0,
+        ignore_quiet_hours=True,
+    )
+    load._run_load(args)
+
+    records = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert records, "the run recorded nothing at all"
+    assert not any(r.get("turn_ok") for r in records), (
+        "a deaf robot was recorded as having taken a turn -- turn_ok is unfalsifiable"
+    )
+    assert any(r["kind"] == "no_turn" for r in records), (
+        "the clip that produced no turn was not reported as such"
+    )

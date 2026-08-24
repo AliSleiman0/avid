@@ -368,3 +368,52 @@ once.
 (`deploy/PI_OPERATIONS.md`). So AC-1's *"affect drives gesture"* likely cannot be watched on the
 face and the head at the same time; plan which half is read from the log before starting, rather
 than discovering it mid-run.
+
+---
+
+## M11 — It endures
+
+**Two instruments, not one gate.** M11 has no single harness that returns a verdict, because
+endurance is not a thing you can run. `soak_pi.py --mode sample` writes a row a minute for the
+length of a window; `soak_load.py --mode play` gives that window something to be about; and
+`soak_pi.py --mode grade` reads both back afterwards and scores O5.
+
+```sh
+# On the Pi, as two systemd units — never by hand for a real window.
+sudo install -m 644 -o root -g root /opt/avid/deploy/soak-sampler.service /etc/systemd/system/
+sudo install -m 644 -o root -g root /opt/avid/deploy/soak-load.service    /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now soak-sampler soak-load
+
+# Afterwards. The leading `cd` is load-bearing — [ai] personality is a relative path.
+cd /opt/avid && sudo /opt/avid/.venv/bin/python docs/demos/soak_pi.py --mode grade \
+    --since <window_start_epoch> --config /etc/robot/config.toml \
+    --load-log /var/lib/soak/load.jsonl
+```
+
+⚠️ **The first window was void, and the reason is the whole design of the second.** It ran ~26
+hours at 99.89% uptime with every graded criterion passing, while the robot sat wedged in
+`THINKING` from minute 3 (#452). The gate could not see it because **nothing asserted the robot
+had ever done anything**. Read `m11_evidence/window.json` before quoting any figure from it.
+
+Three things came out of that, and each is a criterion or an instrument rather than a resolution:
+
+| | what it answers | why it exists |
+|---|---|---|
+| `LIVE` (#457) | did the robot ever change state, take a turn, move? | the wedge above passed every other criterion |
+| `illegal_transitions` (#456) | is a rejected transition *repeating*? | 147 of 175 log lines were one rejected pair, invisible outside the process |
+| `LOAD` (#389) | was there any work in the window at all? | §10.4's presence rule means an unattended robot does nothing, by design |
+
+⚠️ **A flat RSS curve over an idle process is the absence of a test, not a passing one.** That is
+why the load generator exists and why `LOAD` is *graded* while `LIVE`'s transition count is only
+reported: a generator removes the empty-house confound, so a gap between utterances played and
+turns metered is a real defect rather than a quiet evening.
+
+⚠️ **The generator's caps are the only caps that exist.** `evaluate_policy` has exactly one call
+site and it is the *proactive* path — quiet hours, the cooldown and the daily budget do not touch a
+reactive turn. Nothing else in this repo will stop a generator from driving thousands of paid
+turns in a weekend. Run the bounded dry run (`--for-seconds 1200 --max-turns 5 --max-usd 0.50`)
+before any long window, on every rig, every time.
+
+⚠️ **Start a window from `systemctl restart robot`, never a power-on** — a cold boot on this
+board straddles two clock frames (`PI_OPERATIONS.md` §5.1), and subtractions across them are not
+measurements.

@@ -331,13 +331,24 @@ def _get_json(url: str, timeout: float) -> dict[str, Any] | None:
 
 @dataclass
 class _Meter:
-    """Turns and dollars accumulated across the run, immune to the robot restarting.
+    """Turns and dollars **this generator caused**, immune to the robot restarting.
 
     ⚠️ ``/metrics`` counters are **process-scoped**: they reset when the service restarts, and
     ``Restart=always`` means that will happen during a long window. Summing readings would
     double-count and taking the last would forget everything before the restart — so this
     accumulates **rises**, and treats a fall as a new process, exactly as ``soak_pi``'s
     ``_transition_total`` does for transitions.
+
+    ⚠️ **The first reading is a baseline and contributes nothing.** It counted before, which meant
+    the generator inherited every turn the robot had already taken as if it had driven them
+    itself. On the rig this capped a run at *zero utterances* — ``max-turns (2) reached — turns
+    8`` — because a human had been talking to the robot beforehand. Over a 72-hour window the
+    failure is worse than it looks: one evening's conversation silently stops the generator for
+    the remaining three days, and the window goes back to measuring an idle process. That is the
+    exact void it exists to prevent, reached by the instrument rather than the robot.
+
+    The caps mean *"this run may drive at most N turns / $X"*. Spend the owner incurred by
+    talking is not this run's spend, and the run must not be charged for it.
     """
 
     turns: int = 0
@@ -347,14 +358,18 @@ class _Meter:
 
     def observe(self, turns: int | None, usd: float | None) -> None:
         if turns is not None:
-            if self._last_turns is None or turns >= self._last_turns:
-                self.turns += turns - (self._last_turns or 0)
+            if self._last_turns is None:
+                pass  # baseline: whatever the robot had already done is not ours
+            elif turns >= self._last_turns:
+                self.turns += turns - self._last_turns
             else:
                 self.turns += turns  # restarted: the whole new count is new work
             self._last_turns = turns
         if usd is not None:
-            if self._last_usd is None or usd >= self._last_usd:
-                self.usd += usd - (self._last_usd or 0.0)
+            if self._last_usd is None:
+                pass  # baseline, as above
+            elif usd >= self._last_usd:
+                self.usd += usd - self._last_usd
             else:
                 self.usd += usd
             self._last_usd = usd
@@ -457,6 +472,38 @@ def _wait_for(
     return False, last
 
 
+def _wait_for_turn(
+    base: str,
+    timeout: float,
+    meter: _Meter,
+    before: int,
+    deadline_s: float,
+    poll_s: float,
+) -> bool:
+    """Wait until the robot's own turn counter rises. Returns whether it did.
+
+    ⚠️ **A state reading cannot answer this, and using one made ``turn_ok`` unfalsifiable.** The
+    robot is ``SLEEPING`` before an overnight clip and ``SLEEPING`` after it, so "is it back in a
+    settled state" is true whether it ran a turn or heard nothing at all. The first rig dry run
+    recorded exactly that — ``turn_ok: true, latency_s: 5.28`` — against a robot whose journal
+    held *no entries* for the surrounding eight minutes. A field that reads `true` when nothing
+    happened is a report describing something other than the run (CLAUDE.md §7.1).
+
+    The turn counter is the quantity ``LOAD`` grades, so this asks the robot the same question the
+    gate will ask afterwards. Observing through *meter* rather than beside it also keeps the caps
+    current while the turn runs, which matters when one clip triggers several turns.
+    """
+    end = time.monotonic() + deadline_s
+    while time.monotonic() < end:
+        reading = _get_json(f"{base}/metrics", timeout)
+        values = reading.get("metrics", {}) if isinstance(reading, dict) else {}
+        meter.observe(values.get("turns"), values.get("cost_usd"))
+        if meter.turns > before:
+            return True
+        time.sleep(poll_s)
+    return False
+
+
 def _run_load(args: argparse.Namespace) -> int:
     """Play the corpus on a schedule until a cap, a deadline or an operator stops it."""
     config = load_config(args.config)
@@ -523,14 +570,16 @@ def _run_load(args: argparse.Namespace) -> int:
                     kind, note = "skipped_busy", f"robot was {seen or 'unreachable'}"
                 else:
                     started = time.monotonic()
+                    turns_before = meter.turns
                     failure = _play(utterance.path, device, rate)
                     if failure is not None:
                         kind, note = "play_failed", failure
                     else:
-                        turn_ok, _ = _wait_for(
+                        turn_ok = _wait_for_turn(
                             base,
                             args.timeout,
-                            _SPEAKABLE,
+                            meter,
+                            turns_before,
                             args.turn_timeout_s,
                             args.poll_s,
                         )
@@ -538,8 +587,8 @@ def _run_load(args: argparse.Namespace) -> int:
                         if not turn_ok:
                             kind = "no_turn"
                             note = (
-                                f"no return to a settled state within "
-                                f"{args.turn_timeout_s:g}s"
+                                f"the robot metered no turn within "
+                                f"{args.turn_timeout_s:g}s -- it did not hear the clip"
                             )
 
             _log_line(
