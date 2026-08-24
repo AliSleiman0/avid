@@ -824,6 +824,8 @@ async def _run_conversation(
         loopback=False,
     )
     memory = _build_memory(config, bus=bus, clock=clock, mode=memory_mode)
+    # Built above ConversationService, which now depends on it as a SpendSource (#472).
+    cost_meter = CostMeterService(bus=bus, clock=clock, model=config.ai.model)
     conversation = ConversationService(
         bus=bus,
         clock=clock,
@@ -835,6 +837,9 @@ async def _run_conversation(
         memory=memory,
         affect=affect,
         behavior=_DemoBehavior(),
+        spend=cost_meter,
+        hourly_ceiling_usd=config.ai.hourly_ceiling_usd,
+        spend_window_s=config.ai.spend_window_s,
         session_idle_close_s=config.gate.session_idle_close_s,
         memory_inject_timeout_s=config.gate.memory_inject_timeout_s,
         default_timezone="Asia/Beirut",
@@ -846,7 +851,6 @@ async def _run_conversation(
     # The cost meter is the O7 instrument: it owns the §6.10.1 rate table and the §6.10.3 usage
     # model, so the harness reads a number rather than recomputing one (and cannot disagree with
     # the running robot about what a turn costs).
-    cost_meter = CostMeterService(bus=bus, model=config.ai.model)
 
     collector = _ConversationCollector(silence_hold_ms=config.gate.silence_hold_ms)
     # The §6.9 deadline follows the state, not the turn path (#452). A bench harness that skipped

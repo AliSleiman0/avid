@@ -54,6 +54,19 @@ voice             = "cedar"
 # without it no conversation.user_transcribed is ever published (SDS §6.2.2). PINNED.
 transcription_model = "whisper-1"
 max_output_tokens = 512                                  # §6.10 guardrail
+# The spend ceiling (#472): dollars billed inside spend_window_s before the robot stops opening
+# paid sessions. ⚠️ DERIVED, not guessed. O7 is $25/mo and §6.10.3's usage model is ~20 turns/day
+# -- about $0.034/hour -- so 1.00 is ~29x an ordinary hour and cannot bite a talkative owner. The
+# number it is sized against is the other one: the 2026-08-24 runaway burned $3.75/hour with
+# nobody in the room (#467).
+#
+# ⚠️ Measured against OBSERVED spend, never projected_monthly_usd -- that figure extrapolates a
+# fixed turn rate and read ~$11/mo DURING the runaway, so a tripwire on it would have watched the
+# whole incident and reported a healthy robot.
+#
+# 0.0 means "may not open a paid session at all": the config-only emergency stop.
+hourly_ceiling_usd = 1.00
+spend_window_s     = 3600.0
 # §6.5. ⚠️ Resolved against the process WORKING DIRECTORY, not against this file. On the Pi
 # that is WorkingDirectory=/opt/avid (robot.service) while this config lives at
 # /etc/robot/config.toml — so a config-relative path would look under /etc/robot/ and find

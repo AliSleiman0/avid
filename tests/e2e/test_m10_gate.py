@@ -45,6 +45,7 @@ from avid.adapters import (
 from avid.adapters.clock import FakeClock
 from avid.adapters.fact_repository import SqliteFactRepo
 from avid.adapters.realtime import ReplayRealtimeClient
+from avid.adapters.spend import FakeSpendSource
 from avid.adapters.trigger_store import SqliteTriggerStore
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
@@ -174,6 +175,9 @@ async def _compose(db: Path, clock: FakeClock) -> Rig:
         affect=_GateAffect(),
         behavior=behavior,
         gesture=_StubGesture(),
+        spend=FakeSpendSource(),
+        hourly_ceiling_usd=1.00,
+        spend_window_s=3600.0,
         session_idle_close_s=600,
         memory_inject_timeout_s=1.0,
         default_timezone=_ZONE,

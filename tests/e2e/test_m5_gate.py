@@ -54,6 +54,7 @@ from avid.adapters import (
     FakeVoiceActivityDetector,
 )
 from avid.adapters.realtime import ReplayRealtimeClient
+from avid.adapters.spend import FakeSpendSource
 from avid.core.envelope import envelope
 from avid.core.event_bus import AsyncioEventBus
 from avid.core.hal import AudioChunk
@@ -403,6 +404,9 @@ async def _drive_session(
         sink=audio,
         cues=CueBank(speaker=out_speaker, asset_dir=_CUES),
         memory=_EmptyMemory(),
+        spend=FakeSpendSource(),
+        hourly_ceiling_usd=1.00,
+        spend_window_s=3600.0,
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         default_timezone="Asia/Beirut",
@@ -577,6 +581,9 @@ async def test_m5_gate_barge_in_truncates_and_does_not_resume() -> None:
         sink=sink,
         cues=CueBank(speaker=speaker, asset_dir=_CUES),
         memory=_EmptyMemory(),
+        spend=FakeSpendSource(),
+        hourly_ceiling_usd=1.00,
+        spend_window_s=3600.0,
         session_idle_close_s=30,
         memory_inject_timeout_s=1.0,
         default_timezone="Asia/Beirut",

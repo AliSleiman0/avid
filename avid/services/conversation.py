@@ -89,6 +89,7 @@ from avid.core.ports import (
     GestureTools,
     MemoryTools,
     RealtimeClient,
+    SpendSource,
     TurnSink,
 )
 from avid.core.realtime import (
@@ -119,6 +120,7 @@ from avid.domain import (
     SystemDegradedExited,
     Trigger,
 )
+from avid.domain.cost import over_ceiling
 from avid.services.cue_bank import CueBank
 from avid.services.tools import dispatch_tool_call
 
@@ -255,6 +257,9 @@ class ConversationService:
         affect: AffectTools,
         behavior: BehaviorTools,
         gesture: GestureTools,
+        spend: SpendSource,
+        hourly_ceiling_usd: float,
+        spend_window_s: float,
         session_idle_close_s: int,
         memory_inject_timeout_s: float,
         default_timezone: str,
@@ -335,6 +340,17 @@ class ConversationService:
         self._think_task: asyncio.Task[None] | None = None
         # Best-effort cue tasks, swept on stop().
         self._cue_tasks: set[asyncio.Task[None]] = set()
+
+        # The spend ceiling (#472). Injected as the `SpendSource` **Protocol**, never as
+        # `CostMeterService` (P2): the two services are otherwise unrelated, and naming the
+        # concrete one would drag the whole rate table onto the turn path.
+        self._spend = spend
+        self._hourly_ceiling_usd = hourly_ceiling_usd
+        self._spend_window_s = spend_window_s
+        self._spend_refusals = 0
+        # Latch so the cue plays once per ceiling episode rather than once per refused turn, and
+        # re-arms when spend falls back under. See `_refused_on_spend`.
+        self._spend_ceiling_announced = False
 
     @property
     def session_open(self) -> bool:
@@ -435,6 +451,16 @@ class ConversationService:
             # this runs, and single ownership is the whole of #452's fix: a deadline the state
             # arms and a handler cancels is a deadline nobody owns.
             self._turn_id = event.correlation_id
+            # ⚠️ Checked HERE, per turn, and NOT inside the cold-session branch below.
+            #
+            # A first draft put it beside the `open()` and was very nearly useless: once a socket
+            # is up, every following turn rides it and never reaches that branch at all. With the
+            # rig's `session_idle_close_s = 300` one session covers five minutes, so the runaway
+            # this guard exists for -- 29 turns in eight minutes -- would have been refused
+            # exactly ONCE, at the very first turn, and then billed in full. Found by a test
+            # asserting a second ceiling episode announces itself, which it could not.
+            if await self._refused_on_spend(event.correlation_id):
+                return
             if not self._session_open:
                 # Cold session (§6.2.3). The §6.7-path-1 memory block is composed and injected here,
                 # overlapping the connect (#126); the client gathers the two. Empty memory / a failed
@@ -634,6 +660,67 @@ class ConversationService:
             ConversationTurnStarted(**self._env(), initiator=initiator)  # type: ignore[arg-type]
         )
 
+    async def _refused_on_spend(self, correlation_id: UUID) -> bool:
+        """Has the spend ceiling been reached? If so, refuse this turn and say so (#472).
+
+        ⚠️ **The only guard in this system that is not a proxy.** §10.4's policy gate and §6.2.4's
+        admission gate both ask questions about the *room* — is it quiet hours, was anyone there,
+        was the frame louder than the echo — and refuse turns that look wrong in the hope that the
+        ones left are cheap. On 2026-08-24 every one of those was satisfied while the robot spent
+        $0.50 in eight minutes with nobody in it (#467). This asks what was actually billed, which
+        is the one question a novel defect cannot make look right.
+
+        Enforced **here**, at the two ``client.open`` sites, because this is where money starts.
+        Both turn origins converge on them, so one guard covers both; and a cost limit belongs
+        beside the socket that incurs the cost rather than in the audio service, which knows
+        nothing about dollars.
+
+        ⚠️ **The cue plays once per episode, not once per refusal.** A robot repeating "try again
+        later" at every utterance is its own fault report, and the reactive path next door already
+        makes the same choice for a dead connection: *"replaying a cue on every utterance would be
+        its own annoyance"*. The counter carries the real frequency.
+
+        ⚠️ **Consequence worth stating rather than discovering.** On the reactive path the state
+        machine has already moved to LISTENING before this runs, so a refusal leaves the machine
+        to reach THINKING and then DEGRADED via §6.9's deadline (#452 made that timer fire whether
+        or not a session exists, which is exactly why this cannot wedge). So a budget stop *looks*
+        like a connection degrade in the state trace. That is why it is counted separately and why
+        the RUNBOOK entry leads with `spend_refusals`: the state is ambiguous, the counter is not.
+        """
+        spent = self._spend.spend_since(self._spend_window_s)
+        if not over_ceiling(spent, ceiling_usd=self._hourly_ceiling_usd):
+            self._spend_ceiling_announced = False
+            return False
+
+        self._spend_refusals += 1
+        # ⚠️ Refusing a turn on an OPEN socket is not enough to stop spending — the mic-forward
+        # loop is already streaming to a server that will answer. So the session is torn down,
+        # which is what "stop spending" has to mean here. The next utterance then meets the cold
+        # path and is refused before anything is opened.
+        if self._session_open:
+            await self._teardown_locked()
+        _log.warning(
+            "spend ceiling reached: $%.4f billed in the last %.0fs against a $%.2f ceiling — "
+            "refusing to open a session (SDS §6.10.6, #472) [correlation_id=%s]",
+            spent,
+            self._spend_window_s,
+            self._hourly_ceiling_usd,
+            correlation_id,
+        )
+        if not self._spend_ceiling_announced:
+            self._spend_ceiling_announced = True
+            self._play_cue(Cue.TRY_AGAIN_LATER)
+        return True
+
+    def spend_refusals(self) -> int:
+        """Turns refused because the spend ceiling had been reached (§3.12.2, #472).
+
+        ⚠️ A plain total rather than a per-reason map, unlike ``admission_refusals``: there is
+        exactly one rule here and inventing a histogram with one bucket would suggest otherwise.
+        Process-scoped like every counter on ``/metrics`` but ``build``.
+        """
+        return self._spend_refusals
+
     async def _on_trigger_fired(self, event: BehaviorTriggerFired) -> None:
         """The robot speaks first — §10.7, and the seam this service has carried since M5.
 
@@ -668,6 +755,10 @@ class ConversationService:
                 )
                 return
             self._turn_id = event.correlation_id
+            # After `_turn_id`, so the refusal and its cue carry THIS turn's correlation id
+            # rather than the previous turn's — `_corr()` reads that latch.
+            if await self._refused_on_spend(event.correlation_id):
+                return
             self._proactive_fact_id = event.fact_id
             self._proactive_occurrence_at = event.occurrence_at
             # Set BEFORE the open: the awaitable handed to open() composes the §10.8 block, and it

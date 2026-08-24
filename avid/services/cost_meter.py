@@ -21,6 +21,7 @@ table is keyed by the injected ``[ai] model`` name, so swapping the model stays 
 from __future__ import annotations
 
 import logging
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -31,7 +32,7 @@ from avid.core.event_bus import (
     OverflowPolicy,
     Subscription,
 )
-from avid.core.ports import EventBus
+from avid.core.ports import Clock, EventBus
 from avid.domain import ConversationTurnEnded, TokenUsage
 
 _log = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ _MODELED_TURNS_PER_DAY = 20
 _DAYS_PER_MONTH = 30
 # O7 (PMP §5.2): affordable operation is ≤ $25/month at the target usage profile.
 _O7_MONTHLY_BUDGET_USD = 25.0
+
+# Nanoseconds per second — `spend_since`'s window is monotonic ns (SDS §9.1.1).
+_NS_PER_S = 1_000_000_000
 _TOKENS_PER_MILLION = 1_000_000
 
 
@@ -102,8 +106,9 @@ class CostMeterService:
 
     name = _SOURCE
 
-    def __init__(self, *, bus: EventBus, model: str) -> None:
+    def __init__(self, *, bus: EventBus, clock: Clock, model: str) -> None:
         self._bus = bus
+        self._clock = clock
         self._model = model
         self._rates = _resolve_rates(model)
         if self._rates is None:
@@ -115,6 +120,10 @@ class CostMeterService:
         # The running daily-total accumulators (TokenUsage.__add__ exists for exactly this,
         # §6.10.6): every turn's counts folded in, plus a turn count for the per-turn average.
         self._total = TokenUsage(input_tokens=0, cached_input_tokens=0, output_tokens=0)
+        # (monotonic_ns, usd) per turn, oldest first — the evidence `spend_since` sums over.
+        # Trimmed on read rather than on write, so a quiet robot holds a bounded, tiny list and a
+        # busy one never pays for eviction in the turn path.
+        self._recent: deque[tuple[int, float]] = deque()
         self._turns = 0
         self._total_cost_usd = 0.0
 
@@ -180,7 +189,12 @@ class CostMeterService:
         monthly spend over the O7 budget escalates to a warning, so the gate's tripwire is loud."""
         self._total = self._total + event.usage
         self._turns += 1
-        self._total_cost_usd += self._turn_cost_usd(event.usage)
+        cost = self._turn_cost_usd(event.usage)
+        self._total_cost_usd += cost
+        # The rolling window the spend ceiling reads (#472). Stamped MONOTONIC, never wall: this
+        # Pi has no RTC, an offline boot comes up hours wrong and NTP steps it later, and a window
+        # computed across that step would either forgive a runaway or invent one (SDS §9.1.1).
+        self._recent.append((self._clock.monotonic_ns(), cost))
 
         cached_ratio = self._cached_ratio()
         if self._rates is None:
@@ -222,6 +236,23 @@ class CostMeterService:
             + usage.uncached_input_tokens * self._rates.uncached_input
             + usage.output_tokens * self._rates.output
         ) / _TOKENS_PER_MILLION
+
+    def spend_since(self, window_s: float) -> float:
+        """Dollars billed within the last *window_s* seconds — the ``SpendSource`` port (#472).
+
+        ⚠️ **Observed spend, and that is the entire point.** The obvious alternative,
+        :meth:`projected_monthly_usd`, extrapolates a fixed ~20 turns/day and so ignores the rate
+        actually being burned: during the 2026-08-24 runaway it read ~$11/month, comfortably
+        inside O7, while real spend ran at roughly $3.75/hour. A ceiling built on it would have
+        watched the entire incident and reported a healthy robot.
+
+        Old entries are evicted here rather than on write: the turn path stays a single append,
+        and this is called from a decision that is already about to open a socket.
+        """
+        cutoff = self._clock.monotonic_ns() - int(window_s * _NS_PER_S)
+        while self._recent and self._recent[0][0] < cutoff:
+            self._recent.popleft()
+        return sum(cost for _, cost in self._recent)
 
     def _projected_monthly_usd(self) -> float:
         """Extrapolate a monthly spend from the average turn cost and the §6.10.3 usage model

@@ -18,6 +18,7 @@ import pytest
 
 from avid.adapters.clock import FakeClock
 from avid.core.event_bus import AsyncioEventBus
+from avid.core.ports import Clock
 from avid.domain import ConversationTurnEnded, TokenUsage
 from avid.services.cost_meter import CostMeterService
 
@@ -37,8 +38,8 @@ class _SignallingMeter(CostMeterService):
     bus has delivered a fact (asserting after a fixed sleep would be a race that fails on CI).
     """
 
-    def __init__(self, *, bus: AsyncioEventBus, model: str) -> None:
-        super().__init__(bus=bus, model=model)
+    def __init__(self, *, bus: AsyncioEventBus, clock: Clock, model: str) -> None:
+        super().__init__(bus=bus, clock=clock, model=model)
         self._metered = asyncio.Event()
 
     async def _on_turn_ended(self, event: ConversationTurnEnded) -> None:
@@ -64,7 +65,7 @@ class Rig(NamedTuple):
 async def _rig(model: str = _MODEL) -> AsyncIterator[Rig]:
     clock = FakeClock()
     bus = AsyncioEventBus()
-    meter = _SignallingMeter(bus=bus, model=model)
+    meter = _SignallingMeter(bus=bus, clock=FakeClock(), model=model)
     for sub in meter.subscriptions():
         bus.subscribe(
             sub.event_type,
@@ -195,8 +196,12 @@ def test_the_shipped_model_is_priced_from_an_exact_row_not_the_family_guess() ->
 def test_family_fallback_prices_an_unlisted_mini_snapshot() -> None:
     """An unlisted ``mini`` snapshot still meters via the family fallback, not the flagship."""
     bus = AsyncioEventBus()
-    mini = CostMeterService(bus=bus, model="gpt-realtime-mini-2099-01-01")
-    flagship = CostMeterService(bus=bus, model="gpt-realtime-2099-01-01")
+    mini = CostMeterService(
+        bus=bus, clock=FakeClock(), model="gpt-realtime-mini-2099-01-01"
+    )
+    flagship = CostMeterService(
+        bus=bus, clock=FakeClock(), model="gpt-realtime-2099-01-01"
+    )
     usage = TokenUsage(input_tokens=100, cached_input_tokens=0, output_tokens=0)
     # 100 uncached input tokens: mini $10/1M = $0.001; flagship $32/1M = $0.0032.
     assert mini._turn_cost_usd(usage) == pytest.approx(0.001)

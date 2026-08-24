@@ -1330,3 +1330,33 @@ class StateSource(Protocol):
     def snapshot(self) -> Mapping[str, object]:
         """The current reading. Absent values are named, never reported as a default."""
         ...
+
+
+@runtime_checkable
+class SpendSource(Protocol):
+    """How much money has actually been spent lately (#472, SDS §6.10.6).
+
+    The seam between the thing that *knows* what turns cost and the thing that decides whether to
+    start another. ``CostMeterService`` implements it; ``ConversationService`` consumes it, and
+    depends on this Protocol rather than on that service (P2) — the two are otherwise unrelated,
+    and a direct reference would drag the whole rate table into the turn path.
+
+    ⚠️ **Observed, never modelled.** The obvious alternative was to expose
+    ``projected_monthly_usd``, which already existed. It extrapolates a fixed ~20 turns/day and
+    therefore *ignores the observed rate*: during the 2026-08-24 runaway it read ~$11/month while
+    real spend ran at roughly $3.75/hour, so a guard built on it would have watched the whole
+    incident and reported a healthy robot. This returns dollars that were genuinely billed.
+    """
+
+    def spend_since(self, window_s: float) -> float:
+        """Dollars billed within the last *window_s* seconds.
+
+        ⚠️ The window is **monotonic**, never wall-clock: this Pi has no RTC, an offline boot
+        comes up hours wrong and NTP steps it later, and a spend window computed across that step
+        would either forgive a runaway or invent one (SDS §9.1.1).
+
+        Zero is a real answer — a quiet hour — and is not distinguishable here from "no rate row
+        for this model, so dollars were never accrued". The caller cannot tell those apart and
+        must not try; the meter logs the missing-rate case loudly at startup instead.
+        """
+        ...

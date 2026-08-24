@@ -392,6 +392,26 @@ class AiConfig(_Section):
     # auto-detection on short conversational utterances is exactly where it is weakest.
     transcription_language: str | None = "en"
     max_output_tokens: int = 512
+    # The spend ceiling: dollars that may be billed inside `spend_window_s` before the robot stops
+    # opening paid sessions (#472, SDS §6.10.6).
+    #
+    # ⚠️ **Derived from §6.10.3, not guessed.** O7 is $25/month, and the usage model behind it is
+    # ~20 turns/day -- about **$0.034/hour**. This is ~29x that, so it cannot bite an owner having
+    # an unusually talkative afternoon. The number it is sized against is the other one: the
+    # 2026-08-24 runaway burned **$3.75/hour** with nobody in the room, so this caps that class of
+    # defect at roughly a quarter of what it actually cost before a human noticed.
+    #
+    # ⚠️ Measured against **observed** spend, never `projected_monthly_usd` -- that figure
+    # extrapolates a fixed turn rate and read ~$11/month *during* the runaway. A tripwire on it
+    # would have watched the whole incident and reported a healthy robot.
+    #
+    # 0.0 is a legitimate value meaning "may not open a paid session at all" -- the config-only
+    # emergency stop, the sibling of a very large `barge_in_margin_db` (SDS §6.3).
+    hourly_ceiling_usd: float = Field(default=1.00, ge=0.0)
+    # The window the ceiling is measured over. An hour is short enough that a stopped robot
+    # recovers on its own within one, and long enough that a burst of real conversation averages
+    # out inside it rather than tripping a limit meant for runaways.
+    spend_window_s: float = Field(default=3600.0, gt=0.0)
     personality: str = "config/personality/default.toml"
     instructions: str = (
         "You are Pico, a small AI desk companion robot. Speak briefly and warmly, "
