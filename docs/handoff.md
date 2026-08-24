@@ -6,94 +6,85 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-24 · `main` `d2c0032` · `v0.M10.0` tagged · ✅ **#467 fixed AND deployed** · ✅ **#472 fixed, NOT deployed** · rig **running, quiet, $0.00** · M11 window not started · gh `AliSleiman0`.
+**As of:** 2026-08-24 (evening) · `main` `ffd4e06` · `v0.M10.0` tagged · ✅ **#467 and #472 both fixed AND deployed** · rig **running, quiet, $0.00, amp 85%** · 🔴 **the load corpus cannot drive the robot at any safe volume — next step needs a person** · M11 window not started · gh `AliSleiman0`.
 
-## ⭐ Next session — one deploy, then one audible test that answers three questions
+## ⭐ Next session — the corpus cannot drive the robot; the next real step needs a person
 
 ### The rig, as left
 
 | | |
 |---|---|
-| `robot.service` | **active + enabled**, up since 2026-08-24 18:09 UTC, `NRestarts=0` |
-| build on the rig | `v0.M10.0-94-gbec4cff` — has **#467**, does **not** have #472 |
-| `/opt/avid` | `bec4cff` (main is now `d2c0032`) |
-| amp `Master` | **60%** — the provisioned value is **85%** (`PI_OPERATIONS` §5.1) |
-| spend | **$0.00**, `turns 0`, `reactive_turns 0`, `admission_refusals {}` over a 5-minute idle watch |
-| config backup | `/etc/robot/config.toml.pre467` |
+| `robot.service` | **active + enabled**, `NRestarts=0`, all eight adapters real |
+| build on the rig | **`v0.M10.0-96-gffd4e06`** — has **#467 and #472** |
+| `/opt/avid` | `ffd4e06` (level with `main`) |
+| amp `Master` | **85%** — the provisioned value, restored after the test |
+| mic | AGC **off**, `Capture 10 [62%] [14.88dB]` — verified by measurement, not by doc |
+| spend | **$0.00**, `turns 0`, `spend_refusals 0`, `admission_refusals {}`, `illegal_transitions {}` |
+| config backups | `/etc/robot/config.toml.pre472` (and `.pre467`) |
 
-### 1. Deploy #472 — and ⚠️ **do not `install` the template**
+### ✅ #472 is deployed and verified
 
-Two new keys ship with it (`[ai] hourly_ceiling_usd`, `[ai] spend_window_s`). They are absent on the
-machine, so it would fall back to schema defaults **silently**. The defaults happen to match today,
-so nothing would be *wrong* — but pin them anyway, because that is exactly the latent drift
-`PI_OPERATIONS` §3 is about.
+Merged surgically: the diff against the live config was **exactly** the two `[ai]` keys
+(`hourly_ceiling_usd = 1.00`, `spend_window_s = 3600.0`) plus comments. Every deliberate machine
+delta survived — eight real adapters, `quiet_hours 02:00–09:00`, `session_idle_close_s 300`.
 
-⚠️ **`sudo install /opt/avid/config/pi.toml /etc/robot/config.toml` would break the robot.** The
-template ships every adapter `"fake"` **on purpose**, and the machine also carries deliberate
-deltas. Measured 2026-08-24, the full list of what a wholesale install would clobber:
+⚠️ **`load_config` must be run from `/opt/avid`**, not from `/tmp` or `~`. `[ai] personality` is
+resolved against the **process working directory**, so validating a candidate config from anywhere
+else fails with a `FileNotFoundError` that looks like a broken config and is not one.
 
-```
-adapters.camera/servo/display/microphone/speaker/vad/face_detector/realtime → all "fake"
-behavior.quiet_hours  02:00-09:00 (machine)  vs  22:00-07:30 (repo)
-gate.session_idle_close_s  300 (machine)  vs  30 (repo)
-```
+⚠️ The check that cannot be fooled passed: **`spend_refusals` is present on `/metrics`** (`0`, not
+`<<ABSENT>>`). The ceiling has still never *fired* — nothing has cost anything.
 
-The recipe that worked — **merge surgically, validate before installing**:
+### 🔴 The audible test ran, and it settles the question the wrong way
 
-```sh
-PI=192.168.10.172        # AVID / AVID.local both flap; pin the IP for a session
-ssh alisleiman0@$PI 'sudo cp -a /etc/robot/config.toml /etc/robot/config.toml.pre472'
-ssh alisleiman0@$PI 'cd /opt/avid && git pull --ff-only'
-# add the two [ai] keys by hand, then — BEFORE installing:
-ssh alisleiman0@$PI '/opt/avid/.venv/bin/python -c "from avid.core.config import load_config; c=load_config(\"/tmp/config.new.toml\"); print(c.ai.hourly_ceiling_usd, c.adapters.camera, c.gate.session_idle_close_s)"'
-ssh alisleiman0@$PI 'sudo install -m 644 -o root -g root /tmp/config.new.toml /etc/robot/config.toml'
-sudo systemctl restart robot
-```
+**The load corpus cannot drive this robot acoustically, and no volume fixes it.** Played at 85%
+the robot never left IDLE (`transitions: 1`). Rather than sweep volumes a third time, the audio
+was recorded **at the microphone** and run through the deployed `SileroVad` and the gate's own
+`HighPass(150 Hz ×3)` offline — which moves the evidence from "the robot published nothing" to
+"the detector saw nothing".
 
-⚠️ **Verify by looking for the counter, not by reading the file.** `spend_refusals` must appear on
-`/metrics`. Absent means the fix is not running — that is the whole silent-fallback trap, and it is
-the only check that cannot be fooled:
+| | filt peak | Silero speech | longest run |
+|---|---|---|---|
+| **source files** (3 clips) | −12.8 … −13.5 | **37.7 – 51.3%** | **860 – 1340 ms** |
+| heard @ 85% | −25.1 … −29.6 | **0.0 – 1.4%** | 0 – 100 ms |
+| heard @ 100% | −18.9 … −22.8 | 0.6 – 12.3% | 40 – 280 ms |
 
-```sh
-curl -s localhost:8787/metrics | python3 -c 'import json,sys;m=json.load(sys.stdin)["metrics"];print({k:m.get(k,"<<ABSENT>>") for k in ("build","spend_refusals","admission_refusals","reactive_turns")})'
-```
+Ambient floor: filtered median **−47.6 dBFS** — *healthier* than the −38.9…−43.4 on #468. No floor
+problem. Full tables on #468 and #471.
 
-⚠️ `git pull` on the Pi must run **as the login user**, not under `sudo` — the credential helper is
-in the user's home, and `sudo git` fails with *"could not read Username"*.
+⚠️ **The mechanism is not level, and that kills #468's AC-2.** At 85% the clip sits ~18–22 dB above
+the filtered floor and Silero still returns ~0%. The loss is in the **round trip** (−13 dBFS in the
+file → −29 dBFS at the mic, ~16 dB) and the voiced *runs* collapse from ~1 s to nothing. The
+sources already peak at **−3.2 dBFS**, so there is ~3 dB of normalisation headroom against a 16 dB
+loss: **normalising the corpus is arithmetically incapable of closing this.** The variable is the
+reproduction chain (MAX98357A + small speaker), not the recordings.
 
-### 2. The audible test — one experiment, three answers
+⚠️ **Correction worth carrying:** raw rms reads **−22.6 dBFS in silence and at every volume from
+40% to 100%** — sub-150 Hz energy, dead constant, moves for nothing. I read that as AGC before
+checking the mixer. It is not; AGC is off. It is precisely what AVID-283's high-pass exists for.
+**Never quote raw rms on this rig** — it cannot tell an empty room from a robot at full volume.
 
-**This is the highest-value thing left and it takes ten minutes.** Raise the amp to the provisioned
-85% and play a corpus clip with the robot running:
+### So: all three of last session's questions are still open, and none can be closed alone
 
-```sh
-ssh alisleiman0@$PI 'amixer -M sset Master 85%; aplay -D default /opt/avid/assets/load/calendar.wav'
-# then watch: does it hear it, does it answer itself, what does the gate say
-ssh alisleiman0@$PI 'journalctl -u robot --since "@'"$(date +%s)"'" --no-pager | grep -E "speech_started|echo gate|SPEAKING.*LISTENING"'
-```
+1. **#467's gate is NOT proven on hardware.** Nothing was ever admitted, so it made no decision.
+   `admission_refusals {}` on an idle rig is the *absence* of a test. Do not bank it as a pass.
+2. **#471 got AC-1 only** — conditions measured (above). ⚠️ **AC-2 and AC-3 are blocked**, and not
+   by scheduling: population (a) "10 replies with nobody speaking" needs something to *start* each
+   turn, and at 85% the corpus is not it.
+3. **#468 does not close.** Its central claim — that the usable band is empty — is confirmed and
+   now quantified at the VAD. Its *mechanism* and ACs need amending; a proposal is on the issue,
+   deliberately left as a comment rather than an edit.
 
-It answers three open questions at once:
+### The next real step needs a person in the room
 
-1. **Is #467's gate proven on hardware?** It is currently **not** — nothing has made a sound since
-   the deploy, and `admission_refusals {}` in an empty room is *the absence of a test*, not a pass.
-   Expect it to become non-empty. **That is the gate working.**
-2. **#471's first data point.** The new `echo gate:` line now prints `%d tested` alongside
-   `%d suppressed`, plus the frozen guard floor and per-rule refusals — so an ordinary run is a
-   calibration run with no separate mode.
-3. **⚠️ It may close #468 outright.** That issue exists because the corpus only tripped the gate
-   near 100%, and 100% was what triggered the self-conversation. **The gate now refuses the robot's
-   own echo, so 85% should finally be testable.** If the clip trips the gate at 85% and the robot
-   does *not* answer itself, #468 closes with no code and no re-recording.
+Everything left converges on the same requirement, which is the standing lesson (`#measure against
+a person`) arriving again: **a human voice at ~1 m at 85%**. Thirty minutes with someone in the
+room does #471 (a) and (b), proves or breaks #467's gate, and decides #468's amendment. No further
+solo bench work moves any of the three.
 
-⚠️ Watch `turns` and `cost_usd` while doing it. Budget a few cents. If it self-converses anyway,
-`spend_refusals` will not save you until #472 is deployed — so **do step 1 first**.
-
-### 3. Then #471 (calibration), then #468 if it survives, then the window
-
-`guard_window_ms = 700` and `barge_in_margin_db = 3.0` are both **uncalibrated and say so in the
-config**. #471 has the protocol. ⚠️ Its most important line: **if the two populations overlap, stop
-tuning** — §6.2.4 already says no margin can be tuned into working, and the honest answers are #163
-(AEC) or full half-duplex (a very large margin, config only).
+If that is not available, the decidable-alone piece is **#468's option 1** — repeat tonight's
+recording protocol through a better speaker at a person's geometry, and see whether the round-trip
+loss is a property of the amp or of the whole path.
 
 Then the 72-hour window, started from `systemctl restart robot`, **never a power-on** (a cold boot
 straddles two clock frames, `PI_OPERATIONS` §5.1).
@@ -124,7 +115,7 @@ discriminator is the **gap to the robot's own reply** (370 ms, against a person 
 end), so the backstop counts back-to-back origins. A cap on turns that never proved they came from a
 human, not a cap on turns.
 
-### ✅ #472 — nothing could refuse work on cost · merged `d2c0032`, **not deployed**
+### ✅ #472 — nothing could refuse work on cost · merged `d2c0032`, **deployed 2026-08-24 evening**
 
 The O7 tripwire wrote a `WARNING` **nothing consumed**. Now a real ceiling: `$1.00/h` measured over
 a rolling **monotonic** window, refusing per turn and tearing down an open session, announced once
