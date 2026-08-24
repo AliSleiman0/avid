@@ -722,6 +722,7 @@ def _args(
         min_coverage=0.99,
         bar=0.99,
         interventions=str(tmp_path / "interventions.jsonl"),
+        load_log=str(tmp_path / "load.jsonl"),
     )
 
 

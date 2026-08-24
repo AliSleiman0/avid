@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -122,6 +123,35 @@ def _samples_db(
     return str(path)
 
 
+def _load_log(samples: str, *, worked: bool = True) -> str:
+    """A healthy load log beside the samples DB, unless a test asks otherwise (#389).
+
+    ⚠️ Written by default for the same reason `_samples_db(alive=True)` writes a state series:
+    every test in this file is about something else — the uptime maths, the gaps, the clock — and
+    a fixture with no load log turns them all INCONCLUSIVE on LOAD for a reason having nothing to
+    do with their subject. That is this project's own lesson pointed at itself, and it has now
+    caught the same class of test twice.
+    """
+    path = Path(samples).parent / "load.jsonl"
+    if worked:
+        path.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "at": _SINCE + i * 900,
+                        "kind": "played",
+                        "note": f"clip-{i}",
+                        "turn_ok": True,
+                    }
+                )
+                for i in range(4)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return str(path)
+
+
 def _args(samples: str, robot_db: str, **over: Any) -> argparse.Namespace:
     base = dict(
         config=_SIM_TOML,
@@ -134,6 +164,7 @@ def _args(samples: str, robot_db: str, **over: Any) -> argparse.Namespace:
         min_coverage=0.99,
         bar=0.99,
         interventions=str(Path(samples).parent / "interventions.jsonl"),
+        load_log=_load_log(samples),
     )
     base.update(over)
     return argparse.Namespace(**base)

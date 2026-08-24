@@ -691,6 +691,158 @@ def _rejected_pairs(samples: Sequence[sqlite3.Row]) -> dict[str, int]:
     return worst
 
 
+def _read_load_log(path: Path) -> list[dict[str, Any]]:
+    """What the load generator says it played (#389, ``docs/demos/soak_load.py``).
+
+    Same discipline as :func:`_read_interventions`, and for the same reason: this is the record of
+    something the instrument next door **structurally cannot see**. ``/metrics`` counts turns the
+    robot *completed*; only the generator knows how many utterances it *attempted*, and the gap
+    between the two is the interesting number.
+
+    ⚠️ **Never raises.** A malformed line is skipped and counted — a generator that wrote a
+    truncated record while being killed must not take down the report for a 72-hour window.
+    """
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    malformed = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("at"), int):
+            entries.append(parsed)
+        else:
+            malformed += 1
+    if malformed:
+        entries.append(
+            {"at": 0, "kind": "_malformed", "note": f"{malformed} unreadable line(s)"}
+        )
+    return sorted(entries, key=lambda e: int(e["at"]))
+
+
+def _metric_total(samples: Sequence[sqlite3.Row], key: str) -> float | None:
+    """A process-scoped ``/metrics`` counter, summed across processes. ``None`` if never reported.
+
+    The same arithmetic as :func:`_transition_total`, read out of the stored payload rather than a
+    column — ``turns`` and ``cost_usd`` have been in ``/metrics`` for milestones and the sampler
+    has kept the whole body since #383, so this works retroactively with no schema change.
+
+    ⚠️ Rises, never the sum and never the last reading. These counters reset when the service
+    restarts and ``Restart=always`` guarantees that happens across a long window: summing
+    double-counts, and taking the last forgets everything before the restart.
+    """
+    readings: list[float] = []
+    for row in samples:
+        if row["payload"] is None:
+            continue
+        try:
+            value = json.loads(row["payload"]).get("metrics", {}).get(key)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            readings.append(float(value))
+    if not readings:
+        return None
+    total = readings[0]
+    for before, after in zip(readings, readings[1:]):
+        total += after - before if after >= before else after
+    return total
+
+
+def _load_criterion(
+    entries: Sequence[dict[str, Any]],
+    samples: Sequence[sqlite3.Row],
+    *,
+    window: tuple[int, int],
+) -> _Criterion:
+    """LOAD — what work this window actually contained (#389, SDS §12.6).
+
+    **Graded, and the reason is worth stating.** ``LIVE`` above reports its transition count rather
+    than grading it, because *"an empty house produces no transitions, and a criterion that fails
+    because nobody came home is a criterion people learn to ignore."* A load generator **removes
+    the empty-house confound**: if it says it played an utterance, the robot owed a turn, and a
+    shortfall is a defect rather than a quiet evening.
+
+    So the graded claim is narrow and defensible — *every utterance played produced a turn* — and
+    the raw counts, the spend and the skips are reported beside it.
+
+    ⚠️ **Absent is not idle.** No log means no generator ran, which is a window measuring an
+    unattended robot doing nothing: exactly the void-window case. So it is ``inconclusive``, never
+    ``pass``.
+
+    ⚠️ **Proactive suppression during a load window is EXPECTED and is not a regression.** §10.4's
+    rule 4 vetoes when ambient speech passes its threshold with no session opened, which is
+    precisely what a generator manufactures. ``triggers_fired`` will collapse and ``proactive_log``
+    will fill with ``ambient_speech``/``state`` reasons for the length of the run. A reader who
+    does not know that will diagnose a defect in the proactive path, so the rows say it.
+    """
+    since, until = window
+    inside = [
+        e
+        for e in entries
+        if since <= int(e["at"]) < until or e.get("kind") == "_malformed"
+    ]
+    metered = _metric_total(samples, "turns")
+    spent = _metric_total(samples, "cost_usd")
+
+    if not inside:
+        return _Criterion(
+            "LOAD",
+            "the window contained real work (#389)",
+            "inconclusive",
+            "no load log for this window. ⚠️ ABSENT, not idle: either no generator ran — in which "
+            "case this window measures an unattended robot doing nothing, which is the "
+            "void-window case — or it wrote somewhere else. The robot metered "
+            + ("no turns" if metered is None else f"{metered:.0f} turn(s)")
+            + " regardless.",
+        )
+
+    kinds: dict[str, int] = {}
+    for entry in inside:
+        kind = str(entry.get("kind", "?"))
+        kinds[kind] = kinds.get(kind, 0) + 1
+    played = kinds.get("played", 0)
+    no_turn = kinds.get("no_turn", 0)
+    failed = kinds.get("play_failed", 0)
+
+    rows = [
+        "  ".join(f"{kind}={count}" for kind, count in sorted(kinds.items())),
+        f"metered  turns={'ABSENT' if metered is None else f'{metered:.0f}'}  "
+        f"cost=${'ABSENT' if spent is None else f'{spent:.4f}'}",
+    ]
+    rows.extend(
+        f"stopped by {entry.get('note', '?')} at {entry.get('at')}"
+        for entry in inside
+        if entry.get("kind") == "capped"
+    )
+    rows.append(
+        "⚠️ proactive suppression is EXPECTED during a load window - S10.4 rule 4 vetoes on "
+        "ambient speech with no session, which a generator manufactures. A collapsed "
+        "triggers_fired here is not a proactivity regression."
+    )
+
+    # ⚠️ Graded on the generator's OWN verdict (`no_turn`), not on `played` minus `metered`. The
+    # robot also answers real humans, so the metered count is not a quantity this criterion can
+    # difference against — and a criterion that failed because somebody spoke to the robot would
+    # be exactly the kind nobody reads.
+    return _Criterion(
+        "LOAD",
+        "every utterance played produced a turn (#389)",
+        "fail" if (no_turn or failed) else "pass",
+        f"{played} utterance(s) played, {no_turn} produced no turn, "
+        f"{failed} could not be played"
+        if (no_turn or failed)
+        else f"{played} utterance(s) played, every one of them answered",
+        rows=rows,
+    )
+
+
 def _liveness_criterion(
     samples: Sequence[sqlite3.Row],
     *,
@@ -1242,6 +1394,17 @@ def _grade(args: argparse.Namespace) -> list[_Criterion]:
         )
     )
 
+    # ── LOAD: what work the window contained (#389) — GRADED ──────────────────────────────────
+    #
+    # Beside LIVE and above the boot_log early-return, for the third time and the same reason: it
+    # depends only on `samples` and a sidecar log. LIVE says the robot was not wedged; this says
+    # there was something for it not to be wedged *at*.
+    criteria.append(
+        _load_criterion(
+            _read_load_log(Path(args.load_log)), samples, window=(since, until)
+        )
+    )
+
     records = _boot_records(args.robot_db, since, until)
     if not records:
         criteria.append(
@@ -1409,6 +1572,12 @@ def main() -> int:
     parser.add_argument("--config", default="/etc/robot/config.toml")
     parser.add_argument("--samples", default="/var/lib/soak/samples.db")
     parser.add_argument("--robot-db", default="/var/lib/robot/robot.db")
+    parser.add_argument(
+        "--load-log",
+        default="/var/lib/soak/load.jsonl",
+        help="what the load generator played (#389) - one JSON object per line, written by "
+        "docs/demos/soak_load.py. Graded: an utterance played owes a turn.",
+    )
     parser.add_argument(
         "--interventions",
         default="/var/lib/soak/interventions.jsonl",
