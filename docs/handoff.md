@@ -8,10 +8,40 @@
 
 **As of:** 2026-08-24 · `main` · `v0.M10.0` tagged · ✅ **rig DEPLOYED and healthy on `v0.M10.0-77-gf1009a3`; #452, #456 and #447 all closed** · ⛔ M11 soak stopped, O5 amended · gh `AliSleiman0`.
 
-## ⭐ Next session — 🟢 THE LOAD PATH WORKS; BUILD THE GENERATOR, THEN RUN THE WINDOW
+## ⭐ Next session — 🎤 RECORD 10 UTTERANCES, THEN RUN THE WINDOW
 
-**The question that was blocking the 72-hour window is answered: sound in the room drives a
-complete turn.** Proven on the rig 2026-08-24, 12:05:27, with nothing but a WAV played from a
+**The generator is built and merged (#462). The only thing between here and a 72-hour window that
+measures something is ~10 minutes of recording**, because the repo contains **zero seconds of human
+speech** and the only speech assets are the robot's own SAPI cue voice — which
+`assets/cues/NOTICE.md` already flags as a redistribution problem, and which would fill the memory
+store with the robot answering itself saying *"hmm."* for three days.
+
+```sh
+# 10 clips, 16 kHz mono, ~1-3 s each, NO trailing silence (the generator inserts the gap).
+# The wording and filenames are already declared in assets/load/manifest.json.
+uv run --frozen python docs/demos/soak_load.py --mode validate --corpus assets/load --config config/sim.toml
+```
+
+The validator grades duration, level and **real Silero speech frames** per clip, and says plainly
+that the file is not the room. Then the bounded dry run on the rig — 20 minutes, <= 5 turns,
+<= $0.50, whose entire point is that it stops itself:
+
+```sh
+cd /opt/avid && sudo /opt/avid/.venv/bin/python docs/demos/soak_load.py --mode play     --config /etc/robot/config.toml --corpus /opt/avid/assets/load     --interval 300 --for-seconds 1200 --max-turns 5 --max-usd 0.50
+```
+
+⚠️ **Deploy first** — the rig is behind again — and **start the real window from a `systemctl
+restart robot`, never a power-on** (`PI_OPERATIONS.md` §5.1).
+
+⚠️ **The caps in that command are the only caps that exist.** §10.4's gate throttles *proactive*
+turns only; nothing in the robot rate-limits a reactive one, because until now the only thing that
+could start one was a person in the room.
+
+⚠️ **Expect `triggers_fired` to collapse while it runs.** Rule 4 vetoes on the ambient speech the
+generator manufactures. That is not a proactivity regression, and the LOAD criterion says so in its
+own rows.
+
+**The measurement it all rests on: sound in the room drives a complete turn.** Proven on the rig 2026-08-24, 12:05:27, with nothing but a WAV played from a
 second process:
 
 ```
@@ -370,6 +400,23 @@ still convicted, and there is a test asserting exactly that.
 so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
+
+- ⚠️ **`ruff check` passing is not `ruff format --check` passing**, and CI runs both. A PR went red
+  on lint after a local `ruff check .` came back clean, because the last edit had left a file
+  unformatted and only the *format* pass sees that. Run both, or run `ruff format .` last.
+
+- ⚠️ **A test that hangs is worse than one that fails, and a neuter that hangs proves nothing.**
+  #462's cap tests bound the generator's loop by a deterministic monotonic clock *as well as* by
+  the cap under test — without that, neutering a cap made the loop run forever and the suite hung
+  instead of reporting. A hang is a test that never got to say anything: it costs a timeout to
+  notice, gives no failure message, and looks identical to an infrastructure problem. **When a
+  guard's failure mode is "the loop never exits", the test needs a second, independent bound.**
+
+- ⚠️ **The gate that protects the robot does not protect the wallet.** `evaluate_policy` has exactly
+  one call site and it is the *proactive* path — quiet hours, the global cooldown, the daily budget
+  and the presence rule never see a **reactive** turn. That was safe while the only thing that could
+  start one was a person in the room. Anything that can synthesise input (a load generator, a test
+  harness, an automation) has **no backstop at all**, and its own caps are the only caps.
 
 - ⚠️ **A process-scoped counter read after a restart reports zero, and zero is what a broken robot
   reports too.** I read `turns 0` / `cost_usd 0.0` from `/metrics` and nearly filed a defect —
