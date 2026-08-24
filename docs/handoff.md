@@ -401,6 +401,19 @@ so it is gross and corroborated many times over.
 
 ## Standing gotchas (carry forward)
 
+- ⚠️ **Point a new instrument at real data before you trust it — the first thing it judges will
+  find its bug.** `soak_load.py --mode validate`, aimed at the shipped cue clips on its first run,
+  reported *"onnxruntime or the Silero model is absent here"* while both were installed and
+  working: the clips are 24 kHz and Silero supports 16/8 kHz only, so the model raised and the code
+  blamed a missing dependency. **A report describing something other than the run, inside the tool
+  written to prevent exactly that.** The fix judges against the *microphone's* rate and splits
+  "the VAD is absent" from "the VAD refused this clip". ⚠️ Note resampling is NOT the fix —
+  `_resample_pcm16` refuses to downsample without an anti-alias filter, deliberately.
+
+- ⚠️ **A loud clip is not a speech clip, and only the real VAD knows the difference.** Proven on the
+  rig: a 220 Hz tone at −11.2 dBFS passes every level check and returns **`silero 0`**. Any gate
+  that qualifies audio on level alone will admit tones, hum and music. Ask the real adapter.
+
 - ⚠️ **`ruff check` passing is not `ruff format --check` passing**, and CI runs both. A PR went red
   on lint after a local `ruff check .` came back clean, because the last edit had left a file
   unformatted and only the *format* pass sees that. Run both, or run `ruff format .` last.
