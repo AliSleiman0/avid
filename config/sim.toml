@@ -15,6 +15,8 @@ speaker    = "fake"
 vad        = "fake"             # scripted-timeline VAD simulator (silero is Pi-only, AVID-77)
 face_detector = "fake"
 realtime   = "replay"           # replay recorded sessions — no OpenAI connection
+drive      = "fake"             # the wheels (#400, ADR-015): an odometer, no motors
+edge       = "fake"             # scriptable "clear" flag — the desk edge on demand
 
 [ai]
 model             = "gpt-realtime-mini-2025-12-15"   # PINNED. §6.10.
@@ -158,6 +160,28 @@ micro_motion_interval_min_s = 12.0
 micro_motion_interval_max_s = 40.0
 micro_motion_amplitude_frac = 0.03   # smaller than instinct suggests — a noticeable drift
                                      # is a tic; the goal is noticeable only by its absence.
+
+[drive]                         # the wheels (#400, ADR-015, SDS §3.9.5) — mirrors pi.toml on
+# purpose, so the simulator's odometer walks the same geometry the rig will. Pins are inert
+# under the fake adapter; they are here so the sim profile IS the pi profile minus hardware.
+left_forward_pin   = 5
+left_backward_pin  = 6
+right_forward_pin  = 12
+right_backward_pin = 13
+forward_is_inverted = true      # measured on the rig — one global flip, not per-wheel
+mm_per_s_at_full   = 128.0      # PROVISIONAL (SPK-6)
+step_mm            = 20.0
+max_excursion_mm   = 30.0       # the budget that bounds every plan
+speed_frac         = 0.4
+dwell_ms           = 300
+idle_step_interval_min_s = 180.0
+idle_step_interval_max_s = 600.0
+
+[drive.edge]
+pins        = [23, 22]          # never 24/25 — the display overlay owns those at boot
+active_high = true              # measured: HIGH = surface present, the inverse of the datasheet
+poll_ms     = 20
+clear_hold_ms = 500
 
 [display]                       # panel geometry + sinks for the display adapter (AVID-13/55)
 frames_dir  = ".artifacts/frames"   # where FakeDisplay writes its eyeball-able PNGs (§3.9.2)

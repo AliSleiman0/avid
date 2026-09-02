@@ -12,6 +12,8 @@ from avid.core.config import (
     AdaptersConfig,
     ApiConfig,
     Config,
+    DriveConfig,
+    EdgeConfig,
     MotionConfig,
     PersonalityConfig,
     load_config,
@@ -728,6 +730,139 @@ def test_a_collapsed_micro_motion_band_is_rejected_at_load() -> None:
                 }
             }
         )
+
+
+# ── The wheels: [drive] and [drive.edge] (#400, ADR-015) ────────────────────────────────────
+
+
+def test_both_profiles_ship_the_wheels_fake_with_the_measured_pin_map() -> None:
+    """The rig as bench-wired on 2026-08-31, in the files the machine is provisioned from.
+
+    ``drive``/``edge`` ship **fake** in both profiles — selecting real hardware is a
+    provisioning act (``deploy/PI_OPERATIONS.md`` §3), exactly as every other adapter. The pins
+    are asserted because they are the one thing the wiring can contradict and no test can
+    infer: a wrong pin produces a perfect fake trace and a motionless robot."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        config = load_config(profile)
+        assert (config.adapters.drive, config.adapters.edge) == ("fake", "fake"), (
+            profile
+        )
+        drive = config.drive
+        assert (
+            drive.left_forward_pin,
+            drive.left_backward_pin,
+            drive.right_forward_pin,
+            drive.right_backward_pin,
+        ) == (5, 6, 12, 13), profile
+        assert drive.edge.pins == (23, 22), profile
+
+
+def test_the_direction_flip_is_one_global_flag_and_it_is_on() -> None:
+    """Measured, not designed: ``Motor.forward()`` on BOTH channels drives the robot backward.
+
+    The wiring diagram assumed the mirrored mount needed asymmetric per-wheel inversion; the
+    hubs cancel it. So there is exactly one flag, it is ``True`` on the rig, and a schema that
+    grew ``left_inverted``/``right_inverted`` would be two values that can disagree with one
+    wiring — this test is what keeps the shape single."""
+    assert "forward_is_inverted" in DriveConfig.model_fields
+    assert not {name for name in DriveConfig.model_fields if "inverted" in name} - {
+        "forward_is_inverted"
+    }
+    for profile in (_SIM_TOML, _PI_TOML):
+        assert load_config(profile).drive.forward_is_inverted is True, profile
+
+
+def test_the_edge_sensors_read_high_for_surface_and_never_sit_on_24_or_25() -> None:
+    """Two bench facts the datasheet and the wiring diagram both got wrong.
+
+    Polarity: this board reads HIGH with a surface under it (the datasheet says LOW). Pins:
+    24/25 belong to the display overlay at boot; the diagram put a sensor on 24 and it read
+    garbage. Neither is enforced by the schema as a *rule* — a different module revision or a
+    disabled overlay could legitimately differ — so the shipped profiles carry the truth and
+    this test keeps them from drifting back."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        edge = load_config(profile).drive.edge
+        assert edge.active_high is True, profile
+        assert not set(edge.pins) & {24, 25}, profile
+
+
+def test_the_step_geometry_is_a_step_and_the_budget_is_the_bound() -> None:
+    """One leg fits inside the budget on both profiles, and the speed is a wiring-check duty."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        drive = load_config(profile).drive
+        assert 0 < drive.step_mm <= drive.max_excursion_mm, profile
+        assert drive.speed_frac <= 0.5, profile  # R-04: a shared rail, not a race
+        assert drive.idle_step_interval_min_s < drive.idle_step_interval_max_s, profile
+        # Rarer than the servo drift by design — a gearbox is audible.
+        motion = load_config(profile).motion
+        assert drive.idle_step_interval_min_s > motion.micro_motion_interval_max_s, (
+            profile
+        )
+
+
+def test_a_motor_pin_reused_as_a_sensor_pin_is_rejected_at_load() -> None:
+    """A pin that is both an H-bridge input and a sensor input reads its own motor command.
+
+    The wiring error the config can see for free — and the one a bench would spend an hour on,
+    because the robot would abort every step on an "edge" it was creating itself."""
+    with pytest.raises(ValidationError, match="one GPIO for two jobs"):
+        Config.model_validate({"drive": {"left_forward_pin": 23}})
+
+
+def test_two_motor_inputs_on_one_pin_are_rejected_at_load() -> None:
+    with pytest.raises(ValidationError, match="one GPIO for two jobs"):
+        Config.model_validate({"drive": {"left_forward_pin": 6}})
+
+
+def test_a_leg_longer_than_the_budget_is_rejected_at_load() -> None:
+    """A single leg past ``max_excursion_mm`` would defeat the budget that is the return leg's
+    only defence (SDS §12.1, F-14). The planner clamps it too; the config refuses it so the
+    limit is visible where it is authored rather than silently narrowed downstream."""
+    with pytest.raises(ValidationError, match="exceeds max_excursion_mm"):
+        Config.model_validate({"drive": {"step_mm": 50.0, "max_excursion_mm": 30.0}})
+
+
+def test_a_collapsed_idle_step_band_is_rejected_at_load() -> None:
+    with pytest.raises(ValidationError, match="collapsed band is a metronome"):
+        Config.model_validate(
+            {
+                "drive": {
+                    "idle_step_interval_min_s": 300.0,
+                    "idle_step_interval_max_s": 300.0,
+                }
+            }
+        )
+
+
+def test_an_empty_edge_pin_list_is_rejected_at_load() -> None:
+    """Sensors AND budget, never one (#400 AC-5). No pins is a robot that steps blind."""
+    with pytest.raises(ValidationError, match="steps blind"):
+        Config.model_validate({"drive": {"edge": {"pins": []}}})
+
+
+def test_two_sensors_on_one_pin_are_rejected_at_load() -> None:
+    with pytest.raises(ValidationError, match="same GPIO twice"):
+        Config.model_validate({"drive": {"edge": {"pins": [23, 23]}}})
+
+
+def test_a_single_edge_sensor_is_a_legal_rig() -> None:
+    """One unit shorted on the bench and was retired. Declaring what is actually wired is the
+    honest configuration, and the schema must not force a lie about a second pin."""
+    edge = EdgeConfig(pins=(23,))
+    assert edge.pins == (23,)
+
+
+def test_a_non_positive_drive_quantity_is_rejected() -> None:
+    """The odometer divides by ``mm_per_s_at_full``; zero is not a slow wheel, it is a crash."""
+    for name, value in (
+        ("mm_per_s_at_full", 0.0),
+        ("step_mm", 0.0),
+        ("speed_frac", 0.0),
+        ("speed_frac", 1.5),
+        ("max_excursion_mm", -1.0),
+    ):
+        with pytest.raises(ValidationError):
+            Config.model_validate({"drive": {name: value}})
 
 
 # ── The echo tail and the guard window (#467) ────────────────────────────────────────────────
