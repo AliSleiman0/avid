@@ -6,7 +6,93 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-08-24 (evening) · `main` `ffd4e06` · `v0.M10.0` tagged · ✅ **#467 and #472 both fixed AND deployed** · rig **running, quiet, $0.00, amp 85%** · 🔴 **the load corpus cannot drive the robot at any safe volume — next step needs a person** · M11 window not started · gh `AliSleiman0`.
+**As of:** 2026-09-02 · `main` `d3865cc` (still — **nothing merged yet; ten PRs are open**) · rig **POWERED OFF** (unchanged since 2026-08-31) · ✅ **the drivetrain now has its paperwork and its code**: ADR-015 + six stacked PRs (#478→#484) · ✅ **#157 is decided**: ADR-014 + code (#485, #486), on two measured numbers · gh `AliSleiman0`.
+
+## ⭐ Next session — merge two PR stacks in order, then the rig
+
+### What shipped 2026-09-02 (laptop only; nothing touched the Pi)
+
+**#400 — the wheels, as one stacked chain, each PR `Refs #400`, base = the previous branch:**
+
+| PR | branch | what |
+|---|---|---|
+| #478 | `feat/400a-adr-015` | **ADR-015** (SDS §3.9.5), §2.3 narrowed not deleted, ports/events/config/FMEA specified ahead of the code; PMP M12 (post-v1.0.0), SPK-6, R-12, R-11 reconciled. **Docs-only — shows NO CI checks** (`paths-ignore`); `tests/docs` run locally |
+| #479 | `feat/400b-config` | `[drive]` / `[drive.edge]` schema, both profiles fake, four validators |
+| #480 | `feat/400c-domain` | `Gesture.STEP_TOWARD/BACK`, `avid/domain/drive.py` (`plan_step`, net-zero by construction, bounded inside the planner, `homing_leg`), `drive.*` events, tenth event domain |
+| #481 | `feat/400d-ports-fakes` | `Drive` + `EdgeSensor` ports, `FakeDrive` (odometer) + `FakeEdgeSensor`, contract suites |
+| #482 | `feat/400e-service` | `DriveService` — asks before/while moving, retreats from an edge, homes after a cut leg, refuses to leave the budget, IDLE-only |
+| #483 | `feat/400e2-wiring` | composition root, observability, `/metrics` `steps`/`steps_aborted`, the mechanised M12 gate with neuters |
+| #484 | `feat/400f-real-adapters` | `L9110sDrive`, `Tcrt5000EdgeSensor`, `PI_OPERATIONS` §5d, `drive_pi.py`, the bench probe rewritten to the measured truth, `tests/adapters/test_gpio_drive.py` (the flip and the polarity graded on every commit against a stub `gpiozero`) |
+
+**#157 — the session open, decided:** #485 (`feat/157-presence-warm`, ADR-014 + `tools/probe_realtime_idle.py`) → #486 (`feat/157b-presence-warm-code`, base = #485). The two numbers: **a silent socket costs nothing** (60 min held: 3 frames, no usage) and **the vendor closes it at exactly 60 min** (close 1001). `[gate] prewarm = "presence"` in `pi.toml`, schema default `never`.
+
+⚠️ **Merge recipe, and the trap it avoids** (memory: `--delete-branch` on a stacked chain CLOSES the child PR): merge #478 with **no** `--delete-branch`; then `git rebase --onto main <old #478 tip> feat/400b-config`, `--force-with-lease` push, `gh pr edit 479 --base main`; repeat down the chain. Same for #485 → #486. Delete branches only when the last PR is in. ⚠️ Two files on both stacks will conflict trivially at the §3.3 ADR index (ADR-014 and ADR-015 rows) and `tests/test_main.py::_EXPECTED_SUBSCRIPTIONS` — take both.
+
+### Two findings worth more than the code
+
+⚠️ **A `contextlib.suppress(CancelledError)` around `await task` inside a bus handler eats the worker's own cancellation.** `DriveService._preempt` awaited the step it had cancelled; `bus.stop()` then cancelled the worker mid-await, the suppress swallowed *that*, the worker looped back to `queue.get()` marked "cancelling", and the bus never stopped. The suite hung; a task-stack dump found it. The 3.11+ idiom: `except CancelledError: if current_task().cancelling(): raise`. And **`asyncio.wait_for` cancels what it waits on when its caller is cancelled** — on a cancellation path, use `asyncio.wait`, or the figure you were collecting is thrown away.
+
+⚠️ **The measurement the SDS had asked for three weeks earlier was one evening's work.** §11.4 named the exact question (*does a silent socket cost anything, and how long does the vendor keep it?*) and the exact tool (`probe_realtime_open.py`'s sibling). A `--speak-after` arm proves a held session still answers — the 64 s arm did (277/389 ms); the 30-minute arm was in flight at hand-over and its figure belongs in §6.3.1's *Held sessions answer* row.
+
+### Then, the rig (PR-G, unchanged from below)
+
+Power on · retire the shorted TCRT5000 · crimp the 5 V connector · splice `[drive]` into `/etc/robot/config.toml` and flip `drive`/`edge` **together** (`PI_OPERATIONS` §5d) · `drive_pi.py`, then `--edge-test` with a hand · SPK-6 with a ruler, pin `mm_per_s_at_full` · #206 with **four** actuators and a meter · formalise or revert the display overlay · with `prewarm = "presence"` deployed, read `prewarm_hits`/`prewarm_misses` after a day — that pair is the only measurement of whether the presence filter beats a person's first sentence.
+
+---
+
+## The 2026-08-31 baton, unchanged — drivetrain bring-up is real but unplanned; start with the missing paperwork
+
+### The one thing to internalize before touching the rig again
+
+**This entire session was hardware bring-up for wheels/locomotion, and SDS §2 still says "Not locomotion. It sits."** Nobody wrote an ADR, nobody touched PMP's milestone list, nobody amended the SDS. That's not a process nitpick — it's the same discipline this project already applies to everything else (ADR-009 got written *before* the second servo shipped), and skipping it here means the ~3 hours of bench findings below have nowhere authoritative to live yet. **The first PR to come out of this thread should probably be the ADR, not code.** It's cheap now (nothing is built) and expensive later (once a `Drivetrain` port exists, retrofitting scope-authorization backwards is the kind of thing that gets forgotten).
+
+Nothing in `avid/` was touched this session. `tools/probe_drivetrain.py` is a new **untracked** file — a throwaway bench script in the existing `tools/probe_*.py` style, superseded in practice by ad-hoc one-line SSH commands once the interactive back-and-forth started. Decide whether to commit it, rewrite it to match what was actually learned, or delete it — it does not currently reflect the corrected pin map below.
+
+### Hardware state, physically, right now
+
+| | |
+|---|---|
+| Motors | 2× N20 gear motor + wheel, front-mounted, through 1× L9110S dual H-bridge |
+| Rear wheels | 2× additional DC-motor wheels, **mounted for chassis support only, NOT wired** — added because the bigger chassis (built to fit all the hardware) needs 4 ground contact points. Confirmed unnecessary for driving: 2WD pivots cleanly once the power fault below was fixed. Leave them undriven unless a future need (traction, torque) justifies a second L9110S. |
+| Sensors | 2× TCRT5000. **One is confirmed defective** — works standalone (LED responds correctly to a hand with nothing else connected) but gets hot and stops responding the instant its `OUT` wire touches *any* GPIO pin, reproduced on two different pins (originally GPIO24, then swapped to GPIO23) — the fault follows the sensor, not the Pi, so this is a short internal to that unit's wiring/connector, not a GPIO or wiring-diagram problem. **Do not reconnect it. Physically inspect the connector for a bridged pin, or retire the unit.** The other sensor is fully functional. |
+| 5V motor/servo rail | Confirmed working, but its connector **is not secure** — it dropped out mid-test once already (read as "wheels spin, nothing turns," which cost real time to diagnose before the loose cable was found). **Needs a proper crimp or tightened screw terminal before this wiring is trusted for anything beyond a bench test.** |
+| Display | The ILI9486 SPI panel's `piscreen,drm` overlay was **deliberately disabled** this session (see below) to free GPIO24/25 for the sensor wiring. The robot currently has **no face rendering** — this is a real, ongoing capability loss on the live rig, accepted explicitly by the user, pending a hardware swap to HDMI or a DSI ribbon display (their stated plan, not yet executed). |
+| Power state | **Powered off**, deliberately, at the end of this session. Next session starts with a physical power-on. |
+
+### The direction/inversion finding — overturns the wiring diagram's original assumption
+
+The published wiring diagram (artifact `ada707f4-6e67-47dd-9f28-f13723d49bad`, and `tools/probe_drivetrain.py`'s original docstring) assumed the mirrored motor mount would need **asymmetric** `inverted` flags — one motor's forward matching its GPIO polarity, the other's needing a flip. **Measured on hardware, that's wrong.** Both channels agree with each other:
+
+- `gpiozero.Motor(forward=IA, backward=IB).forward()` on **both** channels together → robot moves toward its own **back**.
+- `.backward()` on **both** channels together → robot moves toward its own **front**. Confirmed straight-line tracking at 20%–100% duty, both directions, on hard (marble) floor.
+- Single-channel pivots work correctly and in opposite directions from each other once the 5V connector was reseated.
+
+So it's a **single global flip** (define "true forward" as calling `.backward()` on both, or swap which physical lead lands on `IA` vs `IB` for both channels identically), **not** a per-wheel `inverted` config value. Whatever was expected to need compensating for the mirrored mount is apparently already cancelled out by how the wheel hubs press onto the motor shafts. Worth re-verifying once the rear wheels are properly mounted and the whole chassis is final, but this is real measured data, not the earlier theoretical assumption — update any config sketch or ADR draft accordingly.
+
+### The GPIO24/25 correction — the wiring diagram had a real bug
+
+The published diagram assigned the right TCRT5000's `D0` to **GPIO24**, on the assumption it was free. It is not: `GPIO24` (labeled `dc`) and `GPIO25` (labeled `reset`) are claimed by the **display's own `piscreen,drm` devicetree overlay**, active any time that overlay is loaded — a boot-time reservation, not a runtime hotplug check, so unplugging the physical display does **nothing** to free the pins without also editing `/boot/firmware/config.txt` and rebooting. That edit was made this session (see below). If the display is ever reconnected on this overlay in the future, the sensor pin needs to move to a genuinely free one (GPIO22 or GPIO26 confirmed free via `/sys/kernel/debug/gpio`) rather than reusing GPIO24.
+
+**Config change made and live on the rig:** `/boot/firmware/config.txt` line 54, `dtoverlay=piscreen,drm,speed=18000000`, was commented out (backup at `/boot/firmware/config.txt.pre-drivetrain`) and the Pi rebooted to apply it. This was an explicit, informed call by the user (accepted the face-rendering outage) but **it is a change to the live production Pi's boot config, made outside any deploy process, with no corresponding entry in `PI_OPERATIONS.md` or `pi.toml`.** Next session should either formalize this (update `PI_OPERATIONS.md` §3 to note the display is intentionally disabled, or revert it once a replacement display is wired) — leaving it as an undocumented drift is exactly the failure mode `PI_OPERATIONS.md`'s own opening section warns about.
+
+### Sensor polarity — also not what the datasheet-general answer would predict
+
+The working TCRT5000 (currently on whichever GPIO wasn't the shorted one — confirm at start of next session, they were swapped mid-testing) reads **inverted** from the standard convention: LED on (object detected) → Pi reads **HIGH**; LED off (clear) → Pi reads **LOW**. That's the opposite of TCRT5000's textbook behavior (LOW=detected) but confirmed reproducible on two independent on/off cycles. **Any future cliff-detection logic must treat HIGH as "surface present" for this specific board**, not LOW — don't copy the datasheet assumption into code.
+
+### Punch list for next session, in order
+
+1. Power the Pi back on; confirm `robot.service` comes up (it's enabled, should be automatic, but verify — face rendering will be absent, that's expected).
+2. Physically inspect/retire the shorted TCRT5000 unit; do not reconnect its `OUT` wire to any GPIO until inspected.
+3. Secure the 5V rail connector properly (crimp or tightened screw terminal).
+4. **Write the ADR for locomotion scope** — this is the actual next real step, not more bench wiring. SDS §2 currently forbids what's already been built.
+5. Decide and document the display situation: formalize the disabled overlay in `PI_OPERATIONS.md`, or execute the HDMI/DSI swap and update `avid/adapters/display.py`'s assumptions accordingly.
+6. Once the ADR exists: `core/ports.py` gets a `Drivetrain` (or similar) Protocol, a `FakeDrivetrain` (P6), a real adapter using the measured direction mapping above (single global flip, not per-wheel), and `tools/probe_drivetrain.py` either gets rewritten to match reality or deleted in favor of the real contract-test suite.
+
+---
+
+## Carried forward, unchanged — still open from 2026-08-24 (see below for full detail)
+
+The audio/cost-ceiling thread from the previous session is **untouched this session** and still exactly where it was left: #467's gate is still unproven on hardware, #471 and #468 are still blocked on the same fact (the load corpus can't trip the VAD at any safe volume), and the 72-hour endurance window still hasn't started. None of today's hardware work bears on it. Full detail preserved in the section immediately below (originally written 2026-08-24, not re-verified this session).
 
 ## ⭐ Next session — the corpus cannot drive the robot; the next real step needs a person
 
