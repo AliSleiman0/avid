@@ -245,3 +245,20 @@ one control recording with a person actually speaking. **Before trusting a level
 with a human in it** — bring-up's figure is peak −3.6 dBFS, and anything far below that is the
 instrument, not the room. That is M8's "measure against a person" lesson arriving one layer further
 down, at the microphone.
+
+## 2026-09-02 — #157 decided: the warm window is 60 minutes and a silent socket is free
+
+AVID-157 had been parked in §11.4 as *"a decision with an ADR-shaped edge, not a fix"* — the
+session open is ~1.08 s of vendor handshake, and the only lever left was a pre-warmed socket,
+which reopens ADR-007. The edge was never taken because nobody had measured the two things it
+turned on. `tools/probe_realtime_idle.py` did, on the laptop, in one evening: a session held
+**silent for 60 minutes** on the shipped flagship produced **three frames in total** — created,
+updated, and the vendor closing it with `1001 "Your session hit the maximum duration of 60
+minutes"` at 3603.6 s — with no usage, no `response.*` and no rate-limit traffic. A socket
+costs nothing; streaming is what §6.10.4's $108–345/month was ever about. And a session held
+silent answered a text turn in 277 ms to `response.created`, 389 ms to first audio — a fresh
+session's numbers. So ADR-014 (§6.3.1) narrows ADR-007 to the seam where the money is: the VAD
+gate governs *streaming*; *opening* is allowed on `vision.presence_gained`, closed on presence
+lost or sleep, re-opened a bounded number of times when the vendor's hour runs out. The lesson
+is the one this project keeps relearning — measure before you tune around it — arriving at the
+one row of §11.4 that had said so about itself for three weeks.
