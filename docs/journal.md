@@ -255,9 +255,10 @@ turned on. `tools/probe_realtime_idle.py` did, on the laptop, in one evening: a 
 **silent for 60 minutes** on the shipped flagship produced **three frames in total** — created,
 updated, and the vendor closing it with `1001 "Your session hit the maximum duration of 60
 minutes"` at 3603.6 s — with no usage, no `response.*` and no rate-limit traffic. A socket
-costs nothing; streaming is what §6.10.4's $108–345/month was ever about. And a session held
-silent answered a text turn in 277 ms to `response.created`, 389 ms to first audio — a fresh
-session's numbers. So ADR-014 (§6.3.1) narrows ADR-007 to the seam where the money is: the VAD
+costs nothing; streaming is what §6.10.4's $108–345/month was ever about. And a held session
+still answers: after 64 s silent, a text turn got `response.created` in 277 ms and first audio
+389 ms later; after **30 minutes** silent (still two frames, still no usage), 180 ms and 606 ms —
+a fresh session's numbers at both ages. So ADR-014 (§6.3.1) narrows ADR-007 to the seam where the money is: the VAD
 gate governs *streaming*; *opening* is allowed on `vision.presence_gained`, closed on presence
 lost or sleep, re-opened a bounded number of times when the vendor's hour runs out. The lesson
 is the one this project keeps relearning — measure before you tune around it — arriving at the
