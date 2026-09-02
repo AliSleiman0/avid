@@ -244,8 +244,15 @@ Effort in IED. Cumulative assumes strict sequence; §5.4 identifies where that's
 | **M9** | **It moves** | 9 | Affect drives gesture. Nod, turn, idle micro-motion. No brown-out under stall. Servo relaxes when idle (no buzz). Gesture preemption works. | **5** | M | 81 |
 | **M10** ✅ | **It initiates** | 10 | **Full UC-03 — the coffee scenario, end to end, unprompted.** Quiet hours respected. Interruption policy suppresses correctly. | **13** | **L** | 94 |
 | **M11** | **It's a product** | 11 | 30-day unattended soak. O5 met. Runbook written. v1.0.0 tagged. | **13** | M | 107 |
+| **M12** | **It steps** *(post-v1.0.0 — the v1.1 line)* | 12 | A bounded, net-zero step on a real desk, with a person: reads as alive rather than as a mechanism (M9's `micro_motion` bar). A hand under a front sensor **stops it mid-leg and it returns**. #206 re-run with all four actuators and a meter. `v1.1.0` tagged. | **4** | M | 111 |
 
-✅ = sealed and tagged. **M8 sealed 2026-08-16 as `v0.M8.0`, measured with a person actually in
+✅ = sealed and tagged. **M12 is after the `v1.0.0` tag on purpose (ADR-015, #400)** — it was added on
+2026-09-02 with the §12.6 sentence answered honestly: *what am I cutting to pay for this? Nothing
+from v1.0.0.* It is scheduled behind M11 and costs the release nothing; its 4 IED (ADR + config +
+domain + ports/fakes + service + real adapters + a bench evening) are labelled over #400's own
+size:M for the reason M7 and M9 were — the estimate is a measurement, not a target.
+
+**M8 sealed 2026-08-16 as `v0.M8.0`, measured with a person actually in
 frame** — 0.524 cores against §2.7.1's one (the empty-room 0.26 was a floor: detection on a real
 face costs **double**), 2.99 fps held at `detector_scale = 1`, +0.0 °C over 15 min, `throttled=0x0`,
 one thread at 0.482 with nothing else above 0.013. No flapping over a real desk hour: **8 decisions
@@ -360,6 +367,8 @@ M0 ─┬─► M1 ──► M2 ─┬─► M3 ──────────�
     │              └─► M9 ─────────────┘  │
     └─────────────────► M7 ───────────────┘
          (memory needs no hardware at all)
+
+                                     M11 ──► M12   (post-v1.0.0; ADR-015)
 ```
 
 ## 5.4 Critical path
@@ -391,6 +400,7 @@ Buffer consumption is the project's primary health metric. Plot burned-buffer ag
 | SPK-3 | Does brute-force cosine over N=5,000 facts stay under 50 ms on the Pi? | 0.5 IED | M7, ADR-005 |
 | SPK-4 | Does the servo brown out the Pi under stall on a shared rail? | 0.5 IED | RISK-04, M9 |
 | SPK-5 | Picamera2 + UV + `--system-site-packages`: does it actually work? | 1 IED | ADR-008, M2 |
+| SPK-6 | How far does one wheel travel per second at full duty, **measured** — the number the excursion budget is only as good as (SDS §3.9.5) | 0.25 IED | M12, R-12 |
 
 Four IED to convert five of the project's biggest unknowns into facts. Run SPK-1 and SPK-5 **before M1**, not when their phase arrives — they're the two that can invalidate architectural decisions, and an invalidated decision is cheap in week one and expensive in month five.
 
@@ -404,8 +414,8 @@ Four IED to convert five of the project's biggest unknowns into facts. Run SPK-1
 |---|---|
 | **Must** | Conversation (M5), memory (M7), proactivity (M10), display affect (M3), reliability (M11) |
 | **Should** | Personality depth (M6), presence detection (M8) |
-| **Could** | Servo motion (M9), face recognition, wake word |
-| **Won't (v1)** | Multi-user, mobile app, smart home, offline LLM, locomotion |
+| **Could** | Servo motion (M9), face recognition, wake word, **bounded desk steps (M12 — post-v1.0.0, ADR-015)** |
+| **Won't (v1)** | Multi-user, mobile app, smart home, offline LLM, **locomotion — roaming, navigation, leaving the desk** (ADR-015 narrowed this row; it did not delete it) |
 
 ## 7.3 Scope-cut order
 
@@ -418,6 +428,8 @@ Decided **now**, in cold blood, so that the decision under month-eight schedule 
 5. Semantic retrieval (part of M7) — keyword + recency retrieval covers UC-02/03. Loses UC-05. ~5 IED.
 
 Cutting 1–3 saves 13 IED and costs the robot its body. Cutting 1–5 saves 20 IED and yields a robot that talks, remembers, and greets you about coffee. **That is still the product.** Note what is never on this list: memory durability, reliability, the latency target. Those are the product.
+
+M12 (bounded desk steps) is **not on this list because it is not in v1.0.0** — it sits behind the tag, so there is nothing in the release to cut it against. If it ever moves ahead of M11 it becomes cut **0**, ahead of servo motion.
 
 ---
 
@@ -432,14 +444,15 @@ Scored P(1–5) × I(1–5). Owner is you for all of them; the column is omitted
 | **R-01** | **Realtime API latency exceeds O1 and is not ours to fix** | 3 | 5 | **15** | Mitigate: SPK-1 measures early. Contingency: accept 1200 ms P50 and cover with a "thinking" display + audible thinking cue. A robot that visibly thinks feels faster than one that silently stalls. Perceived latency is designable even when actual latency isn't. |
 | **R-02** | **API cost makes always-on unviable (O7 blown)** | 4 | 4 | **16** | Mitigate: ADR-007 local VAD gate — no session until speech is locally detected. SPK-1 quantifies before M5. Contingency: push-to-talk, or a local wake word (adds ~5 IED). **Highest-scored risk. Address before M5, not at it.** |
 | **R-03** | **Motivation decay across a 9–12 month solo part-time project** | **4** | **5** | **20** | Mitigate: gate demos (§5.1) create a visible artifact trail; front-load M3 so there's a face looking at you by week six; M7 is laptop-work available in low-energy gaps. **This is the highest-scored risk in the register and it is not a joke.** Most projects of this shape die here, not at a technical wall. Contingency: cut to the §7.3 line and ship something. |
-| **R-04** | Servo stall browns out the Pi; SD corruption | 3 | 4 | 12 | Mitigate: separate 5 V rail for servo power from the start, common ground only. SPK-4. Never power a servo from the Pi's 5 V pin — this is a known way to corrupt a card. ⚠️ **SPK-4 measured 2026-08-22 (#206): both servos stalled simultaneously produced NO undervoltage** — `get_throttled` clean across n=874 samples over 180 s, sticky bit never latched, zero kernel complaints. **Score unchanged and the risk stays open, deliberately: the MARGIN IS UNMEASURED.** No multimeter was available, so rail voltage at the servo connector and at the Pi's 5 V were never read — we know it did not brown out, not by how much. And the inputs have since moved against us: #401 corrected the supply to **15 W, not 27 W**, while #400 takes the rig from two actuators to four. Re-measure with a meter before #400 lands. ⚠️ **And there is no enclosure.** #207's AC-5 asked for this confirmed *"in the enclosure, where airflow and cable strain differ"*; SDS §4.8 is an unwritten table-of-contents entry, there is no WBS package for one and no issue. AC-5 was therefore settled against **the assembled rig as it exists** (2026-08-23), with the original wording preserved on the issue — and the enclosure condition is carried **here**, on this row, because R-04 is the risk it belongs to: when an enclosure exists, both the stall test and the thermal question are re-run inside it. |
+| **R-04** | Servo stall browns out the Pi; SD corruption | 3 | 4 | 12 | Mitigate: separate 5 V rail for servo power from the start, common ground only. SPK-4. Never power a servo from the Pi's 5 V pin — this is a known way to corrupt a card. ⚠️ **SPK-4 measured 2026-08-22 (#206): both servos stalled simultaneously produced NO undervoltage** — `get_throttled` clean across n=874 samples over 180 s, sticky bit never latched, zero kernel complaints. **Score unchanged and the risk stays open, deliberately: the MARGIN IS UNMEASURED.** No multimeter was available, so rail voltage at the servo connector and at the Pi's 5 V were never read — we know it did not brown out, not by how much. And the inputs have since moved against us: #401 corrected the supply to **15 W, not 27 W**, while #400 takes the rig from two actuators to four. Re-measure with a meter before #400 lands — **now scheduled as M12's gate, with the four actuators being two SG90/MG90S plus two N20 gear motors through an L9110S at 0.4 duty (ADR-015; ~1 A stall for the pair, against the ~5 A two MG996R CR servos would have drawn).** ⚠️ **And there is no enclosure.** #207's AC-5 asked for this confirmed *"in the enclosure, where airflow and cable strain differ"*; SDS §4.8 is an unwritten table-of-contents entry, there is no WBS package for one and no issue. AC-5 was therefore settled against **the assembled rig as it exists** (2026-08-23), with the original wording preserved on the issue — and the enclosure condition is carried **here**, on this row, because R-04 is the risk it belongs to: when an enclosure exists, both the stall test and the thermal question are re-run inside it. |
 | **R-05** | SD card wear / corruption from log + DB writes | 3 | 5 | 15 | Mitigate: journald volatile, WAL, batched writes, no debug logging to card. SPK-2. Contingency: boot from USB SSD (~\$25, removes the risk class entirely — arguably just do this). |
 | **R-06** | Picamera2/Python version conflict blocks Pi work | 3 | 3 | 9 | Mitigate: ADR-008 + SPK-5 in week one. Camera behind a port, so worst case is one adapter, not the project. |
 | **R-07** | Memory retrieval returns irrelevant facts; robot feels senile | 3 | 4 | 12 | Mitigate: build the eval set (§10.4) at M7 start, not after. 50 fact/query pairs. Retrieval quality is measurable; treat it as a metric, not a vibe. |
 | **R-08** | Proactive robot is annoying → user disables it → project's core value dies | 3 | 5 | 15 | Mitigate: SDS §10.4 interruption policy is a design deliverable, not a tuning pass. Default to under-firing. Log every suppression so you can see what it *would* have said. |
 | **R-09** | Thermal throttling under vision + audio + display | 2 | 3 | 6 | Mitigate: active cooler is in the BOM. Metric on the dashboard. 5 fps cap. |
 | **R-10** | OpenAI changes the Realtime API under you | 2 | 4 | 8 | Mitigate: it's behind a port. The blast radius is one adapter. This is the HAL earning its keep in a place people don't expect it to. |
-| **R-11** | Scope creep — "wouldn't it be cool if…" | **4** | 3 | 12 | Mitigate: §2.3 non-goals + §12.6 change control. Every new idea becomes an issue in the `Icebox` column. It is not refused; it is *deferred visibly*. Refusing ideas kills motivation (R-03); parking them costs nothing. |
+| **R-11** | Scope creep — "wouldn't it be cool if…" | **4** | 3 | 12 | Mitigate: §2.3 non-goals + §12.6 change control. Every new idea becomes an issue in the `Icebox` column. It is not refused; it is *deferred visibly*. Refusing ideas kills motivation (R-03); parking them costs nothing. ⚠️ **This row's mitigation was exercised, not bypassed, by ADR-015 (#400):** §2.3's *"Not locomotion"* was **narrowed in writing** to admit bounded desk steps and still excludes roaming; the change went through an SDS-first PR, and the work was scheduled *behind* v1.0.0 rather than into it. The lesson kept: the hardware was bench-wired before that paperwork existed (2026-08-31), which is the failure mode this row describes — recorded so it is not repeated. |
+| **R-12** | **The robot steps off the desk** (M12) | 2 | 5 | 10 | Mitigate: every step plan is net-zero by construction and bounded by `[drive] max_excursion_mm`; two front edge sensors abort a leg and the service returns *immediately*; steps run only in IDLE (SDS §3.9.5, F-13/F-14). SPK-6 pins the mm/s the budget depends on. Contingency: `[adapters] drive = "fake"` — one config line and the wheels are inert. ⚠️ Return legs are unprotected by sensors (F-14); the budget is the whole defence there, and it is only as good as SPK-6's number. |
 
 ## 9.3 The two that actually matter
 
@@ -563,7 +576,7 @@ Yes, PRs, even solo. The PR is not a review gate — it's the CI gate and the wr
 
 ## 11.4 Releases
 
-SemVer. Tag at each milestone: `v0.M<n>.0`. `v1.0.0` at M11 gate. Release notes auto-generated from Conventional Commits. Each tag builds a Pi-deployable artifact — so every milestone is a thing that exists, permanently, that you can go back and run. See R-03.
+SemVer. Tag at each milestone: `v0.M<n>.0`. `v1.0.0` at M11 gate; **`v1.1.0` at M12's gate (ADR-015)** — the first post-release line, and the first tag to carry a feature §2.3 originally excluded. Release notes auto-generated from Conventional Commits. Each tag builds a Pi-deployable artifact — so every milestone is a thing that exists, permanently, that you can go back and run. See R-03.
 
 ⚠️ **That last sentence was false for nine tags** (`v0.M0.0` … `v0.M10.0`): none of the automation existed, and R-03's stated mitigation was a trail with nothing on it. Built in AVID-388 — `.github/workflows/release.yml` (build → verify → publish, where publish *depends* on verify because an artifact nobody has installed is a tarball, not a release) and `docs/RELEASE.md`, which defines what "Pi-deployable" means here and why. **The trail starts at the first tag the workflow builds; earlier tags stay source-only**, because an artifact built today from an old tree and labelled as that milestone would be a fabrication of a build that never happened, and a trail you cannot trust entry-by-entry is worse than an honest gap.
 
