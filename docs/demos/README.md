@@ -417,3 +417,38 @@ before any long window, on every rig, every time.
 ⚠️ **Start a window from `systemctl restart robot`, never a power-on** — a cold boot on this
 board straddles two clock frames (`PI_OPERATIONS.md` §5.1), and subtractions across them are not
 measurements.
+
+## M12 — It steps
+
+**Not sealed. Post-`v1.0.0` (ADR-015, #400).** The harness and the mechanised gate are done; the
+criteria that need a hand under a sensor and an eye on which way the robot went are **not run**,
+and are recorded as such rather than scored from an odometer.
+
+```sh
+# On the Pi, with the service stopped (PI_OPERATIONS §1), the robot on the desk it will live on,
+# its REAR away from any edge, and a hand ready. Splice [drive] into /etc/robot/config.toml first
+# (PI_OPERATIONS §5d) and flip drive = "l9110s" AND edge = "tcrt5000" TOGETHER.
+sudo systemctl stop robot
+/opt/avid/.venv/bin/python docs/demos/drive_pi.py --config /etc/robot/config.toml \
+    --json docs/demos/m12_evidence/gate.json
+/opt/avid/.venv/bin/python docs/demos/drive_pi.py --config /etc/robot/config.toml --edge-test
+```
+
+| AC | | |
+|---|---|---|
+| AC-0 | ⏸ | the **loaded** config selects real `drive` AND real `edge`, sensor pins not 24/25 |
+| AC-1 | ⏸ | a `step_toward` completes net-zero, odometer at origin — and **went toward the user first** (needs an eye) |
+| AC-2 | ⏸ | a hand under a front sensor mid-leg: `drive.step_aborted(reason=edge)`, motors stopped through the port, robot retreated |
+| AC-5 | ⏸ | no brown-out with **four** actuators on the rail (`vcgencmd get_throttled`, kernel log) — and a meter reading, finally |
+| AC-7 | ⏸ | three idle steps read as alive rather than as a mechanism — **needs a human** |
+| SPK-6 | ⏸ | `mm_per_s_at_full` measured with a ruler and pinned; PROVISIONAL deleted |
+
+**Permanent proof:** `tests/e2e/test_drive_gate.py` runs the arc — step, net-zero, the hand, the
+IDLE rule — on every commit with no hardware, and every criterion has a companion that neuters one
+guard and asserts it goes red. `tests/adapters/test_gpio_drive.py` grades the two decisions the
+bench measured — the direction flip and the sensor polarity — against a stub `gpiozero`, so a
+wrong sign is a red test rather than a robot on the floor.
+
+⚠️ **And none of it is sufficient.** An odometer is not a moved robot. A flip set the wrong way
+drives *backward* on the first `STEP_TOWARD` with a perfect trace, and the return leg is protected
+by the budget alone (SDS §12.1 F-14). Stand behind it.
