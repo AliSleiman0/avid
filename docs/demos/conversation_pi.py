@@ -847,6 +847,11 @@ async def _run_conversation(
         think_timeout_s=config.gate.think_timeout_s,
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
         thinking_delay_ms=config.cues.thinking_delay_ms,
+        # ADR-014 (#157) — read from the loaded config, never restated: a harness that pinned
+        # "never" here would grade a robot whose first turn always pays the cold open.
+        prewarm=config.gate.prewarm,
+        prewarm_reopens_max=config.gate.prewarm_reopens_max,
+        prewarm_reopen_backoff_s=config.gate.prewarm_reopen_backoff_s,
     )
     # The cost meter is the O7 instrument: it owns the §6.10.1 rate table and the §6.10.3 usage
     # model, so the harness reads a number rather than recomputing one (and cannot disagree with

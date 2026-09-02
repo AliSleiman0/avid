@@ -135,7 +135,8 @@ _NS_PER_MS = 1_000_000
 # short while somebody drains it — and nobody does between sessions, or while the robot is
 # DEGRADED and every ``open()`` is failing. Unbounded, that leaks captured audio forever; bounded,
 # the worst case is a loud, finite drop. ≈10 s at the 20 ms ``[microphone] chunk_ms`` the configs
-# ship — long enough that the ~200 ms session-open backlog never comes near it.
+# ship — long enough that the ~1.08 s cold session-open backlog (SDS §6.3; ~0 when presence
+# warmed the socket first, ADR-014) never comes near it.
 _MIC_QUEUE_FRAMES = 500
 
 

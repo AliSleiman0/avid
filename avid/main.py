@@ -956,6 +956,11 @@ def _wire_services(
         # is the only authority and ConversationService commits from its falling edge.
         server_turn_detection=config.ai.turn_detection.server_is_an_authority,
         thinking_delay_ms=config.cues.thinking_delay_ms,
+        # Presence-warmed sessions (ADR-014, #157): open on presence, stream on speech. The
+        # schema default is "never", so a profile that says nothing gets ADR-007 unamended.
+        prewarm=config.gate.prewarm,
+        prewarm_reopens_max=config.gate.prewarm_reopens_max,
+        prewarm_reopen_backoff_s=config.gate.prewarm_reopen_backoff_s,
     )
     # The §6.9 first-token deadline follows the STATE, not the turn path (#452). A direct
     # synchronous observer rather than a `state.transitioned` subscription, and the distinction is
@@ -970,6 +975,14 @@ def _wire_services(
     # one bucket would imply otherwise.
     if metrics is not None:
         metrics.register("spend_refusals", conversation.spend_refusals)
+        # ADR-014 (#157). `prewarm_hits`/`prewarm_misses` are the measurement of whether warming
+        # works on a real desk — a miss is a turn that paid the cold open with prewarm on — and
+        # `prewarm_vendor_closes` is F-12's detector. Process-scoped like everything here but
+        # `build`.
+        metrics.register("prewarm_opens", conversation.prewarm_opens)
+        metrics.register("prewarm_hits", conversation.prewarm_hits)
+        metrics.register("prewarm_misses", conversation.prewarm_misses)
+        metrics.register("prewarm_vendor_closes", conversation.prewarm_vendor_closes)
     # The structured tap (#242, §3.12.2). Three §9.1.3 rows had an `Observability` subscriber in the
     # catalog and none in the code — state.transitioned's is even tagged (M10). Owns no task, so
     # like the two faces it is wired for its subscriptions and then dropped.

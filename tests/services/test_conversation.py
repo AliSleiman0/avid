@@ -74,6 +74,8 @@ from avid.domain import (
     SystemHandlerFailed,
     TokenUsage,
     Trigger,
+    VisionPresenceGained,
+    VisionPresenceLost,
 )
 from avid.services import CueBank, MemoryService
 from avid.services.audio import AudioService
@@ -208,6 +210,9 @@ async def _rig(
     hold_open_s: float = 30.0,
     hourly_ceiling_usd: float = 1.00,
     spend_window_s: float = 3600.0,
+    prewarm: str = "never",
+    prewarm_reopens_max: int = 3,
+    prewarm_reopen_backoff_s: float = 5.0,
 ) -> AsyncIterator[Rig]:
     """A started bus + running ConversationService driven by *client*'s recorded session.
 
@@ -252,6 +257,9 @@ async def _rig(
         think_timeout_s=think_timeout_s,
         server_turn_detection=server_turn_detection,
         thinking_delay_ms=thinking_delay_ms,
+        prewarm=prewarm,  # type: ignore[arg-type]  # the Literal, spelled as a str for the rig
+        prewarm_reopens_max=prewarm_reopens_max,
+        prewarm_reopen_backoff_s=prewarm_reopen_backoff_s,
     )
     # The §6.9 deadline follows the state (#452) — `main._wire_services` registers this observer
     # right after building the service, and a rig that skipped it would be testing a robot nobody
@@ -409,12 +417,18 @@ async def test_service_shape_declares_the_audio_origins_and_barge_in_feed() -> N
             AudioSpeechEnded,
             AudioPlaybackFinished,
             BehaviorTriggerFired,
+            # ADR-014 (#157): the presence feed, so a person walking in warms the socket
+            # before they speak. Declared on every profile; inert when [gate] prewarm="never".
+            VisionPresenceGained,
+            VisionPresenceLost,
         }
         assert {s.name for s in subs} == {
             "ConversationService.speech_started",
             "ConversationService.speech_ended",
             "ConversationService.playback_finished",
             "ConversationService.trigger_fired",
+            "ConversationService.presence_gained",
+            "ConversationService.presence_lost",
         }
 
 

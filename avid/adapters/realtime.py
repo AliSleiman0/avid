@@ -303,9 +303,19 @@ class ReplayRealtimeClient:
         clock: Clock,
         timeline: Sequence[tuple[int, RealtimeEvent]],
         open_error: str | None = None,
+        hold_open: bool = False,
     ) -> None:
         self._clock = clock
         self._timeline = tuple(timeline)
+        # ADR-014 (#157): a warm socket the vendor closes after its 60-minute lifetime is a
+        # transport fact the real client meets routinely and this fake could not express at all
+        # — the same P6 gap `open_error` closed for a refused connect. With ``hold_open`` the
+        # stream stays open after the timeline runs out, until :meth:`vendor_close` ends it with
+        # a ``SessionClosed`` or :meth:`aclose` ends it silently. Off by default so every
+        # existing fixture still yields a finite stream.
+        self._hold_open = hold_open
+        self._vendor_close = asyncio.Event()
+        self._vendor_cause = "vendor"
         # A refused connect, which the fake could not express at all until #452 — and a fake that
         # cannot fail the way the real transport routinely does is an incomplete port (P6). The
         # e2e gate is the only place the "no illegal transition" assertion bites, and it builds
@@ -332,6 +342,18 @@ class ReplayRealtimeClient:
         self.proactive_turns = 0
         self.opened = False
         self.closed = False
+        # How many times open() succeeded — the warm-open tests count re-opens with this.
+        self.opens = 0
+
+    def vendor_close(self, cause: str = "vendor") -> None:
+        """Script the far end closing a held-open session (ADR-014, F-12).
+
+        The stream then yields one ``SessionClosed(cause)`` and ends, exactly as the real client
+        reports a socket the vendor shut after its 60-minute lifetime. Only meaningful with
+        ``hold_open=True``; a no-op otherwise, because a finite timeline has already ended.
+        """
+        self._vendor_cause = cause
+        self._vendor_close.set()
 
     @classmethod
     def from_dir(
@@ -375,10 +397,14 @@ class ReplayRealtimeClient:
             raise OSError(self.open_error)
         self.opened = True
         self.closed = False
+        self.opens += 1
+        self._vendor_close.clear()
 
     async def aclose(self) -> None:
         """Tear the session down. Idempotent; halts an in-flight :meth:`events` stream."""
         self.closed = True
+        # Unblock a held-open stream so the pump returns; it checks `closed` and yields nothing.
+        self._vendor_close.set()
 
     async def send_audio(self, chunk: AudioChunk) -> None:
         """Record one mic chunk (the model's input is ignored by a replay — the reply is
@@ -400,6 +426,13 @@ class ReplayRealtimeClient:
             if self.closed:
                 return
             yield event
+        if not self._hold_open:
+            return
+        # A held-open session: the stream is idle until the far end closes it or we do.
+        await self._vendor_close.wait()
+        if self.closed:
+            return
+        yield SessionClosed(cause=self._vendor_cause)
 
     async def end_user_turn(self) -> None:
         """Record the AVID-194 commit. A replay does not act on it.

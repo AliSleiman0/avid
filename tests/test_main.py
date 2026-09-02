@@ -133,6 +133,11 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ConversationService.playback_finished",
     # #239: the second turn origin, a declared seam from M5 until M10.
     "ConversationService.trigger_fired",
+    # ADR-014 (#157): the presence feed, read so a person walking in warms the socket before
+    # they speak. Two rows regardless of `[gate] prewarm` — subscription is static (P3), and the
+    # handlers early-return when it is "never", so the graph is identical across profiles.
+    "ConversationService.presence_gained",
+    "ConversationService.presence_lost",
     "CostMeterService.turn_ended",
     # EpisodeRecorder (#123): the write-only §7.5 transcript observer of the four conversation.* facts
     "EpisodeRecorder.turn_started",

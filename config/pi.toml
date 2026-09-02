@@ -102,6 +102,14 @@ silence_hold_ms      = 900       # silence run before a turn is declared over (d
 # ends and the turn never commits. Measured 2026-08-01 -- 500/500: 2 replies in 13 turns;
 # 900/900: 1 in 8; 900/500: 10 in 14. Equal is fatal in both directions (AVID-176).
 session_idle_close_s = 30
+# Presence-warmed sessions (ADR-014, §6.3.1): open the socket on vision.presence_gained, stream
+# nothing until the VAD says so. MEASURED 2026-09-02: a silent socket costs nothing (3 frames in
+# an hour, no usage) and the vendor closes it at exactly 60 min (close 1001) — so a warm socket
+# is re-opened while presence holds, at most prewarm_reopens_max times per presence episode.
+# The schema default is "never" (ADR-007 unamended); this profile turns it on.
+prewarm            = "presence"
+prewarm_reopens_max = 3
+prewarm_reopen_backoff_s = 5.0
 # The echo gate (§6.2.4). The uplink is shut while the robot speaks; a rising edge inside that
 # window is the USER only if it clears the running echo floor by this margin. Very large = full
 # half-duplex (barge-in off), the documented fallback if the levels ever stop separating.

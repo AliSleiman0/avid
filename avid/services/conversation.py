@@ -68,10 +68,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from datetime import datetime
-from typing import assert_never, cast
-from uuid import UUID
+from typing import Literal, assert_never, cast
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from avid.core.envelope import Envelope, envelope
@@ -121,6 +121,7 @@ from avid.domain import (
     Trigger,
 )
 from avid.domain.cost import over_ceiling
+from avid.domain.vision import VisionPresenceGained, VisionPresenceLost
 from avid.services.cue_bank import CueBank
 from avid.services.tools import dispatch_tool_call
 
@@ -267,6 +268,9 @@ class ConversationService:
         think_timeout_s: float,
         server_turn_detection: bool,
         thinking_delay_ms: int,
+        prewarm: Literal["presence", "never"] = "never",
+        prewarm_reopens_max: int = 3,
+        prewarm_reopen_backoff_s: float = 5.0,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -352,6 +356,25 @@ class ConversationService:
         # re-arms when spend falls back under. See `_refused_on_spend`.
         self._spend_ceiling_announced = False
 
+        # Presence-warmed sessions (ADR-014, #157, SDS §6.3.1). `_warm` is "open, and no turn has
+        # used it yet" — the socket presence opened, waiting for a first utterance. `_present`
+        # mirrors the presence feed so a vendor close can decide whether re-opening is worth it.
+        # Both bounded re-open knobs exist because the vendor closes a silent session at exactly
+        # 60 minutes (measured), and AVID-105's "no background reconnect loop" is a property this
+        # service keeps: a re-open happens at most `prewarm_reopens_max` times per presence
+        # episode, never forever.
+        self._prewarm = prewarm == "presence"
+        self._prewarm_reopens_max = prewarm_reopens_max
+        self._prewarm_reopen_backoff_s = prewarm_reopen_backoff_s
+        self._warm = False
+        self._present = False
+        self._reopens_this_episode = 0
+        self._reopen_task: asyncio.Task[None] | None = None
+        self._prewarm_opens = 0
+        self._prewarm_hits = 0
+        self._prewarm_misses = 0
+        self._prewarm_vendor_closes = 0
+
     @property
     def session_open(self) -> bool:
         """Whether a Realtime session is currently live — §9.5's "session status" (#385).
@@ -388,6 +411,8 @@ class ConversationService:
             await self._teardown_locked()
             self._cancel_task(self._think_task)
             self._think_task = None
+            self._cancel_task(self._reopen_task)
+            self._reopen_task = None
             self._cancel_cues()
 
     def subscriptions(self) -> Sequence[Subscription]:
@@ -431,6 +456,24 @@ class ConversationService:
                 policy=OverflowPolicy.DROP_OLDEST,
                 maxsize=DEFAULT_MAXSIZE,
             ),
+            # The presence feed (ADR-014, #157): a person walking in warms the socket before they
+            # speak. Declared regardless of `[gate] prewarm` — subscription is static (P3, §3.5.2)
+            # and the handlers early-return when it is "never" — so the subscriber graph the
+            # §9.1.5 drift check sees is identical on every profile.
+            Subscription(
+                event_type=VisionPresenceGained,
+                handler=cast(Handler, self._on_presence_gained),
+                name="ConversationService.presence_gained",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=VisionPresenceLost,
+                handler=cast(Handler, self._on_presence_lost),
+                name="ConversationService.presence_lost",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
         )
 
     # --- turn origins (bus handlers) -----------------------------------------------------
@@ -461,49 +504,42 @@ class ConversationService:
             # asserting a second ceiling episode announces itself, which it could not.
             if await self._refused_on_spend(event.correlation_id):
                 return
-            if not self._session_open:
+            if self._session_open and self._warm:
+                # The socket presence opened is about to earn its keep (ADR-014). From here it
+                # is an ordinary session: the idle timer owns it, and a vendor close mid-turn
+                # degrades exactly as it always did.
+                self._warm = False
+                self._prewarm_hits += 1
+                _log.info(
+                    "warm session hit: presence opened the socket before the first "
+                    "utterance [correlation_id=%s]",
+                    event.correlation_id,
+                )
+            elif not self._session_open:
                 # Cold session (§6.2.3). The §6.7-path-1 memory block is composed and injected here,
                 # overlapping the connect (#126); the client gathers the two. Empty memory / a failed
                 # fetch degrades to the stateless M5 instruction (AC-4/AC-6).
                 #
-                # A failed connect is handled HERE rather than escaping to the bus (AVID-188).
-                # It used to propagate as a raw OSError out of the handler — four full tracebacks
-                # in one bench outage, one per utterance — and the bus did exactly its job:
-                # logged, swallowed, republished `system.handler_failed`. That is the reliability
-                # property working, and it is still the wrong place for this. **Speaking while
-                # the network is down is the expected outcome, not an unexpected handler crash**,
-                # and three things follow from letting it escape: the DoD's "new failure paths
-                # log with a correlation ID" is met only by luck (the id appears in the bus's own
-                # preamble); `system.handler_failed` is the event the bus reserves for genuine
-                # subscriber bugs, so routine network failure inflates the one signal that exists
-                # to catch them; and four tracebacks per outage is enough noise to hide a real
-                # defect underneath — this run had two other findings under them.
-                #
-                # ⚠️ Deliberately `OSError` at the connect, not `except Exception` around the
-                # handler body. The bus's swallow-and-republish exists precisely so genuine bugs
-                # stay visible, and widening this would re-hide them one layer down.
-                try:
-                    await self._client.open(memory=self._compose_memory_block())
-                except OSError as exc:
-                    # Stay degraded and stay quiet. The user has already been told the connection
-                    # is gone; replaying a cue on every utterance would be its own annoyance
-                    # (§6.9's phrases promise a return, and there is no background reconnect loop
-                    # to make that promise true — AVID-105). The next rising edge retries.
-                    _log.warning(
-                        "session open failed while degraded=%s, staying degraded: %s "
-                        "[correlation_id=%s]",
-                        self._degraded,
-                        exc,
-                        event.correlation_id,
-                    )
-                    return
-                self._session_open = True
-                self._pump_task = spawn(self._pump(), name="ConversationService.pump")
-                self._mic_task = spawn(
-                    self._forward_mic(), name="ConversationService.mic"
+                # A failed connect is handled inside `_open_locked` rather than escaping to the
+                # bus (AVID-188): speaking while the network is down is the expected outcome, not
+                # an unexpected handler crash. The next rising edge retries; there is no background
+                # reconnect loop (AVID-105).
+                if self._prewarm:
+                    # A cold open with warming ON is the measurement ADR-014 turns on: a person
+                    # spoke before the presence filter warmed the socket, or with nobody seen.
+                    self._prewarm_misses += 1
+                opened = await self._open_locked(
+                    memory=self._compose_memory_block(),
+                    correlation_id=event.correlation_id,
+                    warm=False,
                 )
-                if self._degraded:
-                    await self._exit_degraded()
+                if not opened:
+                    return
+            if self._degraded:
+                # Recovery is mid-turn by construction: this handler *is* the rising edge
+                # (`_exit_degraded` drives DEGRADED -> LISTENING). A warm open while degraded
+                # therefore never exits the state on its own — it waits for this edge.
+                await self._exit_degraded()
             self._arm_idle()
 
     async def _on_speech_ended(self, event: AudioSpeechEnded) -> None:
@@ -595,6 +631,121 @@ class ConversationService:
         self._muted_item = event.item_id  # step 6 — arm the drop before any await
         await self._client.truncate(event.item_id, event.played_ms)  # step 4
         await self._client.cancel()  # step 5
+
+    # --- presence-warmed sessions (ADR-014, #157, SDS §6.3.1) -----------------------------
+
+    async def _on_presence_gained(self, event: VisionPresenceGained) -> None:
+        """A person is here: open the socket now, so their first sentence finds it warm.
+
+        Streams nothing — ADR-007's cost intent is untouched; only the *open* moved earlier.
+        Measured before it was allowed (2026-09-02): a silent socket produces no usage and no
+        rate-limit traffic across a full hour. Gated by the spend ceiling exactly as a turn is
+        (#472) — a warm open past the ceiling would be a socket that exists to be refused on.
+
+        A refused connect logs and waits for the next presence edge, as a cold open waits for
+        the next rising edge. No retry loop here either (AVID-105). Deliberately *not* gated on
+        ``SLEEPING``: ``vision.presence_gained`` is the wake signal itself, and the state move it
+        drives races this handler across two subscriber queues (#72) — a gate on the old state
+        would skip warming on exactly the wake that matters.
+        """
+        async with self._lock:
+            self._present = True
+            self._reopens_this_episode = 0
+            if not self._prewarm or self._session_open:
+                return
+            if await self._refused_on_spend(event.correlation_id):
+                return
+            await self._open_locked(
+                memory=self._compose_memory_block(),
+                correlation_id=event.correlation_id,
+                warm=True,
+            )
+
+    async def _on_presence_lost(self, event: VisionPresenceLost) -> None:
+        """Nobody is here: a warm socket nobody spoke on is closed; a used one is the idle
+        timer's business, as it always was. Any pending re-open is dropped with it."""
+        async with self._lock:
+            self._present = False
+            self._cancel_task(self._reopen_task)
+            self._reopen_task = None
+            if self._session_open and self._warm:
+                _log.info(
+                    "presence lost with a warm session nobody spoke on; closing "
+                    "[correlation_id=%s]",
+                    event.correlation_id,
+                )
+                await self._teardown_locked()
+
+    async def _open_locked(
+        self, *, memory: Awaitable[str], correlation_id: UUID, warm: bool
+    ) -> bool:
+        """Open the session and arm its pump and mic loop. Caller holds the lock.
+
+        The one place a socket comes up, whichever of the three paths asked for it — reactive,
+        proactive or warm — so ``OSError`` is handled once (AVID-188: routine network failure is
+        logged with the turn's id and never reaches ``system.handler_failed``). Returns whether
+        the socket is up. ``warm`` records that no turn has used it yet (ADR-014).
+        """
+        try:
+            await self._client.open(memory=memory)
+        except OSError as exc:
+            # Stay degraded and stay quiet. The user has already been told the connection is
+            # gone; replaying a cue on every utterance would be its own annoyance (§6.9's
+            # phrases promise a return, and there is no background reconnect loop to make that
+            # promise true — AVID-105). The next rising edge (or presence edge) retries.
+            _log.warning(
+                "%s session open failed while degraded=%s, staying degraded: %s "
+                "[correlation_id=%s]",
+                "warm" if warm else "cold",
+                self._degraded,
+                exc,
+                correlation_id,
+            )
+            return False
+        self._session_open = True
+        self._warm = warm
+        if warm:
+            self._prewarm_opens += 1
+        self._pump_task = spawn(self._pump(), name="ConversationService.pump")
+        self._mic_task = spawn(self._forward_mic(), name="ConversationService.mic")
+        return True
+
+    async def _reopen_after_backoff(self) -> None:
+        """Re-open a warm socket the vendor closed, after a pause — bounded by the caller."""
+        await self._clock.sleep(self._prewarm_reopen_backoff_s)
+        async with self._lock:
+            self._reopen_task = None
+            if not self._present or self._session_open:
+                return
+            await self._open_locked(
+                memory=self._compose_memory_block(),
+                correlation_id=self._turn_id or uuid4(),
+                warm=True,
+            )
+
+    async def _close_warm(self) -> None:
+        """Close a warm socket from a state edge (SLEEPING). Takes the lock; no-op if a turn
+        started on it in the meantime — that socket is the idle timer's."""
+        async with self._lock:
+            if self._session_open and self._warm:
+                await self._teardown_locked()
+
+    def prewarm_opens(self) -> int:
+        """Warm opens made on presence (ADR-014). Process-scoped, for ``/metrics``."""
+        return self._prewarm_opens
+
+    def prewarm_hits(self) -> int:
+        """Turns whose first utterance found a warm socket — the number ADR-014 is graded on."""
+        return self._prewarm_hits
+
+    def prewarm_misses(self) -> int:
+        """Turns that paid the cold open with warming ON: the presence filter was slower than
+        the person, or nobody was seen. A rising count is a ``[vision]`` finding, not a bug here."""
+        return self._prewarm_misses
+
+    def prewarm_vendor_closes(self) -> int:
+        """Warm sockets the far end closed with no turn on them — F-12's detector."""
+        return self._prewarm_vendor_closes
 
     # --- the events pump -----------------------------------------------------------------
 
@@ -744,6 +895,14 @@ class ConversationService:
         cheap error. Raising into a bus handler would be the expensive one.
         """
         async with self._lock:
+            if self._session_open and self._warm:
+                # A presence-warmed socket, unused (ADR-014). A proactive turn needs the §10.8
+                # context block *in the instructions*, which a warm open composed without — the
+                # block is the reason for the turn. So the warm socket is closed and the proactive
+                # path opens cold with it, exactly as it always has: a reminder is not on the
+                # latency budget, and a reminder without its context would be a robot saying
+                # "coffee" with no idea why. Not a miss — no person spoke.
+                await self._teardown_locked()
             if self._session_open:
                 # Something is already talking. The gate's rule 2 should have vetoed, so reaching
                 # here means the world moved between the check and the fire — drop it rather than
@@ -879,6 +1038,34 @@ class ConversationService:
         any→DEGRADED, and plays a canned CueBank phrase so the robot says *something* with no
         network. Tears the session down; the next ``audio.speech_started`` re-opens cold.
         """
+        if self._warm:
+            # A presence-warmed socket nobody had spoken on yet, closed by the far end (ADR-014,
+            # F-12) — measured at exactly 60 minutes on the shipped model. Not a loss the user
+            # can notice: no turn was in flight, no cue is owed, and DEGRADED would be a lie
+            # about a robot that is merely between sockets. So: count it, tear down quietly,
+            # and re-open while presence still holds — a bounded number of times, because
+            # AVID-105's "no background reconnect loop" is a property worth keeping.
+            self._prewarm_vendor_closes += 1
+            _log.info(
+                "warm session closed by the vendor (%s) with no turn on it; %s",
+                ev.cause,
+                "re-opening"
+                if self._present
+                and self._reopens_this_episode < self._prewarm_reopens_max
+                else "not re-opening",
+            )
+            async with self._lock:
+                await self._teardown_locked()
+                if (
+                    self._present
+                    and self._reopens_this_episode < self._prewarm_reopens_max
+                ):
+                    self._reopens_this_episode += 1
+                    self._reopen_task = spawn(
+                        self._reopen_after_backoff(),
+                        name="ConversationService.prewarm_reopen",
+                    )
+            return
         # Read before _degrade clears it — this is the only caller that has an honest value.
         was_mid_turn = self._turn_active
         await self._publish(
@@ -1136,6 +1323,12 @@ class ConversationService:
         elif from_ is RobotState.THINKING:
             self._cancel_task(self._think_task)
             self._think_task = None
+        if to is RobotState.SLEEPING and self._warm:
+            # A sleeping robot holds no socket (ADR-014). Synchronous observer, so it may only
+            # arm a task — the teardown itself takes the lock in that task.
+            self._cancel_task(self._reopen_task)
+            self._reopen_task = None
+            spawn(self._close_warm(), name="ConversationService.prewarm_sleep_close")
 
     def _arm_think_timeout(self) -> None:
         """(Re)start the countdown from *now*. Called from :meth:`on_transition` only."""
@@ -1210,6 +1403,8 @@ class ConversationService:
         client. The thinking cue is stopped; other best-effort cue tasks are left to finish
         (they release themselves) but are swept on :meth:`stop`."""
         self._session_open = False
+        # A closed socket is not warm, whatever opened it (ADR-014).
+        self._warm = False
         # ...nor a stale proactive latch: the next session may well be a user-initiated one, and
         # an inherited latch would report an ordinary quiet session as an ignored reminder.
         self._proactive = False
