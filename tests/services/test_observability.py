@@ -17,11 +17,17 @@ import pytest
 from avid.adapters.clock import FakeClock
 from avid.core.envelope import envelope
 from avid.domain import (
+    ABORT_REASONS,
+    EDGE,
+    PREEMPTED,
     Axis,
     BehaviorProactiveDelivered,
     BehaviorProactiveSuppressed,
     BehaviorTriggerDisabled,
     BehaviorTriggerFired,
+    DriveStepAborted,
+    DriveStepCompleted,
+    DriveStepStarted,
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
@@ -66,6 +72,10 @@ async def test_it_subscribes_to_every_row_that_names_it_and_nothing_else() -> No
         "ObservabilityService.gesture_started",
         "ObservabilityService.gesture_completed",
         "ObservabilityService.gesture_preempted",
+        # The three drive.* rows (#400) — Observability is their only subscriber too.
+        "ObservabilityService.step_started",
+        "ObservabilityService.step_completed",
+        "ObservabilityService.step_aborted",
     }
 
 
@@ -260,3 +270,85 @@ async def test_a_completed_gesture_records_its_measured_duration(
 
     (line,) = _lines(caplog)
     assert (line["event"], line["duration_ms"]) == ("motion.gesture_completed", 880)
+
+
+# --- the drive.* rows (#400, SDS §9.1.3, §9.5) ------------------------------------------------
+
+
+async def test_a_step_start_and_completion_are_logged_and_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``steps`` counts starts, as ``gestures`` counts gesture starts; ``net_mm`` rides the
+    completion line so a step whose plan did not sum to zero is visible in the journal."""
+    clock = FakeClock()
+    service = ObservabilityService()
+    with caplog.at_level(logging.INFO, logger="avid.observability"):
+        await service._on_step_started(
+            DriveStepStarted(
+                **_env(clock),
+                gesture="step_toward",
+                heading="forward",
+                distance_mm=20.0,
+            )
+        )
+        await service._on_step_completed(
+            DriveStepCompleted(
+                **_env(clock), gesture="step_toward", duration_ms=1082, net_mm=0.0
+            )
+        )
+
+    started, completed = _lines(caplog)
+    assert (started["event"], started["heading"], started["distance_mm"]) == (
+        "drive.step_started",
+        "forward",
+        20.0,
+    )
+    assert (completed["event"], completed["net_mm"]) == ("drive.step_completed", 0.0)
+    assert service.steps == 1
+
+
+async def test_an_edge_abort_is_a_warning_and_a_preemption_is_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The seam §10.5 drew for ``trigger_disabled``, applied to the wheels: a preemption is the
+    design working, an edge is the sensors earning their place, and the two must not share a
+    level or the second drowns in a week of the first."""
+    clock = FakeClock()
+    service = ObservabilityService()
+    with caplog.at_level(logging.INFO, logger="avid.observability"):
+        await service._on_step_aborted(
+            DriveStepAborted(**_env(clock), gesture="step_toward", reason=PREEMPTED)
+        )
+        await service._on_step_aborted(
+            DriveStepAborted(**_env(clock), gesture="step_toward", reason=EDGE)
+        )
+
+    levels = [
+        record.levelno
+        for record in caplog.records
+        if record.name == "avid.observability"
+    ]
+    assert levels == [logging.INFO, logging.WARNING]
+
+
+async def test_steps_aborted_is_a_map_keyed_by_reason_with_string_keys() -> None:
+    """A map, not a total (§9.5): an ``edge`` abort and a ``preempted`` abort want opposite
+    responses. String keys because the route's ``json.dumps`` would 500 on anything else."""
+    clock = FakeClock()
+    service = ObservabilityService()
+    for reason in ABORT_REASONS:
+        await service._on_step_aborted(
+            DriveStepAborted(**_env(clock), gesture="step_back", reason=reason)
+        )
+    await service._on_step_aborted(
+        DriveStepAborted(**_env(clock), gesture="step_back", reason=EDGE)
+    )
+
+    assert dict(service.steps_aborted) == {
+        "edge": 2,
+        "fault": 1,
+        "preempted": 1,
+        "budget": 1,
+    }
+    assert all(isinstance(key, str) for key in service.steps_aborted)
+    json.dumps(dict(service.steps_aborted))  # must not raise
