@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from typing import ClassVar
 from uuid import UUID
 
-# The nine authoritative event domains (SDS §3.5.3). ``display`` and ``expression``
-# are deliberately NOT domains: they are driven by direct port calls (SDS §9.1.4),
-# never by events.
+# The ten authoritative event domains (SDS §3.5.3, §9.1.3). ``display`` and
+# ``expression`` are deliberately NOT domains: they are driven by direct port calls
+# (SDS §9.1.4), never by events. ``drive`` is the tenth (#400, ADR-015): a step has a
+# distance and an abort has a reason, where a gesture has axes, so it is its own family
+# rather than three more ``motion.*`` rows that would lie by omission.
 EVENT_DOMAINS: frozenset[str] = frozenset(
     {
         "system",
@@ -25,6 +27,7 @@ EVENT_DOMAINS: frozenset[str] = frozenset(
         "memory",
         "behavior",
         "motion",
+        "drive",
     }
 )
 

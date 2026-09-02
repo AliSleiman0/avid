@@ -103,6 +103,13 @@ class Gesture(Enum):
     :attr:`CENTER` earns its place as the one gesture that is also a **resting state**: #203
     uses it to bring the head somewhere sensible before relaxing, so an idle robot is not
     frozen at whatever angle its last gesture happened to end on.
+
+    :attr:`STEP_TOWARD` and :attr:`STEP_BACK` are the two translation intents ADR-015 admits
+    (SDS §3.9.5) — a shuffle toward the user, a step back. They live in this enum because a
+    step is an *intent* the same way a nod is, and one vocabulary is what lets a future trigger
+    (#477) speak of "a gesture" without knowing whether it lands on a servo or a wheel. They
+    are **not servo gestures**: :func:`plan` answers them with an empty tuple on every rig, and
+    :func:`avid.domain.drive.plan_step` is the planner that realises them.
     """
 
     NOD = auto()
@@ -112,6 +119,8 @@ class Gesture(Enum):
     LOOK_UP = auto()
     LOOK_DOWN = auto()
     CENTER = auto()
+    STEP_TOWARD = auto()
+    STEP_BACK = auto()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -272,6 +281,11 @@ def plan(gesture: Gesture, axes: Sequence[Axis]) -> tuple[Keyframe, ...]:
     **not** fall back to tilt, and ``LOOK_UP`` does not fall back to pan: a lateral "no"
     performed vertically reads as agreement, and panning is not looking up. Silence is more
     honest than a gesture that means the opposite of what was asked.
+
+    **A step is not a servo gesture.** ``STEP_TOWARD`` and ``STEP_BACK`` plan to ``()`` here on
+    every rig, whatever axes it has — a head that leans forward is not a body that moves, and
+    substituting one for the other is exactly the meaning inversion this docstring forbids.
+    Their planner is :func:`avid.domain.drive.plan_step` (ADR-015).
     """
     match gesture:
         case Gesture.NOD:
@@ -301,6 +315,8 @@ def plan(gesture: Gesture, axes: Sequence[Axis]) -> tuple[Keyframe, ...]:
             )
         case Gesture.CENTER:
             return tuple(_at(axis, 0.0, _CENTER_MS) for axis in axes)
+        case Gesture.STEP_TOWARD | Gesture.STEP_BACK:
+            return ()
 
 
 def duration_ms(keyframes: Iterable[Keyframe]) -> int:

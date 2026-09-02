@@ -81,6 +81,26 @@ from avid.domain.conversation import (
     TokenUsage,
 )
 from avid.domain.cues import Cue
+from avid.domain.drive import (
+    ABORT_REASONS,
+    BUDGET,
+    EDGE,
+    FAULT,
+    PREEMPTED,
+    STEP_GESTURES,
+    DriveCapabilities,
+    DriveStepAborted,
+    DriveStepCompleted,
+    DriveStepStarted,
+    Heading,
+    Leg,
+    StepGeometry,
+    homing_leg,
+    net_mm,
+    peak_excursion_mm,
+    plan_step,
+    step_duration_ms,
+)
 from avid.domain.events import (
     EVENT_DOMAINS,
     REASON_HANDLER_RAISED,
@@ -276,4 +296,24 @@ __all__ = [
     "Direction",
     "LookAtResult",
     "gesture_for_direction",
+    # drive (#400, ADR-015) — the step planner, its geometry, and the drive.* events.
+    # ``DriveCapabilities`` is re-exported by core/hal.py for the reason ``Axis`` is.
+    "ABORT_REASONS",
+    "BUDGET",
+    "EDGE",
+    "FAULT",
+    "PREEMPTED",
+    "STEP_GESTURES",
+    "DriveCapabilities",
+    "DriveStepAborted",
+    "DriveStepCompleted",
+    "DriveStepStarted",
+    "Heading",
+    "Leg",
+    "StepGeometry",
+    "homing_leg",
+    "net_mm",
+    "peak_excursion_mm",
+    "plan_step",
+    "step_duration_ms",
 ]
