@@ -13,6 +13,8 @@ from avid.adapters.boot_log import FakeBootLog, SqliteBootLog
 from avid.adapters.camera import FakeCamera, Picamera2Camera
 from avid.adapters.clock import FakeClock, SystemClock
 from avid.adapters.display import FakeDisplay, FramebufferDisplay
+from avid.adapters.drive import FakeDrive
+from avid.adapters.edge import FakeEdgeSensor
 from avid.adapters.embedder import FakeEmbedder, LocalMiniLmEmbedder
 from avid.adapters.episode_store import FakeEpisodeStore, SqliteEpisodeStore
 from avid.adapters.face_detector import FakeFaceDetector, OnnxFaceDetector
@@ -46,6 +48,9 @@ __all__ = [
     # Servo (AVID-52)
     "FakeServo",
     "Pca9685Servo",
+    # Drive + EdgeSensor (#400, ADR-015) — the wheels and the desk edge, fakes first
+    "FakeDrive",
+    "FakeEdgeSensor",
     # Microphone (AVID-53)
     "FakeMicrophone",
     "AlsaMicrophone",

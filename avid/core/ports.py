@@ -6,11 +6,11 @@ inversion is the whole value (SDS §3.9.1). Adapters in ``avid.adapters`` satisf
 these structurally; ``main.py`` alone wires which one (P2, P3).
 
 Ports defined here (SDS §3.5.2, §3.9.1, §9.3): :class:`EventBus`, :class:`Clock`,
-:class:`Camera`, :class:`Servo`, :class:`Display`, :class:`Microphone`,
-:class:`Speaker`, :class:`VoiceActivityDetector`, :class:`FaceDetector`,
-:class:`RealtimeClient`, :class:`TurnSink`, :class:`FactRepository`,
-:class:`Embedder`, :class:`Retriever`, :class:`TextModel`, :class:`MemoryTools`,
-:class:`AffectTools`, :class:`EpisodeStore`.
+:class:`Camera`, :class:`Servo`, :class:`Drive`, :class:`EdgeSensor`, :class:`Display`,
+:class:`Microphone`, :class:`Speaker`, :class:`VoiceActivityDetector`,
+:class:`FaceDetector`, :class:`RealtimeClient`, :class:`TurnSink`,
+:class:`FactRepository`, :class:`Embedder`, :class:`Retriever`, :class:`TextModel`,
+:class:`MemoryTools`, :class:`AffectTools`, :class:`EpisodeStore`.
 
 :class:`Service` is the odd one out: not a device port but the SDS §9.2 shape every
 use-case service takes (``name``/``start``/``stop``/``subscriptions``), so
@@ -45,6 +45,7 @@ from avid.core.hal import (
     CameraCaps,
     Detection,
     DisplayFrame,
+    DriveCapabilities,
     Frame,
 )
 from avid.core.realtime import RealtimeEvent
@@ -155,6 +156,67 @@ class Servo(Protocol):
     @property
     def axes(self) -> tuple[Axis, ...]:
         """The axes this rig exposes, for negotiation (SDS §3.9.3 / ADR-009)."""
+        ...
+
+
+@runtime_checkable
+class Drive(Protocol):
+    """The wheels, as bounded desk steps need them (SDS §3.9.5 / ADR-015).
+
+    **Velocity for a duration, never a position.** ``Servo`` is a position inside a declared
+    reach; a wheel is a speed held for a while, and wrapping an H-bridge as a servo with a very
+    long reach would be defining the port by what the device offers. Both wheels ride one call
+    because the application never wants one wheel: a straight step is ``(+v, +v)``, and a rig
+    that exposed them separately would let a service half-command a turn.
+    """
+
+    async def run(self, left: float, right: float, *, duration_ms: int) -> int:
+        """Drive the wheels at signed speeds in ``[-1, 1]`` for ``duration_ms``.
+
+        ``+`` is **toward the user** on every rig — the robot frame, where the edge sensors
+        face. The measured fact that this H-bridge's ``forward()`` drives the chassis backward
+        is applied **inside the adapter, once**, from ``[drive] forward_is_inverted``; nothing
+        above this port ever sees a sign convention (SDS §3.9.5).
+
+        Returns the **milliseconds actually driven**, for the reason ``Speaker.play()`` returns
+        ms accepted: a leg cut short by :meth:`stop` or a cancel must not be indistinguishable
+        from one that completed, because the service's odometer — the thing that bounds the
+        excursion — integrates what was *driven*, not what was asked. MUST be cancellable, and
+        MUST leave the motors stopped whether it completes, is stopped or is cancelled.
+        """
+        ...
+
+    async def stop(self) -> None:
+        """Cut the motors now. Idempotent; safe when nothing is running.
+
+        On the port rather than implied by cancellation so an edge abort is a **direct awaited
+        call** (SDS §9.1.4) — a stop that rode the bus could be dropped, and a dropped stop is
+        a robot on the floor.
+        """
+        ...
+
+    @property
+    def capabilities(self) -> DriveCapabilities | None:
+        """What the wheels can do, for negotiation (SDS §3.9.3) — ``None`` means *this rig
+        has no wheels*, and the step planner answers every step with an empty plan."""
+        ...
+
+
+@runtime_checkable
+class EdgeSensor(Protocol):
+    """ "Is it safe to move" — the only question the drive has (SDS §3.9.5, F-13).
+
+    Deliberately not *"what did pin N read"*: a rig with one sensor, two, or a fake that lies
+    on cue all satisfy the same contract, and the polarity (HIGH = surface on this board, the
+    inverse of the datasheet) lives in the adapter's config where a hardware fact belongs.
+    """
+
+    async def clear(self) -> bool:
+        """``True`` only if **every** sensor fitted sees surface under it.
+
+        ``async`` because reading a GPIO is a syscall, sub-millisecond but still I/O, and the
+        real adapter offloads it (P8). Polled by ``DriveService`` before and during every leg.
+        """
         ...
 
 
