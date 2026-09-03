@@ -22,13 +22,18 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Sequence
 from typing import cast
 
 from avid.core.event_bus import DEFAULT_MAXSIZE, Handler, OverflowPolicy, Subscription
 from avid.domain import (
+    PREEMPTED,
     BehaviorTriggerDisabled,
     BehaviorTriggerFired,
+    DriveStepAborted,
+    DriveStepCompleted,
+    DriveStepStarted,
     MotionGestureCompleted,
     MotionGesturePreempted,
     MotionGestureStarted,
@@ -53,6 +58,12 @@ class ObservabilityService:
         self.triggers_fired = 0
         self.triggers_disabled = 0
         self.gestures = 0
+        # The wheels (#400, SDS §9.5). ``steps_aborted`` is a map keyed by §9.1.3's abort reason
+        # rather than a total, for the reason ``illegal_transitions`` is one: an ``edge`` abort
+        # and a ``preempted`` abort want opposite responses, and a single number cannot tell
+        # them apart. String keys, so the `/metrics` route's ``json.dumps`` never sees an enum.
+        self.steps = 0
+        self.steps_aborted: Counter[str] = Counter()
 
     async def start(self) -> None:
         """Nothing to start. This service owns no task — it is purely reactive."""
@@ -112,6 +123,29 @@ class ObservabilityService:
                 event_type=MotionGesturePreempted,
                 handler=cast(Handler, self._on_gesture_preempted),
                 name="ObservabilityService.gesture_preempted",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            # The three drive.* rows (#400, ADR-015): as with motion.*, Observability is their
+            # only §9.1.3 subscriber, and M12's gate reads the edge abort out of this log.
+            Subscription(
+                event_type=DriveStepStarted,
+                handler=cast(Handler, self._on_step_started),
+                name="ObservabilityService.step_started",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=DriveStepCompleted,
+                handler=cast(Handler, self._on_step_completed),
+                name="ObservabilityService.step_completed",
+                policy=OverflowPolicy.DROP_OLDEST,
+                maxsize=DEFAULT_MAXSIZE,
+            ),
+            Subscription(
+                event_type=DriveStepAborted,
+                handler=cast(Handler, self._on_step_aborted),
+                name="ObservabilityService.step_aborted",
                 policy=OverflowPolicy.DROP_OLDEST,
                 maxsize=DEFAULT_MAXSIZE,
             ),
@@ -193,6 +227,48 @@ class ObservabilityService:
             gesture=event.gesture,
             by=event.by,
             cause="superseded" if event.by is not None else "fault_abort",
+        )
+
+    async def _on_step_started(self, event: DriveStepStarted) -> None:
+        """A wheel is about to turn: the heading and the leg length are what a reader needs to
+        know what the robot is about to do, without re-deriving them from a plan."""
+        self.steps += 1
+        self._emit(
+            "drive.step_started",
+            event,
+            gesture=event.gesture,
+            heading=event.heading,
+            distance_mm=event.distance_mm,
+        )
+
+    async def _on_step_completed(self, event: DriveStepCompleted) -> None:
+        """``net_mm`` is the plan's own arithmetic and is ``0.0`` for every plan the domain emits —
+        logged so a completed step whose payload says otherwise is visibly a defect."""
+        self._emit(
+            "drive.step_completed",
+            event,
+            gesture=event.gesture,
+            duration_ms=event.duration_ms,
+            net_mm=event.net_mm,
+        )
+
+    async def _on_step_aborted(self, event: DriveStepAborted) -> None:
+        """⚠️ ``edge``, ``fault`` and ``budget`` are WARNING; ``preempted`` is INFO.
+
+        A preemption is the design working — a conversation started mid-step — and it happens
+        every time someone speaks during an idle shuffle. The other three are facts about the
+        *desk* or the *hardware*: the sensors earning their place, a wheel that faulted, or the
+        loud row that should never fire. All three belong at a level someone reading a week of
+        journal will actually see, which is the seam §10.5 already drew for ``trigger_disabled``.
+        """
+        self.steps_aborted[event.reason] += 1
+        level = logging.INFO if event.reason == PREEMPTED else logging.WARNING
+        self._emit(
+            "drive.step_aborted",
+            event,
+            level=level,
+            gesture=event.gesture,
+            reason=event.reason,
         )
 
     def _emit(

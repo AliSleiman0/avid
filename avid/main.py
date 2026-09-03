@@ -29,6 +29,8 @@ from avid.adapters import (
     FakeBootLog,
     FakeCamera,
     FakeDisplay,
+    FakeDrive,
+    FakeEdgeSensor,
     FakeEmbedder,
     FakeEpisodeStore,
     FakeFaceDetector,
@@ -65,7 +67,7 @@ from avid.core import lifecycle
 from avid.core.banner import describe_runtime, format_banner
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus
-from avid.core.hal import Axis
+from avid.core.hal import Axis, DriveCapabilities
 from avid.core.metrics import MetricsRegistry, ProvidedMetrics
 from avid.core.personality import compose, compose_instructions
 from avid.core.ports import (
@@ -73,6 +75,8 @@ from avid.core.ports import (
     Camera,
     Clock,
     Display,
+    Drive,
+    EdgeSensor,
     Embedder,
     EpisodeStore,
     EventBus,
@@ -90,7 +94,7 @@ from avid.core.ports import (
 )
 from avid.core.state_manager import StateManager
 from avid.core.state_report import StateReport
-from avid.domain import PolicyLimits, ScoreWeights
+from avid.domain import PolicyLimits, ScoreWeights, StepGeometry
 from avid.domain.vision import PresenceParams
 from avid.services import (
     CAPABILITY_INSTRUCTIONS,
@@ -101,6 +105,7 @@ from avid.services import (
     ConversationService,
     CostMeterService,
     CueBank,
+    DriveService,
     EpisodeRecorder,
     ExpressionService,
     MemoryService,
@@ -244,6 +249,55 @@ def _build_servo(config: Config) -> Servo:
             raise NotImplementedError(
                 f"servo adapter {other!r} is not available — only 'fake' and "
                 f"'pca9685' exist (AVID-52)"
+            )
+
+
+def _build_drive(config: Config) -> Drive:
+    """Select the ``Drive`` adapter named by ``[adapters] drive`` (#400, ADR-015).
+
+    ``fake`` is the laptop/sim default — an odometer, no motors; ``l9110s`` is the real dual
+    H-bridge on GPIO via ``gpiozero`` (apt on the Pi, imported lazily inside that adapter,
+    ADR-008). Both are handed the same ``DriveCapabilities`` built from ``[drive]`` (P7) —
+    the one number the step planner negotiates against (§3.9.3) — so a plan is identical on
+    both; only what turns differs.
+    """
+    capabilities = DriveCapabilities(mm_per_s_at_full=config.drive.mm_per_s_at_full)
+    match config.adapters.drive:
+        case "fake":
+            return FakeDrive(capabilities=capabilities)
+        case "l9110s":  # pragma: no cover - needs the Pi (M12 gate)
+            raise NotImplementedError(
+                "drive adapter 'l9110s' lands with the real-adapter PR of #400; "
+                "select 'fake' until it does"
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"drive adapter {other!r} is not available — only 'fake' and "
+                f"'l9110s' exist (#400)"
+            )
+
+
+def _build_edge_sensor(config: Config) -> EdgeSensor:
+    """Select the ``EdgeSensor`` adapter named by ``[adapters] edge`` (#400, ADR-015).
+
+    ``fake`` answers a scriptable flag — the desk edge on demand, which is how the abort path
+    is proven with no desk and no fall; ``tcrt5000`` reads the modules on ``[drive.edge] pins``
+    with the measured polarity. ⚠️ ``drive = "l9110s"`` with ``edge = "fake"`` is legal for a
+    bench and wrong for a machine: real wheels with a sensor that always says "clear" is a
+    robot that steps blind (SDS §3.9.5, F-13).
+    """
+    match config.adapters.edge:
+        case "fake":
+            return FakeEdgeSensor()
+        case "tcrt5000":  # pragma: no cover - needs the Pi (M12 gate)
+            raise NotImplementedError(
+                "edge adapter 'tcrt5000' lands with the real-adapter PR of #400; "
+                "select 'fake' until it does"
+            )
+        case other:  # pragma: no cover - guards an unreachable literal
+            raise NotImplementedError(
+                f"edge adapter {other!r} is not available — only 'fake' and "
+                f"'tcrt5000' exist (#400)"
             )
 
 
@@ -650,6 +704,10 @@ def _register_service_metrics(
     metrics.register("triggers_fired", lambda: observability.triggers_fired)
     metrics.register("triggers_disabled", lambda: observability.triggers_disabled)
     metrics.register("gestures", lambda: observability.gestures)
+    # The wheels (#400, SDS §9.5). `steps_aborted` is a dict keyed by §9.1.3's abort reason,
+    # rendered from the Counter so the route's json.dumps sees plain strings and ints.
+    metrics.register("steps", lambda: observability.steps)
+    metrics.register("steps_aborted", lambda: dict(observability.steps_aborted))
     metrics.register("turns", lambda: cost_meter.turns)
     metrics.register("cost_usd", lambda: round(cost_meter.total_cost_usd, 6))
     metrics.register(
@@ -665,6 +723,8 @@ def _wire_services(
     state: StateManager,
     display: Display,
     servo: Servo,
+    drive: Drive,
+    edge: EdgeSensor,
     microphone: Microphone,
     speaker: Speaker,
     vad: VoiceActivityDetector,
@@ -747,6 +807,25 @@ def _wire_services(
         drift_interval_min_s=config.motion.micro_motion_interval_min_s,
         drift_interval_max_s=config.motion.micro_motion_interval_max_s,
         drift_amplitude_frac=config.motion.micro_motion_amplitude_frac,
+    )
+    # The wheels (#400, ADR-015). The geometry is `[drive]`'s values bundled for the pure
+    # planner; the scheduling knobs go to the service. It reads the state feed independently,
+    # like MotionService, and it is the only caller of the Drive and EdgeSensor ports (§9.1.4).
+    drive_service = DriveService(
+        bus=bus,
+        drive=drive,
+        edge=edge,
+        clock=clock,
+        geometry=StepGeometry(
+            step_mm=config.drive.step_mm,
+            max_excursion_mm=config.drive.max_excursion_mm,
+            speed_frac=config.drive.speed_frac,
+            dwell_ms=config.drive.dwell_ms,
+        ),
+        edge_poll_ms=config.drive.edge.poll_ms,
+        edge_clear_hold_ms=config.drive.edge.clear_hold_ms,
+        idle_step_interval_min_s=config.drive.idle_step_interval_min_s,
+        idle_step_interval_max_s=config.drive.idle_step_interval_max_s,
     )
     audio = AudioService(
         bus=bus,
@@ -935,6 +1014,7 @@ def _wire_services(
         affect,
         expression,
         motion,
+        drive_service,
         audio,
         conversation,
         cost_meter,
@@ -979,10 +1059,21 @@ def _wire_services(
     # ready before a session ever asks for top_facts. The reactive services (the face, the cost meter)
     # own no task and are kept alive by their bound-method subscriptions above.
     #
-    # MotionService is last because `lifecycle.run` stops in reverse order (§9.2): its stop() relaxes
-    # every channel, and a servo left energised is the one failure that outlives the process — so it
-    # should be the first thing unwound, not something waiting behind a database close.
-    return (memory, audio, conversation, episode_recorder, presence, behavior, motion)
+    # MotionService is near the end because `lifecycle.run` stops in reverse order (§9.2): its stop()
+    # relaxes every channel, and a servo left energised is a failure that outlives the process — so it
+    # should be unwound early, not behind a database close. DriveService is LAST for the stronger
+    # version of the same reason: its stop() cuts the motors, and a wheel left turning is the one
+    # failure that ends on the floor (#400, SDS §3.9.5). First to stop, always.
+    return (
+        memory,
+        audio,
+        conversation,
+        episode_recorder,
+        presence,
+        behavior,
+        motion,
+        drive_service,
+    )
 
 
 async def _run(config: Config, *, build: str) -> int:
@@ -996,6 +1087,8 @@ async def _run(config: Config, *, build: str) -> int:
     display = _build_display(config)
     camera = _build_camera(config)
     servo = _build_servo(config)
+    drive = _build_drive(config)
+    edge = _build_edge_sensor(config)
     microphone = _build_microphone(config)
     speaker = _build_speaker(config)
     vad = _build_vad(config)
@@ -1032,6 +1125,8 @@ async def _run(config: Config, *, build: str) -> int:
         "display": True,
         "camera": True,
         "servo": True,
+        "drive": True,
+        "edge": True,
         "microphone": True,
         "speaker": True,
         "face_detector": True,
@@ -1088,6 +1183,8 @@ async def _run(config: Config, *, build: str) -> int:
         state=state,
         display=display,
         servo=servo,
+        drive=drive,
+        edge=edge,
         camera=camera,
         face_detector=face_detector,
         vision_pool=vision_pool,

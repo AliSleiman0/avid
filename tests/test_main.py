@@ -27,6 +27,8 @@ from avid.adapters import (
     FakeCamera,
     FakeClock,
     FakeDisplay,
+    FakeDrive,
+    FakeEdgeSensor,
     FakeEmbedder,
     FakeEpisodeStore,
     FakeFaceDetector,
@@ -51,9 +53,9 @@ from avid.adapters.event_tap import event_types
 from avid.core import lifecycle
 from avid.core.config import Config, load_config
 from avid.core.event_bus import AsyncioEventBus, OverflowPolicy
-from avid.core.hal import Axis, DisplayFrame
+from avid.core.hal import Axis, DisplayFrame, DriveCapabilities
 from avid.core.metrics import MetricsRegistry
-from avid.core.ports import AffectTools, GestureTools
+from avid.core.ports import AffectTools, Drive, EdgeSensor, GestureTools
 from avid.core.state_manager import StateManager
 from avid.domain import (
     AffectChanged,
@@ -68,6 +70,9 @@ from avid.domain import (
     ConversationTurnEnded,
     ConversationTurnStarted,
     ConversationUserTranscribed,
+    DriveStepAborted,
+    DriveStepCompleted,
+    DriveStepStarted,
     MemoryFactDeleted,
     MemoryFactStored,
     MemoryFactSuperseded,
@@ -85,6 +90,8 @@ from avid.main import (
     _build_camera,
     _build_cue_bank,
     _build_display,
+    _build_drive,
+    _build_edge_sensor,
     _build_embedder,
     _build_episode_store,
     _build_face_detector,
@@ -107,6 +114,7 @@ from avid.services import (
     BehaviorService,
     ConversationService,
     CueBank,
+    DriveService,
     EpisodeRecorder,
     MemoryService,
     MotionService,
@@ -178,7 +186,18 @@ _EXPECTED_SUBSCRIPTIONS = {
     "ObservabilityService.gesture_started",
     "ObservabilityService.gesture_completed",
     "ObservabilityService.gesture_preempted",
+    # DriveService (#400, ADR-015): the state feed, read independently — IDLE is the only state
+    # a step may run in, and leaving it preempts one. No affect edge: no affect maps to a step.
+    "DriveService.state_transitioned",
+    # And the three drive.* rows, whose only §9.1.3 subscriber is Observability — M12's gate
+    # reads the edge abort out of this log.
+    "ObservabilityService.step_started",
+    "ObservabilityService.step_completed",
+    "ObservabilityService.step_aborted",
 }
+
+# The wheels both shipped profiles declare (#400) — fake, with the provisional mm/s.
+_DRIVE_CAPS = DriveCapabilities(mm_per_s_at_full=128.0)
 
 # The 2 DoF rig both shipped profiles declare (#200) — built here rather than loaded so these
 # wiring tests do not silently start depending on a TOML they are not about.
@@ -244,6 +263,25 @@ def test_build_servo_reports_every_declared_axis() -> None:
     assert [a.name for a in servo.axes] == ["pan", "tilt", "roll"]
     # The reach travels with the axis: it is what the adapter clamps to, per axis (§3.9.1).
     assert servo.axes[2].min_deg == 80.0 and servo.axes[2].max_deg == 100.0
+
+
+def test_build_drive_and_edge_select_fake_and_hand_the_wheels_their_one_number() -> (
+    None
+):
+    """#400: both shipped profiles select the fakes, and the drive is handed ``[drive]
+    mm_per_s_at_full`` as its ``DriveCapabilities`` — the one number the step planner negotiates
+    against (§3.9.3), read from the file rather than restated."""
+    for profile in (_SIM_TOML, _PI_TOML):
+        config = load_config(profile)
+        drive = _build_drive(config)
+        edge = _build_edge_sensor(config)
+        assert isinstance(drive, FakeDrive) and isinstance(drive, Drive), profile
+        assert isinstance(edge, FakeEdgeSensor) and isinstance(edge, EdgeSensor), (
+            profile
+        )
+        assert drive.capabilities == DriveCapabilities(
+            mm_per_s_at_full=config.drive.mm_per_s_at_full
+        ), profile
 
 
 def test_build_microphone_selects_fake() -> None:
@@ -458,6 +496,9 @@ def test_main_wires_and_delegates_to_lifecycle(
         "display": True,
         "camera": True,
         "servo": True,
+        # #400: the wheels and the desk edge, fake in both profiles until M12's bench flips them.
+        "drive": True,
+        "edge": True,
         "microphone": True,
         "speaker": True,
         "face_detector": True,
@@ -510,11 +551,13 @@ def test_main_wires_and_delegates_to_lifecycle(
         PresenceService,
         BehaviorService,
         # MotionService owns the in-flight gesture task, so it is returned like the rest —
-        # and it is LAST because lifecycle.run stops in reverse (§9.2). Its stop() relaxes
-        # every channel, and a servo left energised is the one failure that outlives the
-        # process, so it should be the first thing unwound rather than waiting behind a
-        # database close.
+        # and it is near the end because lifecycle.run stops in reverse (§9.2). Its stop()
+        # relaxes every channel, and a servo left energised is a failure that outlives the
+        # process, so it should be unwound early rather than waiting behind a database close.
         MotionService,
+        # DriveService is LAST for the stronger version of the same reason (#400): its stop()
+        # cuts the motors, and a wheel left turning is the one failure that ends on the floor.
+        DriveService,
     ]
 
 
@@ -607,6 +650,12 @@ def test_main_registers_the_service_subscriptions_before_starting_the_bus(
         MotionGestureStarted,
         MotionGestureCompleted,
         MotionGesturePreempted,
+        # The three drive.* rows (#400), Observability's again. DriveService's own subscription
+        # is to state.transitioned, already in this set, so — as with MotionService — the new
+        # TYPES are the observability half.
+        DriveStepStarted,
+        DriveStepCompleted,
+        DriveStepAborted,
     }
     # And the tap's own half of the same claim: it hears everything, by construction.
     tap_subscribed = {
@@ -675,6 +724,8 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
             out_dir=Path(config.display.frames_dir), resolution=(64, 48)
         ),
         servo=FakeServo(axes=_AXES),
+        drive=FakeDrive(capabilities=_DRIVE_CAPS),
+        edge=FakeEdgeSensor(),
         microphone=FakeMicrophone(
             sample_rate=16000, channels=1, chunk_ms=20, pcm=b"\x00\x00"
         ),
@@ -693,9 +744,14 @@ def test_wire_services_injects_the_memory_port_into_conversation() -> None:
         cues=CueBank(speaker=FakeSpeaker(), asset_dir=None),
         config=config,
     )
-    memory, _audio, conversation, _episode, presence, _behavior, motion = services
+    memory, _audio, conversation, _episode, presence, _behavior, motion, drive = (
+        services
+    )
     assert isinstance(memory, MemoryService)
     assert isinstance(conversation, ConversationService)
+    # DriveService is LAST, and the position is the claim: lifecycle.run stops in reverse
+    # order, so the service whose stop() cuts the motors is the first thing unwound (#400).
+    assert isinstance(drive, DriveService)
     # PresenceService owns a loop, so it is returned for the lifecycle to start/stop — the
     # same reason AudioService is (#223, SDS §9.2). Asserted positionally here because the
     # tuple's shape is the contract lifecycle.run consumes.
@@ -784,6 +840,8 @@ async def test_the_wired_graph_renders_a_face_on_boot_to_idle(tmp_path: Path) ->
         state=state,
         display=display,
         servo=FakeServo(axes=_AXES),
+        drive=FakeDrive(capabilities=_DRIVE_CAPS),
+        edge=FakeEdgeSensor(),
         microphone=FakeMicrophone(
             sample_rate=16000, channels=1, chunk_ms=20, pcm=b"\x00\x00"
         ),
