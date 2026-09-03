@@ -125,6 +125,7 @@
 6.1 Pipeline overview
 6.2 OpenAI Realtime session lifecycle
 6.3 Turn detection strategy
+ 6.3.1 Presence-warmed sessions — ADR-014
 6.4 Instruction composition architecture
 6.5 Personality engine
 6.6 Tool (function) calling catalog
@@ -484,13 +485,14 @@ Full text in Appendix A. Summary:
 | ADR-004 | Memory is owned by the application, not the model. The model gets tools. | Accepted |
 | ADR-005 | SQLite with WAL for v1; vectors as BLOBs + brute-force cosine | Accepted |
 | ADR-006 | Personality is composed instruction text + post-hoc affect mapping, not fine-tuning | Accepted |
-| ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Accepted** — see §6.3, §6.10 |
+| ADR-007 | Local VAD gate before opening a Realtime session (cost control) | **Accepted, amended by ADR-014** — see §6.3, §6.3.1, §6.10 |
 | ADR-008 | Python 3.13 on PC, system Python 3.11 + `--system-site-packages` on Pi | **Proposed** — see §3.11 |
 | ADR-009 | Pan+tilt (2 servo) target, 1-servo fallback; gesture engine is axis-agnostic | **Accepted** — see §3.9.4 |
 | ADR-010 | WebSocket transport for the Realtime session, not WebRTC | Accepted — see §6.2.1 |
 | ADR-011 | Semantic memory on local `all-MiniLM-L6-v2` via ONNX Runtime, 384-d | Accepted — see §7.4 |
 | ADR-012 | Faces compose to RGB888 bytes in the stdlib; no drawing-library dependency | Accepted — see §3.6.4 |
 | ADR-013 | Person detection is YuNet face detection on the ONNX Runtime we already ship | Accepted — see §3.6.5 |
+| ADR-014 | Presence-warmed Realtime session: the VAD gate governs *streaming*, not *opening*; a silent socket is measured free and the vendor closes it at 60 min | **Accepted** — see §6.3.1 |
 | ADR-015 | Bounded, net-zero desk steps on two N20 wheels; §2.3's non-goal narrowed, not deleted | **Accepted** — see §3.9.5 |
 
 ## 3.4 Logical view — the layers
@@ -1562,8 +1564,9 @@ This was "Proposed" in §3.3. The numbers in §6.10 promote it to Accepted, and 
 
 ```
 IDLE:  mic streaming → Silero → not speech → drop frame. Cost: $0.
-       Silero → SPEECH → open session (~200ms) → replay the 300ms
-       pre-speech ring buffer → stream live. Cost: begins now.
+       Silero → SPEECH → open session (~1.08 s cold; ~0 if presence
+       already warmed it, §6.3.1) → replay the 300ms pre-speech ring
+       buffer → stream live. Cost: begins now.
 IDLE after 30s of no speech: close session. Cost: $0 again.
 ```
 
@@ -1597,7 +1600,33 @@ The M4 loopback (`loopback=True`, the #91 transport gate) is the one path that s
 
 Full DNS+TCP+TLS to the host is **188 ms** on the Pi and 172 ms on the laptop, so **~660–700 ms of the upgrade is the vendor's handshake** — not our code, not the payload, not the hardware. Three candidates were ruled out by that table: the server's session bootstrap (1.5 ms), the payload size (**a full four-layer §6.4 prefix of 1326 characters costs ~20 ms**, which is why M6's layer 2 does not make this worse), and Pi-specific cost.
 
-The number is **kept as a named gap rather than quietly widened to fit**: the only remaining lever is a pre-warmed or pooled connection, and that reopens ADR-007 — this gate exists precisely to avoid holding a socket while nobody is speaking. §6.9's thinking cue is what makes ~1 s tolerable in the meantime, and it is the mitigation R-01 always intended to be carrying this.
+The number is **kept as a named gap rather than quietly widened to fit**: the only remaining lever is a pre-warmed or pooled connection, and that reopens ADR-007 — this gate exists precisely to avoid holding a socket while nobody is speaking. §6.9's thinking cue is what makes ~1 s tolerable in the meantime, and it is the mitigation R-01 always intended to be carrying this. **That decision is now taken, with the two numbers it turned on measured first — §6.3.1 / ADR-014.**
+
+### 6.3.1 Presence-warmed sessions — ADR-014
+
+**A session may be *opened* while a person is present; audio still *streams* only after local VAD speech.** ADR-007's decision sentence read *"No Realtime session is opened until local VAD detects speech. There is no persistent connection."* Its purpose — §6.10.4's $108–345/month — was never about the socket; it was about **streaming mic audio** into it all day. The two were fused because nobody had measured what an open, silent socket costs. `tools/probe_realtime_idle.py` did, on 2026-09-02, and the gate is now stated at the seam where the money actually is.
+
+| | |
+|---|---|
+| Decision | The VAD gate governs **streaming** (unchanged: no audio reaches the API before local speech). **Opening** is additionally allowed on `vision.presence_gained` while the robot is not `SLEEPING`, so the first utterance of a conversation finds a warm socket and pays ~0 instead of ~1.08 s |
+| Trigger | `vision.presence_gained` → open (with the §6.7-path-1 memory block composed at warm time); `vision.presence_lost` → close if no turn has used the socket; a turn's ordinary idle timer owns it otherwise. Entering `SLEEPING` closes a warm socket — a sleeping robot holds nothing open. Never opened, warm or cold, past the §6.10.6 spend ceiling (#472) |
+| Cost | **Measured: nothing.** 60 minutes held silent on `gpt-realtime-2025-08-28`: **3 frames total** (`session.created`, `session.updated`, the closing `error`), no `response.*`, no `usage`, no `rate_limits.updated` — the vendor bills tokens, and a silent socket sends none |
+| Lifetime | **Measured: exactly 60 minutes.** Close code `1001`, *"Your session hit the maximum duration of 60 minutes."* — 3603.6 s after the upgrade. A warm socket is therefore re-opened when the vendor closes it, **while presence still holds**, at most `[gate] prewarm_reopens_max` times per presence episode with `prewarm_reopen_backoff_s` between — bounded, because AVID-105's *no background reconnect loop* is a property worth keeping and an unbounded re-open is one |
+| Held sessions answer | Measured, twice: held silent for **64 s**, a text turn got `response.created` in **277 ms** and first audio **389 ms** later; held silent for **30 minutes** (1803.6 s, still 2 frames, still no usage), `response.created` in **180 ms** and first audio **606 ms** later — a fresh session's first-token figures (§6.10.5) at both ages, so a warm socket does not go stale inside the vendor's hour |
+| Memory | The layer-4 memory block is composed **at warm time**. Facts stored between the warm open and the first utterance are absent from that session's block — a second `session.update` would cost its ~200 ms ack (§6.3's table) on the turn it was meant to speed up, so it is deliberately not sent. §6.7 path 1 is *top facts*, not per-utterance retrieval; a cold re-open the next episode re-seeds |
+| Never | while `SLEEPING`; while nobody is present; past the spend ceiling; by any loop that retries a refused connect — a warm open that fails logs and waits for the next presence edge, exactly as a cold open does |
+| Consequence | `[gate] prewarm = "presence" \| "never"` (schema default `never`, so the sim and CI are unchanged; `config/pi.toml` ships `presence`); `ConversationService` subscribes to the two `vision.presence_*` rows; four counters on `/metrics` — `prewarm_opens`, `prewarm_hits`, `prewarm_misses`, `prewarm_vendor_closes`; `ReplayRealtimeClient` can script a vendor close; §12.1 F-12 |
+
+**Why presence and not always-on.** An always-on socket from boot is simpler and, by the measurement above, would also cost nothing — but it holds a vendor session open all night in an empty room, re-opening every hour forever, for a first utterance that will not come until morning. Presence is the signal the robot already has (§9.1.3) that says *a conversation is plausible*; opening on it spends nothing when wrong and saves ~1 s when right. It also keeps the *shape* of ADR-007's promise: the robot does not hold a line open to a vendor while nobody is there.
+
+**What `prewarm_hits` / `prewarm_misses` are for.** The pair is the measurement of whether this works on a real desk, and it is the only one that can say so: a hit is a turn that found a warm socket, a miss is a turn that paid the cold open with `prewarm` on. A robot whose presence filter is slower than its user's first sentence will show misses, and the fix is in `[vision]`, not here.
+
+| Option | Verdict |
+|---|---|
+| **Always-on from boot, re-open forever** | Rejected — free by the measurement, but a line held open all night in an empty room, and an unbounded reconnect loop AVID-105 deliberately does not have |
+| **Open on the VAD's pre-roll ring (earlier speech)** | Rejected — the ring is 300 ms and the open is ~1.08 s; it cannot hide the latency, only shave a quarter of it |
+| **A second `session.update` on first speech to refresh memory** | Rejected for v1 — a ~200 ms ack on exactly the turn being accelerated, to inject facts learned in the last few minutes; measured at the same table that motivated this ADR |
+| **Pooling several sockets** | Rejected — one user, one desk, one conversation at a time; a pool solves a problem this robot does not have |
 
 **Value of the gate:** see §6.10. It is the difference between $4/month and $108/month.
 
@@ -1880,6 +1909,8 @@ Suppose we skipped §6.3 and held a session open across a 10-hour day, streaming
 | Always-on, flagship | $11.52 | **$345** |
 
 Against a $25/month target. **The gate is not an optimisation; it is the difference between the product existing and not existing.** A ~1 MB ONNX model is load-bearing infrastructure.
+
+**And the socket itself is free (ADR-014, measured 2026-09-02).** The table above is the cost of *streaming*; an open session that sends nothing produced **no usage and no rate-limit traffic across a full 60-minute hold** — three frames in an hour, the last one the vendor closing it. So §6.3.1 may hold a warm socket while a person is present without moving any row of this table; what it must never do is stream before the VAD says so, which is unchanged.
 
 ### 6.10.5 Model choice
 
@@ -3268,6 +3299,10 @@ silence_hold_ms    = 900        # silence run before a turn is declared over (Au
                                 # the turn never commits. Measured 900/500 -> 10 replies in 14
                                 # turns, vs 2 in 13 at 500/500 (AVID-176).
 session_idle_close_s = 30
+prewarm            = "presence" # | "never" — ADR-014 (§6.3.1): open the socket on vision.presence_gained,
+                                # stream nothing until the VAD says so. Schema default is "never".
+prewarm_reopens_max = 3         # re-opens per presence episode when the vendor closes at 60 min (F-12)
+prewarm_reopen_backoff_s = 5.0  # before each such re-open; bounded — AVID-105 has no reconnect loop
 barge_in_margin_db = 3.0        # dB over the echo floor a rising edge must clear to be the USER
                                 # (UNCALIBRATED - AVID-296: tuned with capture AGC in an
                                 #  unknown state, and AGC moves the floor ~20 dB)
@@ -3691,7 +3726,7 @@ entry leaves this table by being measured or by being decided, not by being forg
 
 | What | Cost | Where | Why it stays open |
 |---|---|---|---|
-| **Session open** | ~1.08 s, first turn only | AVID-157 | The dominant term is a vendor handshake. The only remaining lever is a pre-warmed or pooled connection, which **reopens ADR-007** — the gate exists precisely to avoid holding a socket while nobody speaks. A decision with an ADR-shaped edge, not a fix. |
+| ~~**Session open**~~ | ~~~1.08 s, first turn only~~ | AVID-157 | **Decided 2026-09-02 — ADR-014, §6.3.1.** The row used to read: *the dominant term is a vendor handshake; the only remaining lever is a pre-warmed or pooled connection, which reopens ADR-007 — a decision with an ADR-shaped edge, not a fix.* The edge was taken once the two numbers it turned on were measured: a silent socket costs nothing, and the vendor closes it at 60 min. Kept as a row: the cold open is still ~1.08 s and still paid whenever presence did not warm the socket first — `prewarm_misses` on `/metrics` is the count. |
 | **O1 unmeasured post-AVID-194** | unknown | **AVID-406** | The headline latency figure is one architectural fix stale, and the interim ceiling is pinned to the pre-fix run. Needs the Pi and a live key. |
 | ~~No memory metric~~ | — | AVID-404 | **Closed 2026-08-22**, verified on the Pi. `rss_bytes` and `mem_available_bytes` ship and the soak records both. Kept rather than deleted: a backlog that silently loses its resolved entries teaches nothing about what it cost to notice. |
 | ~~`build` cannot distinguish two commits~~ | — | AVID-388 | **Closed 2026-08-22.** `build` is now `git describe --always --dirty --tags`, resolved once at startup. §12.6's guard is no longer inert and is observed failing on a two-build window. Kept as a row: it was the entry that blocked the clock, and a backlog that loses its resolved entries teaches nothing about what it cost to notice. |
@@ -3736,6 +3771,7 @@ matters: a failure nothing notices is one nobody will fix.
 | F-9 | Deployed config drifts from the repo | **Silently wrong behaviour, not an error** | **High** | §9.6 sections are `extra="forbid"`, so an *unknown* key fails loudly | ⚠️ a **missing** key still falls back to a schema default — AVID-373 |
 | F-10 | Storage exhaustion / wear | Corruption; re-image | Med | journald `Storage=volatile` (§3.12.2, AVID-381); WAL; **root on USB SSD** (R-05's contingency, AVID-382) | `GET /metrics` |
 | F-11 | Bad API key at boot | Robot refuses to start | Low | **Deliberate.** §3.12.3's one permitted hard stop | Fails fast, loudly |
+| F-12 | **Warm socket closed by the vendor's 60-minute lifetime** (ADR-014) | The next utterance pays a cold open (~1.08 s) instead of ~0 | Low | Re-opened while presence holds, at most `prewarm_reopens_max` times per episode with a backoff — bounded on purpose, AVID-105 has no reconnect loop and this is not one | `prewarm_vendor_closes` and `prewarm_misses` on `/metrics` |
 | F-13 | **Desk edge under the front wheels during a step's out-leg** (M12) | Robot falls; broken robot | **High** | Edge sensors polled before and during every leg; on edge → `Drive.stop()` then the return leg **immediately** (away from the edge); the excursion budget bounds every plan (§3.9.5) | `drive.step_aborted(reason="edge")`, `steps_aborted{edge}` on `/metrics` |
 | F-14 | **Edge behind the robot during a return leg** | Same | **High** | ⚠️ **Undetected by design** — the sensors face forward. Protected by the budget alone: a return leg can only retrace an out-leg that was itself clear. Stated here rather than hidden | none — a design bound, not a detector |
 | F-15 | Motor stall on the shared 5 V rail | Rail sag → R-04's brown-out path | Med | 0.4 duty, legs of a few hundred ms, N20's ~1 A stall against MG996R's 2.5 A; #206 re-run with all four actuators before M12 seals | `vcgencmd get_throttled`, kernel under-voltage log |
