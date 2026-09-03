@@ -477,6 +477,16 @@ class GateConfig(_Section):
     # dropped key must not land the robot on it invisibly.
     silence_hold_ms: int = 900
     session_idle_close_s: int = 30
+    # Presence-warmed sessions (ADR-014, SDS §6.3.1). ``presence`` opens the Realtime socket on
+    # ``vision.presence_gained`` and streams nothing until the VAD says so, so the first utterance
+    # finds a warm socket (~0 instead of ~1.08 s); ``never`` is ADR-007 unamended. The schema
+    # default is ``never`` so the sim, CI and every existing test are unchanged; config/pi.toml
+    # ships ``presence``. Measured 2026-09-02: a silent socket costs nothing and the vendor closes
+    # it at exactly 60 minutes — hence the bounded re-open pair below (F-12). Bounded on purpose:
+    # AVID-105 has no background reconnect loop, and an unbounded re-open would be one.
+    prewarm: Literal["presence", "never"] = "never"
+    prewarm_reopens_max: int = Field(default=3, ge=0)
+    prewarm_reopen_backoff_s: float = Field(default=5.0, gt=0.0)
     # The echo gate (AVID-159, §6.2.4). While the assistant is speaking the mic hears the robot,
     # so the uplink is shut and a rising edge only counts as the *user* if it clears the running
     # echo floor by this margin. A very large value is full half-duplex — barge-in off, no code
