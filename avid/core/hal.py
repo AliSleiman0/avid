@@ -14,21 +14,23 @@ Minimal by design. Fields are the smallest set that types the ports and feeds
 the AVID-12/13 fakes; a fake or real adapter may carry richer detail behind the
 same port without changing this vocabulary.
 
-Two members of that vocabulary — :class:`~avid.domain.vision.BBox` and
-:class:`~avid.domain.motion.Axis` — are *defined* in ``avid/domain/`` and
-re-exported below rather than declared here. Each is named by a domain event to
-type its payload (``vision.face_detected``, ``motion.gesture_started``), and the
-``layers`` contract puts ``core`` above ``domain``, so declaring them here would
-make those events the first ``domain -> core`` imports in the project (P1).
-``avid.core.hal.BBox`` and ``avid.core.hal.Axis`` stay the spelling every port
-and adapter uses; only the declarations moved. Recorded in SDS §3.6.5 (ADR-013)
-and §3.9.4 (ADR-009).
+Three members of that vocabulary — :class:`~avid.domain.vision.BBox`,
+:class:`~avid.domain.motion.Axis` and :class:`~avid.domain.drive.DriveCapabilities`
+— are *defined* in ``avid/domain/`` and re-exported below rather than declared
+here. Each is needed by a domain module (an event payload, or the pure step
+planner), and the ``layers`` contract puts ``core`` above ``domain``, so declaring
+them here would make those modules the first ``domain -> core`` imports in the
+project (P1). ``avid.core.hal.BBox``, ``avid.core.hal.Axis`` and
+``avid.core.hal.DriveCapabilities`` stay the spelling every port and adapter
+uses; only the declarations moved. Recorded in SDS §3.6.5 (ADR-013), §3.9.4
+(ADR-009) and §3.9.5 (ADR-015).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from avid.domain.drive import DriveCapabilities
 from avid.domain.motion import Axis
 from avid.domain.vision import BBox
 
@@ -150,9 +152,9 @@ class CameraCaps:
     fps: int
 
 
-# Explicit because ``BBox`` and ``Axis`` are re-exports (see the module docstring):
-# without it, ruff reads the imports as unused and the vocabulary loses two members
-# to a lint fix.
+# Explicit because ``BBox``, ``Axis`` and ``DriveCapabilities`` are re-exports (see the
+# module docstring): without it, ruff reads the imports as unused and the vocabulary
+# loses three members to a lint fix.
 __all__ = [
     "SAMPLE_WIDTH_BYTES",
     "AudioChunk",
@@ -161,6 +163,7 @@ __all__ = [
     "CameraCaps",
     "Detection",
     "DisplayFrame",
+    "DriveCapabilities",
     "Frame",
     "frames_duration_ms",
     "pcm_duration_ms",

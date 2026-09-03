@@ -47,6 +47,13 @@ _TILT_ONLY = (_TILT_AXIS,)
 
 _RIGS = {"pan+tilt": _PAN_TILT, "pan-only": _PAN_ONLY, "tilt-only": _TILT_ONLY}
 
+# The gestures a servo can express. ``STEP_*`` are intents in the same enum (ADR-015) but
+# they are the wheels' to realise — ``plan`` answers them with ``()`` on every rig, so a
+# duration assertion over them would be asserting that nothing takes time.
+_SERVO_GESTURES = [
+    g for g in Gesture if g not in (Gesture.STEP_TOWARD, Gesture.STEP_BACK)
+]
+
 _ENVELOPE_FIELDS = frozenset(
     {"event_id", "correlation_id", "timestamp_ms", "monotonic_ns", "source"}
 )
@@ -128,11 +135,12 @@ def test_keyframe_is_frozen_slotted_kw_only_and_names_an_axis_not_a_channel() ->
 def test_plan_answers_for_every_gesture_on_every_rig(
     gesture: Gesture, rig: str
 ) -> None:
-    """Total over the enum × the three rig shapes — 21 cases, none of which may raise.
+    """Total over the enum × the three rig shapes — every member, none of which may raise.
 
-    Iterating ``Gesture`` rather than listing members means an eighth gesture added later is a
+    Iterating ``Gesture`` rather than listing members means a gesture added later is a
     failing test here rather than a ``KeyError`` on the Pi at 1 a.m. — the lesson
-    ``ExpressionService``'s face cache already encodes."""
+    ``ExpressionService``'s face cache already encodes. The two step intents (ADR-015) are
+    covered by this: they must answer, and their answer on a servo rig is ``()``."""
     assert isinstance(plan(gesture, _RIGS[rig]), tuple)
 
 
@@ -199,6 +207,11 @@ _EXPRESSIBLE = [
     ("look needs tilt", Gesture.LOOK_UP, _PAN_ONLY, None),
     ("look is tilt", Gesture.LOOK_DOWN, _TILT_ONLY, TILT),
     ("center moves whatever exists", Gesture.CENTER, _PAN_ONLY, PAN),
+    # ADR-015: a step is not a servo gesture on ANY rig. A head that leans forward is not a
+    # body that moves, and substituting one for the other is the meaning inversion the
+    # planner's docstring forbids. The wheels' planner is avid.domain.drive.plan_step.
+    ("a step is never a head movement", Gesture.STEP_TOWARD, _PAN_TILT, None),
+    ("nor is stepping back", Gesture.STEP_BACK, _PAN_TILT, None),
 ]
 
 
@@ -313,14 +326,15 @@ def test_an_empty_plan_takes_no_time() -> None:
     assert duration_ms(()) == 0
 
 
-@pytest.mark.parametrize("gesture", list(Gesture), ids=lambda g: g.name)
+@pytest.mark.parametrize("gesture", _SERVO_GESTURES, ids=lambda g: g.name)
 def test_every_expressible_gesture_has_a_knowable_positive_duration(
     gesture: Gesture,
 ) -> None:
     """#203's relax timer and #204's cooldown both derive from this one function.
 
     Two call sites computing it separately is how they drift, and the symptom of the drift is a
-    robot that relaxes mid-nod — which reads as a hardware fault."""
+    robot that relaxes mid-nod — which reads as a hardware fault. Over the *servo* gestures:
+    a step's duration is ``avid.domain.drive.step_duration_ms``'s to know."""
     assert duration_ms(plan(gesture, _PAN_TILT)) > 0
 
 

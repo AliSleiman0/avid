@@ -141,6 +141,18 @@ def test_most_affects_map_to_nothing() -> None:
     assert len(moved) < len(Affect) / 2
 
 
+def test_no_affect_steps_in_v1() -> None:
+    """ADR-015 admits the wheels and deliberately maps **no affect** to them.
+
+    The restraint argument above, applied to a louder actuator: an affect that stepped would
+    put a gearbox in the room on every mood change. Idle drift is the only trigger in v1; the
+    first candidate for a second (#477) is designed on the bus side, not in this table. Asserted
+    so that adding ``HAPPY -> STEP_TOWARD`` one evening is a red test, not a surprise."""
+    from avid.domain import STEP_GESTURES
+
+    assert not {gesture_for(affect) for affect in Affect} & STEP_GESTURES
+
+
 def test_the_gesture_table_is_frozen() -> None:
     """A normative table with a second, mutable edition is not normative — the same reason
     ``TIER1`` and ``TRANSITION_TABLE`` are ``MappingProxyType``."""

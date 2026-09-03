@@ -52,6 +52,9 @@ CATALOG = [
     "motion.gesture_started",
     "motion.gesture_completed",
     "motion.gesture_preempted",
+    "drive.step_started",
+    "drive.step_completed",
+    "drive.step_aborted",
 ]
 
 BAD_NAMES = [
@@ -117,8 +120,11 @@ def test_is_kw_only() -> None:
 # --- the naming validator ---------------------------------------------------
 
 
-def test_domains_are_the_nine() -> None:
-    assert len(EVENT_DOMAINS) == 9
+def test_domains_are_the_ten() -> None:
+    """Nine at M9; ``drive`` is the tenth (#400, ADR-015). ``display`` and ``expression`` stay
+    out — they are direct port calls (SDS §9.1.4), and so is ``Drive.run()``."""
+    assert len(EVENT_DOMAINS) == 10
+    assert "drive" in EVENT_DOMAINS
     assert "display" not in EVENT_DOMAINS
     assert "expression" not in EVENT_DOMAINS
 
