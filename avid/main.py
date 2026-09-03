@@ -45,6 +45,7 @@ from avid.adapters import (
     FramebufferDisplay,
     HealthServer,
     HybridRetriever,
+    L9110sDrive,
     LocalMiniLmEmbedder,
     OnnxFaceDetector,
     OpenAIRealtimeClient,
@@ -60,6 +61,7 @@ from avid.adapters import (
     SqliteTriggerStore,
     SystemClock,
     SystemdNotifier,
+    Tcrt5000EdgeSensor,
 )
 from avid.adapters.build_id import resolve_build_id
 from avid.adapters.event_tap import EventTap
@@ -266,9 +268,13 @@ def _build_drive(config: Config) -> Drive:
         case "fake":
             return FakeDrive(capabilities=capabilities)
         case "l9110s":  # pragma: no cover - needs the Pi (M12 gate)
-            raise NotImplementedError(
-                "drive adapter 'l9110s' lands with the real-adapter PR of #400; "
-                "select 'fake' until it does"
+            return L9110sDrive(
+                capabilities=capabilities,
+                left_forward_pin=config.drive.left_forward_pin,
+                left_backward_pin=config.drive.left_backward_pin,
+                right_forward_pin=config.drive.right_forward_pin,
+                right_backward_pin=config.drive.right_backward_pin,
+                forward_is_inverted=config.drive.forward_is_inverted,
             )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(
@@ -290,9 +296,9 @@ def _build_edge_sensor(config: Config) -> EdgeSensor:
         case "fake":
             return FakeEdgeSensor()
         case "tcrt5000":  # pragma: no cover - needs the Pi (M12 gate)
-            raise NotImplementedError(
-                "edge adapter 'tcrt5000' lands with the real-adapter PR of #400; "
-                "select 'fake' until it does"
+            return Tcrt5000EdgeSensor(
+                pins=config.drive.edge.pins,
+                active_high=config.drive.edge.active_high,
             )
         case other:  # pragma: no cover - guards an unreachable literal
             raise NotImplementedError(

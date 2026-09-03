@@ -774,6 +774,77 @@ dmesg | grep -i 'under-voltage\|undervoltage'
 
 ---
 
+## 5d. Wheels and the desk edge (M12, #400, ADR-015)
+
+**The rig, and the only other place it is written down is `config/pi.toml` `[drive]`:**
+
+| | |
+|---|---|
+| Motors | 2× N20 6 V 58 rpm gear motors + wheels, front-mounted, through **one L9110S** dual H-bridge |
+| Pins | BCM: left IA/IB **5/6**, right IA/IB **12/13**. Plain GPIO via `gpiozero` (apt, `--system-site-packages`) |
+| Direction | ⚠️ **one global flip**: `Motor.forward()` on BOTH channels drives the chassis toward its own **back**. `[drive] forward_is_inverted = true`. The mirrored mount does NOT need per-wheel inversion — the hubs cancel it (measured 2026-08-31) |
+| Rear wheels | 2×, chassis support only, **not wired**. 2WD pivots cleanly; a second driver needs a measured torque shortfall |
+| Sensors | TCRT5000 modules, `D0` on BCM **23** and **22**. ⚠️ **HIGH = surface present** — the inverse of the datasheet. `[drive.edge] active_high = true` |
+| Power | the servos' 5–6 V rail, common ground only. **Four actuators on it now** (R-04); #206's stall measurement is owed again, with a meter |
+
+Drive it and find out what actually happened — with the robot on the desk it will live on, the
+rear **away** from any edge, and a hand ready:
+
+```sh
+/opt/avid/.venv/bin/python tools/probe_drivetrain.py                       # wiring only, on blocks
+sudo /opt/avid/.venv/bin/python docs/demos/drive_pi.py --config /etc/robot/config.toml \
+    --json docs/demos/m12_evidence/gate.json
+sudo /opt/avid/.venv/bin/python docs/demos/drive_pi.py --config /etc/robot/config.toml --edge-test
+```
+
+### ⚠️ 5d.1 Every failure here looks like success — or like a robot on the floor
+
+**An odometer is not a moved robot.** Five faults produce a perfect trace:
+
+| Fault | What it looks like |
+|---|---|
+| **The flip is wrong** (`forward_is_inverted` set for a rig whose hubs do not cancel) | `STEP_TOWARD` drives **backward** first — and the return leg is protected by the budget alone (F-14). The trace is perfect; the robot is on the floor behind the desk |
+| **A sensor on GPIO 24 or 25** | reads the display overlay's idea of a pin, not the module. `piscreen,drm` claims both at boot whether or not a panel is fitted; unplugging the panel does nothing. Sensors go on 23/22 (confirmed free from `/sys/kernel/debug/gpio`) |
+| **The polarity is wrong** (`active_high` inverted) | a *permanent edge*: every step is declined with `edge latch has not cleared`, and nothing else is logged. `steps_aborted{edge}` on `/metrics` climbs; `steps` does not |
+| **The 5 V rail connector is loose** | "wheels spin, nothing turns" — it dropped out mid-test once already and cost real time. Crimp it or tighten the screw terminal before trusting anything past a bench pulse |
+| **A sensor that HEATS the moment `D0` touches any GPIO** | an internal short in that unit (one did exactly this on two different pins, 2026-08-31). The fault follows the module, not the Pi. **Retire it; do not rewire it.** Declare only the pins actually fitted — `pins = [23]` is a legal rig, a lie about a second pin is not |
+
+The first two are why `drive_pi.py`'s AC-1h and AC-0 exist, and why the gate refuses to grade
+direction: only a person standing behind the robot can say which way it went.
+
+### ⚠️ 5d.2 It works by hand and is dead under the unit
+
+The same trap as the servos (§5c.2), for the same reason: `gpiozero`'s Bookworm pin factory is
+`lgpio`, which writes `.lgd-nfy-N` into the process's current working directory — read-only under
+`ProtectSystem=strict`. `robot.service` already carries `Environment=LG_WD=/var/lib/robot` and
+`gpio` in `SupplementaryGroups` for the servos; the wheels inherit both. If a bench run steps and
+the service does not, **suspect user, group and environment before logic**, and reinstall the unit
+from the repo (§3).
+
+### ⚠️ 5d.3 `mm_per_s_at_full` is PROVISIONAL, and the budget is only as good as it
+
+`[drive] mm_per_s_at_full = 128.0` is 58 rpm × a ~42 mm wheel. **Nobody has put a ruler to it.**
+The service's odometer integrates commanded duty × duration × this number, and the excursion
+budget — the return leg's *only* protection (F-14) — is bounded by that arithmetic. SPK-6:
+
+1. On the desk, run one wheel at full duty for exactly one second (`gpiozero.Motor(...).forward(1)`
+   then `time.sleep(1)`), three times, and measure the travel with a ruler each time.
+2. Commit the median to `config/pi.toml` **and delete the PROVISIONAL comment** — a provisional value
+   with the comment removed is worse than either.
+3. Re-run `drive_pi.py`; the odometer at origin should now agree with the ruler to a millimetre or
+   two. Wheel slip makes it optimistic — which is why the sensors are not optional.
+
+### Adding `[drive]` to a live machine
+
+`/etc/robot/config.toml` predates `[drive]`. A missing section falls back to **schema defaults**,
+which ship the FAKE wheels — so a machine that was never reprovisioned runs `DriveService` against
+an odometer and reports healthy. Splice the section in with the §3 recipe (dump both to flat
+key/value, edit only the keys you mean to, `load_config` from `/opt/avid` **before** installing),
+then flip `[adapters] drive = "l9110s"` **and** `edge = "tcrt5000"` **together**. Real wheels with a
+fake sensor is a robot that steps blind (SDS §3.9.5, F-13).
+
+---
+
 ## 6. Shell & SSH traps
 
 **`pkill -f <pattern>` kills its own SSH session** when the pattern appears in the remote command

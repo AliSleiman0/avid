@@ -161,6 +161,9 @@ module = [
     "libcamera.*",
     "adafruit_servokit.*",
     "alsaaudio.*",
+    # gpiozero (#400) is apt-shipped like picamera2 — never a pip dependency — and imported
+    # lazily only inside L9110sDrive / Tcrt5000EdgeSensor.
+    "gpiozero.*",
     "onnxruntime.*",
     "numpy.*",
     "tokenizers.*",

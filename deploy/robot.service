@@ -61,6 +61,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # root:i2c crw-rw----, and the PCA9685 behind every servo command is an I2C device — so
 # without this the robot could not move AT ALL under systemd, while every bench run drove it
 # correctly as the login user, which is in `i2c`.
+# `gpio` now also carries the wheels (#400): the L9110S inputs and the TCRT5000 outputs are plain
+# GPIO through gpiozero, whose Bookworm pin factory is lgpio — so LG_WD above applies to them
+# exactly as it does to the servos, and the same "dead under the unit" trap would too.
 SupplementaryGroups=video gpio audio i2c
 # Creates /var/lib/robot (owned by the service user) for the on-device SQLite DB
 # — config/pi.toml [memory] db_path = /var/lib/robot/robot.db. Written at M2+.
