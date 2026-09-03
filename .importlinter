@@ -72,6 +72,7 @@ modules =
     avid.services.audio
     avid.services.behavior
     avid.services.conversation
+    avid.services.drive
     avid.services.episode_recorder
     avid.services.expression
     avid.services.memory

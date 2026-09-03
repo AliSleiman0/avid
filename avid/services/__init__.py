@@ -11,6 +11,7 @@ from avid.services.behavior import BehaviorService
 from avid.services.conversation import ConversationService
 from avid.services.cost_meter import CostMeterService
 from avid.services.cue_bank import CUE_FILES, CueBank
+from avid.services.drive import DriveService
 from avid.services.episode_recorder import EpisodeRecorder
 from avid.services.expression import ExpressionService
 from avid.services.memory import MemoryService
@@ -37,6 +38,8 @@ __all__ = [
     "CostMeterService",
     # The degraded-mode WAV cue bank (AVID-80)
     "CueBank",
+    # The stepper — bounded, net-zero desk steps, and the stop that beats a fall (#400)
+    "DriveService",
     # The write-only §7.5 transcript observer + 90-day prune (#123)
     "EpisodeRecorder",
     # The drawer (AVID-72) — the other half of the SDS §3.6.1 split
