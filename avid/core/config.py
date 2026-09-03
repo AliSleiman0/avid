@@ -98,6 +98,17 @@ class AdaptersConfig(_Section):
     # ``$NOTIFY_SOCKET``; ``fake`` records the calls and is the laptop default — the
     # same binary runs supervised on the Pi and unsupervised on a laptop (§3.11.3).
     notifier: Literal["systemd", "fake"] = "fake"
+    # The wheels (#400, ADR-015 / SDS §3.9.5). ``l9110s`` drives two N20 gear motors through
+    # one L9110S H-bridge on GPIO via ``gpiozero`` (apt-shipped, resolved through the Pi venv's
+    # ``--system-site-packages`` like picamera2, imported lazily inside the adapter); ``fake``
+    # integrates an odometer from the commanded legs and is the laptop default. A rig with
+    # ``fake`` here reports ``Drive.capabilities`` all the same — the fake IS the simulator.
+    drive: Literal["l9110s", "fake"] = "fake"
+    # The front edge sensors the drive refuses to move without (SDS §3.9.5, F-13). ``tcrt5000``
+    # reads the modules' D0 pins; ``fake`` answers a scriptable ``clear`` flag. Selecting
+    # ``drive = "l9110s"`` with ``edge = "fake"`` is legal — and is how a bench proves the
+    # abort path without a desk edge — but it is not a configuration to leave on a machine.
+    edge: Literal["tcrt5000", "fake"] = "fake"
 
 
 class DisplayConfig(_Section):
@@ -927,6 +938,147 @@ class MotionConfig(_Section):
         return self
 
 
+class EdgeConfig(_Section):
+    """The front edge sensors as they are physically wired (#400, SDS §3.9.5, P7).
+
+    ``pins`` is one BCM number per TCRT5000 ``D0`` fitted — one or two; the adapter answers
+    ``EdgeSensor.clear()`` as *every* pin sees surface, so a rig that lost a sensor on the
+    bench (one unit shorted 2026-08-31 and was retired) declares what is actually there rather
+    than lying about a pin nothing is connected to.
+
+    ⚠️ **Never 24 or 25.** The display's ``piscreen,drm`` overlay claims those at boot whether
+    or not a panel is plugged in; a sensor wired there reads the overlay's idea of a pin, not
+    the sensor. The shipped defaults (23, 22) were confirmed free from
+    ``/sys/kernel/debug/gpio``, not assumed. The schema does not forbid 24/25 outright — the
+    overlay can be disabled, and it *was* for the bench — but it refuses a duplicate, which is
+    the wiring error the config can see.
+
+    ``active_high`` records the **measured** polarity: this board reads HIGH with a surface
+    under it, the inverse of the TCRT5000 datasheet's LOW-on-detect. It is a config value and
+    not a constant because a different module revision may well follow the datasheet, and a
+    polarity that is wrong reads as a permanent edge — a robot that never steps and never
+    says why.
+    """
+
+    pins: tuple[int, ...] = (23, 22)
+    active_high: bool = True
+    # How often a running leg re-asks the sensors (SDS §3.9.5). A leg is a few hundred ms and
+    # a wheel at 0.4 duty covers ~1 mm per 20 ms, so this bounds how far the robot travels
+    # past an edge it has already seen.
+    poll_ms: int = Field(default=20, gt=0)
+    # How long "clear" must hold before an edge latch releases and steps are allowed again.
+    # A hand waved under a sensor is an edge for 100 ms; a real edge is one for as long as the
+    # robot sits at it.
+    clear_hold_ms: int = Field(default=500, gt=0)
+
+    @model_validator(mode="after")
+    def _pins_are_a_usable_sensor_set(self) -> EdgeConfig:
+        if not self.pins:
+            raise ValueError(
+                "drive.edge.pins is empty: a drive with no edge sensors is a robot that "
+                "steps blind, and the SDS (§3.9.5, AC-5 of #400) requires the budget AND "
+                "sensors, never one. Declare the pins actually wired, or select "
+                '[adapters] edge = "fake" on a bench and say so.'
+            )
+        if len(set(self.pins)) != len(self.pins):
+            raise ValueError(
+                f"drive.edge.pins declares the same GPIO twice ({list(self.pins)}): two "
+                f"sensors on one pin is a wiring error, and the adapter would read one "
+                f"module as both."
+            )
+        return self
+
+
+class DriveConfig(_Section):
+    """The wheels: pins, the measured direction flip, and the step geometry (#400, ADR-015).
+
+    Every value here is either **measured on the rig** or marked PROVISIONAL, and the
+    difference is stated per field because a config that mixes the two without saying so is
+    the drift ``deploy/PI_OPERATIONS.md`` §3 warns about.
+
+    **Pins** are BCM numbers for the L9110S's four inputs; ``gpiozero.Motor(forward=IA,
+    backward=IB)`` maps straight onto the chip's truth table.
+
+    **``forward_is_inverted`` is one flag, not two, on purpose.** The wiring diagram assumed
+    the mirrored motor mount would need asymmetric per-wheel inversion. Measured 2026-08-31:
+    ``Motor.forward()`` on *both* channels drives the robot toward its own back, and
+    ``.backward()`` on both drives it straight forward at 20–100 % duty — the hubs cancel the
+    mirror. So the flip is global, it is applied once inside the adapter, and ``+`` at the
+    ``Drive`` port means *toward the user* on every rig. Two per-wheel flags would be two
+    values that can disagree with one wiring.
+
+    **``mm_per_s_at_full`` is PROVISIONAL** (SPK-6): 58 rpm on a ~42 mm wheel is ~128 mm/s,
+    but nobody has put a ruler to it. It is the number the excursion budget is only as good
+    as — the service's odometer integrates commanded duty × duration × this — which is why
+    it is config rather than a domain constant, and why it rides ``Drive.capabilities``
+    (SDS §3.9.3) rather than being read by the service directly.
+
+    **The geometry is a step, not a journey.** ``step_mm`` is one leg; the return leg is the
+    same length by construction, so ``max_excursion_mm`` bounds how far *any* plan takes the
+    robot from where it started, and the domain clamps ``step_mm`` to it rather than trusting
+    this validator alone. ``speed_frac`` is a wiring-check duty, deliberately low: R-04's
+    rail is shared with two servos.
+    """
+
+    left_forward_pin: int = Field(default=5, ge=0, le=27)
+    left_backward_pin: int = Field(default=6, ge=0, le=27)
+    right_forward_pin: int = Field(default=12, ge=0, le=27)
+    right_backward_pin: int = Field(default=13, ge=0, le=27)
+    forward_is_inverted: bool = True
+    mm_per_s_at_full: float = Field(default=128.0, gt=0.0)  # PROVISIONAL — SPK-6
+    step_mm: float = Field(default=20.0, gt=0.0)
+    max_excursion_mm: float = Field(default=30.0, gt=0.0)
+    speed_frac: float = Field(default=0.4, gt=0.0, le=1.0)
+    dwell_ms: int = Field(default=300, ge=0)
+    # The idle-step band (SDS §3.9.5): the same irregular-interval design as
+    # ``[motion] micro_motion_interval_*``, an order of magnitude rarer, because a wheel is
+    # audible and a servo drift is not.
+    idle_step_interval_min_s: float = Field(default=180.0, gt=0.0)
+    idle_step_interval_max_s: float = Field(default=600.0, gt=0.0)
+    edge: EdgeConfig = EdgeConfig()
+
+    @model_validator(mode="after")
+    def _pins_are_distinct(self) -> DriveConfig:
+        motor_pins = (
+            self.left_forward_pin,
+            self.left_backward_pin,
+            self.right_forward_pin,
+            self.right_backward_pin,
+        )
+        all_pins = (*motor_pins, *self.edge.pins)
+        if len(set(all_pins)) != len(all_pins):
+            raise ValueError(
+                f"drive declares one GPIO for two jobs (motors {list(motor_pins)}, edge "
+                f"sensors {list(self.edge.pins)}): a pin that is both an H-bridge input and a "
+                f"sensor input drives the sensor line, and the robot reads its own motor "
+                f"command as an edge — or not, depending on which won."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_step_fits_the_budget(self) -> DriveConfig:
+        if self.step_mm > self.max_excursion_mm:
+            raise ValueError(
+                f"drive.step_mm ({self.step_mm}) exceeds max_excursion_mm "
+                f"({self.max_excursion_mm}): a single leg would take the robot past the "
+                f"budget that is the whole of its defence on the return leg (SDS §12.1, "
+                f"F-14). The planner clamps this too; the config refuses it so the limit is "
+                f"visible where it is authored."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _idle_step_band_is_a_band(self) -> DriveConfig:
+        if self.idle_step_interval_min_s >= self.idle_step_interval_max_s:
+            raise ValueError(
+                f"drive.idle_step_interval_min_s ({self.idle_step_interval_min_s}) must be < "
+                f"idle_step_interval_max_s ({self.idle_step_interval_max_s}): a collapsed "
+                f"band is a metronome, and a wheel that steps on a schedule reads as a "
+                f"mechanism — the same reason [motion]'s band is a band (#205)."
+            )
+        return self
+
+
 class ApiConfig(_Section):
     """The local control API (SDS §9.5). Loopback binding is the authentication."""
 
@@ -1006,6 +1158,7 @@ class Config(_Section):
     behavior: BehaviorConfig = BehaviorConfig()
     vision: VisionConfig = VisionConfig()
     motion: MotionConfig = MotionConfig()
+    drive: DriveConfig = DriveConfig()
     api: ApiConfig = ApiConfig()
     systemd: SystemdConfig = SystemdConfig()
     runtime: RuntimeConfig = RuntimeConfig()
