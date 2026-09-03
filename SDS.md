@@ -82,6 +82,7 @@
  3.9.2 Simulator adapters
  3.9.3 Capability negotiation
  3.9.4 Gesture realization — ADR-009
+ 3.9.5 Bounded translation — ADR-015
 3.10 State management
  3.10.1 Global robot state machine
  3.10.2 Sub-state machines
@@ -299,7 +300,7 @@ Naming these prevents scope creep from being mistaken for progress.
 
 - **Not** a general-purpose smart home hub. Integrations are a Phase 10+ concern, behind one port.
 - **Not** an offline system. v1 requires internet. Offline degradation is graceful, not featureful.
-- **Not** locomotion. It sits. Movement is expressive, not translational.
+- **Not** locomotion. It sits. Movement is expressive, not translational — **with one bounded exception, admitted in writing (ADR-015, §3.9.5):** centimetre-scale, net-zero steps on the desk, the way the idle micro-motion already breathes. No navigation, no odometry, no leaving the desk, no battery, no following the user. A robot that can reach the floor is a different product; this rule still excludes it.
 - **Not** a multi-user identity system in v1. Face *recognition* is Phase 8 stretch; face *detection* is the v1 commitment.
 - **Not** a wake-word system in v1. Turn detection is server-side VAD via the Realtime API. A local wake word is a cost optimization (see §6.10), deferred.
 
@@ -356,6 +357,8 @@ The board is a **Raspberry Pi 4 Model B Rev 1.5, 2 GB**. See the correction note
 | Display | 480×320 | Sprite-based rendering, not vector. Design for pixel grid. |
 | Storage | microSD (A2) | **Binding.** Random write is slow and the card wears out. Batch DB writes, WAL mode, no chatty logging to card. |
 | Servo | 2× SG90/MG90S | **2 DoF** — pan (body turn) and tilt (head). Gesture vocabulary is nod **and** turn. ADR-009 / §3.9.4. See §4.7. |
+| Drive | 2× N20 6 V 58 rpm gear motors + wheels, 1× L9110S dual H-bridge | **Bounded, net-zero desk steps only** (ADR-015, §3.9.5). GPIO 5/6 (left IA/IB), 12/13 (right IA/IB). Two rear wheels are chassis support and are **not driven**. On the same 5 V rail as the servos — R-04's actuator count is four. |
+| Edge | 2× TCRT5000 reflectance modules | Digital inputs on GPIO 23 and 22. ⚠️ **Measured polarity is HIGH = surface present**, the inverse of the datasheet convention; and **GPIO 24/25 are reserved by the display's `piscreen,drm` overlay** at boot whether or not a panel is fitted — never put a sensor there. |
 | Power | 15 W (5 V / 3 A) | Servo stall current can brown out the Pi. Separate servo rail. See §4.3. **This is ~55% of the headroom the spec assumed**, and the actuator count is going from two to four (#400) — so R-04's brown-out path (severity 5, SD-card corruption) has less margin than any prior text implied. #206 measures it, and must measure it against 15 W with every actuator fitted. |
 
 > **⚠️ Correction, 2026-08-21 — this spec named the wrong computer from M0 until now.**
@@ -488,6 +491,7 @@ Full text in Appendix A. Summary:
 | ADR-011 | Semantic memory on local `all-MiniLM-L6-v2` via ONNX Runtime, 384-d | Accepted — see §7.4 |
 | ADR-012 | Faces compose to RGB888 bytes in the stdlib; no drawing-library dependency | Accepted — see §3.6.4 |
 | ADR-013 | Person detection is YuNet face detection on the ONNX Runtime we already ship | Accepted — see §3.6.5 |
+| ADR-015 | Bounded, net-zero desk steps on two N20 wheels; §2.3's non-goal narrowed, not deleted | **Accepted** — see §3.9.5 |
 
 ## 3.4 Logical view — the layers
 
@@ -968,6 +972,19 @@ class Servo(Protocol):
     def axes(self) -> tuple[Axis, ...]: ...
 
 
+class Drive(Protocol):                   # §3.9.5 / ADR-015 — velocity for a duration, never a position
+    async def run(self, left: float, right: float, *, duration_ms: int) -> int: ...
+        # signed [-1, 1] per wheel in the ROBOT frame (+ = toward the user); returns ms actually
+        # driven; MUST be cancellable; the adapter applies the measured direction flip, never the caller
+    async def stop(self) -> None: ...     # instant, idempotent — on the port so an edge abort is a direct call
+    @property
+    def capabilities(self) -> DriveCapabilities | None: ...  # None on a rig with no wheels (§3.9.3)
+
+
+class EdgeSensor(Protocol):              # §3.9.5 — "is it safe to move", never "what did pin N read"
+    async def clear(self) -> bool: ...    # True only if EVERY sensor sees surface
+
+
 class Display(Protocol):
     async def render(self, frame: DisplayFrame) -> None: ...
     @property
@@ -1073,6 +1090,8 @@ The five **memory ports** are M7 (AVID-114). `FactRepository` (#117) is durable 
 
 The tool stays **intent-level** — `look_at(direction)` over an enum, never `move(channel, degrees)`. That is what keeps one tool working across the 2-servo rig, the 1-servo fallback and the fake (§3.9.3), and it is what stops the model being handed a lever it can jam.
 
+**`Drive` and `EdgeSensor` are M12 (#400, ADR-015), and they are two ports rather than one on purpose.** A wheel is **velocity for a duration** — `run(left, right, duration_ms)` — where `Servo` is a position inside a declared reach; the same H-bridge could be wrapped as a servo with a very long reach, and that would be defining the port by what the device offers. The two wheels ride one call because the application never wants one wheel: a straight step is `(+v, +v)`, a pivot is `(+v, −v)`, and a rig that exposed them separately would let a service half-command a turn. `run()` **returns the milliseconds actually driven**, for the reason `Speaker.play()` returns ms accepted (below): a leg cut short by a cancel or an edge must not be indistinguishable from one that completed, because the service's own odometer is what bounds the excursion (§3.9.5). The measured direction flip — `Motor.forward()` on *both* channels drives the robot *backward* on this rig — is applied **inside the adapter, once**, so `+` means *toward the user* at the port and nothing above it ever sees a sign convention. `EdgeSensor.clear()` answers the only question the service has — *is it safe to move* — as a single boolean over every sensor fitted, and deliberately not *what did pin N read*: a rig with one sensor, two, or a fake that lies on cue all satisfy the same contract, and the polarity (HIGH = surface on this board, the inverse of the datasheet) lives in the adapter's config where a hardware fact belongs. Reading a GPIO is sub-millisecond, but it is a syscall, so the method is `async` and the real adapter offloads it (P8).
+
 **`FaceDetector` is M8 (#217, ADR-013), and it brings two types into the HAL vocabulary** beside `Frame`, `AudioChunk`, `DisplayFrame`, `CameraCaps` and `Axis`: **`BBox`** — a face's rectangle in **pixels of the frame that produced it**, top-left origin, `(x, y, w, h)` — and **`Detection {confidence: float, box: BBox}`**, one face seen once. Both are frozen/slotted/kw-only and stdlib-only like every other type in `core/hal.py`; no tensor, session handle or model detail crosses the port. The inversion is the usual one and it is worth naming here because it is easy to get backwards: the port is defined by **what `PresenceService` needs** — one frame in, this frame's faces out — never by what a detection library offers, which is why keypoints, landmarks, tracking ids and identity embeddings are all absent from a port sitting on top of a model that emits some of them. And it stops one step short on purpose: the port never answers *"is a person present."* That is a decision over time, it belongs to the pure hysteresis filter in `domain/vision.py` (§9.1.3), and a port that answered it would put the milestone's headline property behind a device boundary where it can be neither unit-tested nor replayed.
 
 Three details worth defending:
@@ -1097,6 +1116,8 @@ At startup, each adapter reports capabilities. `MotionService` asks: do I have a
 
 **The conditional is not hypothetical any more, and it is still a conditional.** The target rig answers *yes* — it has a tilt axis (§3.9.4) — so on the robot as built, `nod` is a tilt gesture. The pan-only branch stays in the code and stays tested, because that is what makes a dead servo a *degradation* rather than an outage, and because a fallback nobody exercises is a fallback nobody has. The question the service asks is answered by `Servo.axes` — the adapter's report of the rig it is actually driving — never by a config key listing the axes a service should expect. Two copies of the inventory is a drift with a delay fuse: a `[motion] axes` left behind after the tilt servo is wired means the robot simply never nods, and nothing anywhere raises.
 
+**The wheels negotiate the same way (ADR-015).** `DriveService` asks `Drive.capabilities`; `None` means *this rig has no wheels*, and `plan_step()` returns an empty plan for every step gesture, so a laptop, a wheel-less rig and the shipped `[adapters] drive = "fake"` all behave identically with no caller changes anywhere. The one number the capabilities carry — `mm_per_s_at_full` — is a measured property of *this* motor-and-wheel pair (SPK-6), which is why it rides the adapter's report and not a domain constant.
+
 ### 3.9.4 Gesture realization — ADR-009
 
 **The rig is pan + tilt: two servos on one PCA9685 at `0x40`, pan on channel 0 and tilt on channel 13.** The 1-servo rig is retained as a **capability path, not as the target**.
@@ -1120,6 +1141,33 @@ At startup, each adapter reports capabilities. `MotionService` asks: do I have a
 **Clamping stays the adapter's job** (§3.9.1). The planner plans *inside* each axis's reach rather than relying on the clamp, so the same gesture does not silently look different on two rigs for a reason no test explains — the clamp remains a safety net, never a control mechanism.
 
 **A note on where `Axis` is declared.** `motion.gesture_started` carries `axes: tuple[Axis, ...]` (§9.1.3), and a `domain/` event must be able to name the type it carries. `core` sits *above* `domain` in the `layers` contract, so `Axis` is **declared in `avid/domain/motion.py` and re-exported from `avid/core/hal.py`** — precisely the move ADR-013 made for `BBox` (§3.6.5). `avid.core.hal.Axis` remains the spelling every port and adapter uses; only the declaration moved.
+
+### 3.9.5 Bounded translation — ADR-015
+
+**The robot may take a step — centimetres, on the desk, and always back to where it started.** §2.3's *"Not locomotion"* is **narrowed, not deleted**: it still excludes navigation, roaming, leaving the desk, a battery and following the user. What it now admits is the one thing M9's idle micro-motion was already doing on a different axis — a movement so small it is *"noticeable only by its absence"* — extended from rotation to translation, because rotation makes a head feel attentive and translation makes a body feel present. This decision was reached the expensive way: the hardware was bench-wired (2026-08-31) before the paperwork existed, and this section is the paperwork catching up. That order is recorded rather than hidden, because it is precisely what §12.6 exists to prevent and the next person should know it happened once.
+
+| | |
+|---|---|
+| Decision | Two driven wheels for **bounded, net-zero** steps. `STEP_TOWARD` and `STEP_BACK` join the `Gesture` vocabulary as intents; a pure `plan_step()` realises each as *out-leg → dwell → return-leg* of equal magnitude, so **any sequence of steps sums to zero by construction** and the excursion is one leg, capped at `[drive] max_excursion_mm` |
+| Hardware | 2× N20 6 V 58 rpm gear motors with wheels, front-mounted, through **one L9110S** dual H-bridge. Two rear wheels are chassis support only and are not driven — 2WD pivots cleanly; a second driver is not justified until a torque need is measured |
+| Pins | BCM: left IA/IB = **5/6**, right IA/IB = **12/13**; edge sensors D0 = **23/22**. ⚠️ **24 and 25 are not free** — the display's `piscreen,drm` overlay claims them at boot, unplugging the panel does nothing, and a sensor wired there reads garbage. Free pins were confirmed from `/sys/kernel/debug/gpio`, not assumed |
+| Direction | **One global flip, not per-wheel.** Measured on the rig: `gpiozero.Motor(forward=IA, backward=IB).forward()` on *both* channels drives the robot toward its own back, `.backward()` on both drives it forward, straight at 20–100 % duty on a hard floor, and single-channel pivots are correctly opposite. The published wiring diagram assumed asymmetric per-wheel inversion for the mirrored mount; the hubs cancel it. `[drive] forward_is_inverted = true` lives in the adapter's config and nothing above the port sees a sign |
+| Sensors | 2× TCRT5000 as **front** edge detectors. Measured polarity **HIGH = surface present**, the inverse of the datasheet's LOW-on-detect; `[drive.edge] active_high = true` records it. One unit shorted on the bench (heated and died the instant its `D0` touched *any* GPIO) and is retired — the config records how many are actually fitted |
+| Safety | **Both, never one** (#400 AC-5): the excursion budget bounds the open-loop plan, and the edge sensors abort a leg. On an edge during the *out* leg the service stops, then **runs the return leg immediately** — moving away from the edge is the safe direction. Front sensors cannot see behind the robot, so the *return* leg is protected by the budget alone; that asymmetry is F-14 in §12.1, stated rather than hidden. Steps run **only in `RobotState.IDLE`** — N20 gearboxes are audible, and a motor running during LISTENING feeds itself to the microphone |
+| Power | Same 5–6 V rail as the servos, **common ground only**. N20 stall is ~0.5–1 A per motor at 0.4 duty for legs of a few hundred ms; R-04's actuator count is now **four** and #206's stall measurement is owed again with a meter before M12 seals |
+| Consequence | A `Drive` port, an `EdgeSensor` port, `FakeDrive` / `FakeEdgeSensor` as first-class simulator members (P6), a `DriveService` that is the port's only caller, a `drive.*` event family (§9.1.3), `[drive]` config (§9.6), and a post-v1 milestone **M12** (PMP §5.2). No model-callable tool in v1 (§6.6) |
+
+**Why N20 + H-bridge and not the continuous-rotation servo #400 first proposed.** The plan was CR servos on two spare PCA9685 channels, to avoid a driver board. On the parts actually available that is the bulkier *and* more dangerous option: the only stocked CR servo (MG996R) is ~55 g and stalls at ~2.5 A — two of them stalled is ~5 A on the rail R-04 already worries about, against ~1 A for two N20s — and the L9110S module is smaller than one of the servos it replaces. The 50 Hz objection to motor PWM on the PCA9685 dissolves for the same reason: at 58 rpm a 3 cm step is ~235 ms, so the control variable is **duration, not duty**. GPIO was chosen over the PCA9685 for the drive only because the sensors need GPIO inputs regardless (the PCA9685 is output-only), and one bus for the whole subsystem is simpler to reason about under systemd (the `lgpio` working-directory trap, `PI_OPERATIONS` §5c.2, applies once rather than twice).
+
+**Net-zero is a property of the plan, not a promise of the service.** `plan_step()` emits the return leg in the same tuple as the out leg, `net_mm(plan) == 0` is a one-line domain test, and a randomly ordered sequence of plans is tested to sum to zero too — which is what makes *"cannot accumulate error over a thirty-day soak"* a claim a test can fail rather than a hope. Wheel slip makes the service's odometer optimistic; that is exactly why the budget is *necessary and not sufficient*, and why the sensors are not optional. When a leg is cut short the service keeps the shortfall as an offset and **homes first** on the next step, so an abort is a delay, not a drift.
+
+| Option | Verdict |
+|---|---|
+| **Continuous-rotation servos on the PCA9685** | Rejected — see above: heavier, higher stall current, and the sensors need GPIO anyway |
+| **Per-wheel `inverted` flags** | Rejected — measured false on this rig; two flags where one truth exists is a config that can disagree with the wiring |
+| **Encoders / odometry** | Rejected — §2.3 still says no navigation. A duration-derived odometer bounded by a sensor is enough for centimetres; a real one is a different product |
+| **Driving the rear wheels too** | Rejected — unwired by design; 2WD pivots cleanly, and a second L9110S is a purchase justified only by a measured torque shortfall |
+| **Steps triggered by affect (`HAPPY → STEP_TOWARD`)** | Deferred — no affect maps to a step in v1, for the restraint reason #202 made testable (`test_most_affects_map_to_nothing`). Idle drift is the only trigger; #477's notification nudge is the first candidate for a second |
 
 ## 3.10 State management
 
@@ -1638,6 +1686,8 @@ Per ADR-004, **the model does not own memory. It gets tools.** This is the mecha
 | `look_at` | `(direction)` → `{ok}` | Async, fire-and-forget | §3.9.3, added at M9. `direction` is an **enum** — `left \| right \| up \| down \| center` — never an angle: the model states an intent and the rig decides what it means in degrees. At most one accepted call per `[motion] look_at_cooldown_ms`; the cooldown is part of the contract, not an implementation detail. |
 
 Declaration is at session level in `session.update`, as JSON Schema. Static for the session (§6.2.2 — they're part of the cached prefix).
+
+**There is deliberately no `step` tool (ADR-015).** The wheels are reachable only through idle drift in v1; a model-callable step would hand the model a lever whose failure mode is a robot on the floor, and the first non-idle trigger (#477's notification nudge) is designed on the bus side, not as a tool.
 
 **`remember_fact`'s `schedule` argument (M10).** Optional, and meaningful only when `kind = "routine"`:
 
@@ -3033,6 +3083,16 @@ Presence events are **hysteresis-filtered inside PresenceService**, not raw dete
 
 `gesture_preempted` covers both a newer gesture interrupting an older one (`by="nod"`) and §3.12.3's I²C-fault abort (`by=None`).
 
+#### `drive`
+
+| Event | Payload | Published by | Subscribers | Queue |
+|---|---|---|---|---|
+| `drive.step_started` | `gesture: str`, `direction: str`, `distance_mm: float` | DriveService | Observability | DROP_OLDEST |
+| `drive.step_completed` | `gesture: str`, `duration_ms: int`, `net_mm: float` | DriveService | Observability | DROP_OLDEST |
+| `drive.step_aborted` | `gesture: str`, `reason: str` — `edge` \| `fault` \| `preempted` \| `budget` | DriveService | Observability | DROP_OLDEST |
+
+A separate family rather than three more `motion.*` rows (ADR-015): the payloads differ in kind — a step has a distance and an abort has a *reason*, where a gesture has axes — and `motion.gesture_started` carrying an empty `axes` tuple for a step would be a row that lies by omission. `step_aborted(reason="edge")` is the row Observability logs at WARNING; it is the one that means the sensors earned their place.
+
 ### 9.1.4 What is deliberately NOT an event
 
 The catalog above is incomplete without its complement. §3.5.4's rule:
@@ -3048,6 +3108,8 @@ The bus is in-memory, at-most-once, no persistence, no replay, no dead-letter qu
 | `MemoryService.retrieve()` | direct await | A request, not a fact. Has a return value. |
 | `Display.render()` | direct port call | ExpressionService owns the port. §3.6.1. |
 | `Servo.move_to()` | direct port call | MotionService owns the port. |
+| `Drive.run()` / `Drive.stop()` | direct port call | DriveService owns the port (ADR-015). A `stop()` that rode the bus could be dropped, and a dropped stop is a robot on the floor. |
+| `EdgeSensor.clear()` | direct port call | A reading, not a fact; polled by DriveService before and during every leg. |
 | Policy gate evaluation | pure function | §10.2. No I/O by construction. |
 
 Apply this test to every event anyone proposes adding. The failure mode is seductive: everything *can* be an event, the bus makes it easy, and then one day a fact is silently lost because a queue overflowed under load and nobody notices for a month.
@@ -3140,7 +3202,7 @@ That's the entire external surface. Embeddings are local (§7.4), so they aren't
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | systemd + watchdog. Returns 200 iff loop is live. |
-| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`, and — since AVID-456 — `illegal_transitions`, and — since #467 — `admission_refusals` and `reactive_turns`, and — since #472 — `spend_refusals`. ⚠️ **`spend_refusals` is a plain total**, unlike the two maps beside it, because the spend ceiling has exactly one rule and a histogram with one bucket would imply otherwise. It is the only counter that distinguishes a **budget stop** from a connection degrade: a turn refused on cost leaves the machine to reach DEGRADED through §6.9's deadline, so the state trace of the two is identical and the counter is the discriminator. ⚠️ **`admission_refusals` is a map keyed by §6.2.4's admission rule** (`echo_floor` / `echo_tail` / `reactive_budget`, pinned as `ADMISSION_RULES`), not a total, for the reason `illegal_transitions` is not one: a genuinely loud room and a robot re-triggering itself want opposite responses and a single number cannot tell them apart. String keys, same `json.dumps` hazard, bounded by 3. `reactive_turns` is the count of turns this process originated **from speech** — the quantity the soak differences against the load generator's own record, since turns the robot took that no played utterance and no proactive trigger account for are turns it started by itself. ⚠️ Both are process-scoped like every counter here but `build`. ⚠️ **`illegal_transitions` is a map keyed `"STATE/TRIGGER"`, not a total**, because a total cannot tell a wedge from ordinary noise: some rejections are expected and documented (`PresenceService` drives `VISION_PRESENCE_GAINED` unconditionally, AVID-224). The shape separates them without a threshold — the M11 rig's boot reads `{"THINKING/PRESENCE_LOST_TIMEOUT": 135, "IDLE/VISION_PRESENCE_GAINED": 1}`. Keys are pre-rendered strings because a tuple or enum key raises inside this route's `json.dumps` and 500s the **whole** endpoint. Growth is bounded by `|RobotState| x |Trigger|` = 84. ⚠️ **`build` is the deployed commit, not the release line** (AVID-388): `git describe --always --dirty --tags`, falling back to `avid.__version__` off a checkout. `-dirty` means the machine has been edited. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
+| `GET` | `/metrics` | §3.12.2. ⚠️ **As built (AVID-380), the registry holds:** `transitions`, `triggers_fired`, `triggers_disabled`, `gestures`, `turns`, `cost_usd` (§6.10.6), `projected_monthly_usd`, `cached_ratio`, `build`, `uptime_s`, `bus_queues`, and — since AVID-404 — `rss_bytes` and `mem_available_bytes`, and — since AVID-456 — `illegal_transitions`, and — since #467 — `admission_refusals` and `reactive_turns`, and — since #472 — `spend_refusals`, and — since #400 (M12) — `steps` and `steps_aborted` (a map keyed by §9.1.3's abort reason, for the reason `illegal_transitions` is one: an `edge` abort and a `preempted` abort want opposite responses). ⚠️ **`spend_refusals` is a plain total**, unlike the two maps beside it, because the spend ceiling has exactly one rule and a histogram with one bucket would imply otherwise. It is the only counter that distinguishes a **budget stop** from a connection degrade: a turn refused on cost leaves the machine to reach DEGRADED through §6.9's deadline, so the state trace of the two is identical and the counter is the discriminator. ⚠️ **`admission_refusals` is a map keyed by §6.2.4's admission rule** (`echo_floor` / `echo_tail` / `reactive_budget`, pinned as `ADMISSION_RULES`), not a total, for the reason `illegal_transitions` is not one: a genuinely loud room and a robot re-triggering itself want opposite responses and a single number cannot tell them apart. String keys, same `json.dumps` hazard, bounded by 3. `reactive_turns` is the count of turns this process originated **from speech** — the quantity the soak differences against the load generator's own record, since turns the robot took that no played utterance and no proactive trigger account for are turns it started by itself. ⚠️ Both are process-scoped like every counter here but `build`. ⚠️ **`illegal_transitions` is a map keyed `"STATE/TRIGGER"`, not a total**, because a total cannot tell a wedge from ordinary noise: some rejections are expected and documented (`PresenceService` drives `VISION_PRESENCE_GAINED` unconditionally, AVID-224). The shape separates them without a threshold — the M11 rig's boot reads `{"THINKING/PRESENCE_LOST_TIMEOUT": 135, "IDLE/VISION_PRESENCE_GAINED": 1}`. Keys are pre-rendered strings because a tuple or enum key raises inside this route's `json.dumps` and 500s the **whole** endpoint. Growth is bounded by `|RobotState| x |Trigger|` = 84. ⚠️ **`build` is the deployed commit, not the release line** (AVID-388): `git describe --always --dirty --tags`, falling back to `avid.__version__` off a checkout. `-dirty` means the machine has been edited. The *latency histogram*, *frame rate* and *SD writes* this row promised were never registered. |
 | `GET` | `/state` | Current `RobotState`, `Affect`, session status — **three independent readings** (§3.10: the two are orthogonal, so neither is derived from the other), plus an `absent` list. Built at AVID-385. |
 | `GET` | `/facts` | **§7.10's audit.** All non-superseded facts. "What do you know about me?" Built at AVID-386, through the `FactRepository` port — never fresh SQL. |
 | `GET` | `/facts?include_superseded=1` | Full history, for debugging §7.8 — `fetch_all`, **created_at order**, because a supersession chain read accessed-first is unreadable as a chain. A malformed flag is a 400, not a silent `false`. |
@@ -3177,6 +3239,8 @@ speaker    = "alsa"             # | "fake"
 vad        = "silero"           # | "fake" — local Silero VAD gate (AVID-77)
 realtime   = "openai"           # | "replay"
 notifier   = "systemd"          # | "fake" — sd_notify supervision (§3.11.3)
+drive      = "l9110s"           # | "fake" — two N20 wheels (§3.9.5, ADR-015)
+edge       = "tcrt5000"         # | "fake" — front edge sensors; `fake` with `drive = "fake"` is the laptop
 
 [ai]
 model            = "gpt-realtime-mini-2025-12-15"   # PINNED. §6.10.
@@ -3270,6 +3334,26 @@ look_at_cooldown_ms = 4000      # min spacing between accepted look_at calls (§
 micro_motion_interval_min_s = 12.0
 micro_motion_interval_max_s = 40.0
 micro_motion_amplitude_frac = 0.03   # of each axis's declared reach
+
+[drive]                         # §3.9.5 / ADR-015 — the wheels. Every value here was MEASURED on the rig
+left_forward_pin   = 5          # BCM. L9110S A-IA
+left_backward_pin  = 6          # A-IB
+right_forward_pin  = 12         # B-IA
+right_backward_pin = 13         # B-IB
+forward_is_inverted = true      # Motor.forward() on BOTH channels drives the robot BACKWARD on this rig
+mm_per_s_at_full   = 128.0      # PROVISIONAL — 58 rpm x ~42 mm wheel, until SPK-6 pins the measured figure
+step_mm            = 20.0       # one leg; the return leg is the same length by construction
+max_excursion_mm   = 30.0       # the budget: no plan may take the robot further than this from origin
+speed_frac         = 0.4        # duty for a step — a wiring check speed, not a race
+dwell_ms           = 300        # pause at the far end before the return leg
+idle_step_interval_min_s = 180.0   # the idle-drift band; rarer than the servo drift by design
+idle_step_interval_max_s = 600.0
+
+[drive.edge]
+pins        = [23, 22]          # ⚠️ never 24/25 — the display overlay owns those at boot (§2.7.1)
+active_high = true              # measured: HIGH = surface present, the inverse of the datasheet
+poll_ms     = 20                # how often a running leg re-asks the sensors
+clear_hold_ms = 500             # how long "clear" must hold before an edge latch releases
 
 [api]
 bind = "127.0.0.1"              # asserted at startup. §9.5.
@@ -3652,6 +3736,9 @@ matters: a failure nothing notices is one nobody will fix.
 | F-9 | Deployed config drifts from the repo | **Silently wrong behaviour, not an error** | **High** | §9.6 sections are `extra="forbid"`, so an *unknown* key fails loudly | ⚠️ a **missing** key still falls back to a schema default — AVID-373 |
 | F-10 | Storage exhaustion / wear | Corruption; re-image | Med | journald `Storage=volatile` (§3.12.2, AVID-381); WAL; **root on USB SSD** (R-05's contingency, AVID-382) | `GET /metrics` |
 | F-11 | Bad API key at boot | Robot refuses to start | Low | **Deliberate.** §3.12.3's one permitted hard stop | Fails fast, loudly |
+| F-13 | **Desk edge under the front wheels during a step's out-leg** (M12) | Robot falls; broken robot | **High** | Edge sensors polled before and during every leg; on edge → `Drive.stop()` then the return leg **immediately** (away from the edge); the excursion budget bounds every plan (§3.9.5) | `drive.step_aborted(reason="edge")`, `steps_aborted{edge}` on `/metrics` |
+| F-14 | **Edge behind the robot during a return leg** | Same | **High** | ⚠️ **Undetected by design** — the sensors face forward. Protected by the budget alone: a return leg can only retrace an out-leg that was itself clear. Stated here rather than hidden | none — a design bound, not a detector |
+| F-15 | Motor stall on the shared 5 V rail | Rail sag → R-04's brown-out path | Med | 0.4 duty, legs of a few hundred ms, N20's ~1 A stall against MG996R's 2.5 A; #206 re-run with all four actuators before M12 seals | `vcgencmd get_throttled`, kernel under-voltage log |
 
 **F-9 is the row this project underestimated for longest, and it deserves its own sentence.** A
 config that is missing a key does not fail — it silently adopts a schema default, and `[ai] model`
