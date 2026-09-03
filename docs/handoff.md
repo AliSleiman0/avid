@@ -6,9 +6,18 @@
 > one-line reflection lives in [`journal.md`](journal.md) (PMP §11).
 
 
-**As of:** 2026-09-02 · `main` `d3865cc` (still — **nothing merged yet; ten PRs are open**) · rig **POWERED OFF** (unchanged since 2026-08-31) · ✅ **the drivetrain now has its paperwork and its code**: ADR-015 + six stacked PRs (#478→#484) · ✅ **#157 is decided**: ADR-014 + code (#485, #486), on two measured numbers · gh `AliSleiman0`.
+**As of:** 2026-09-03 · `main` `ba0c46c` — **all ten PRs merged top-down** (#478→#484, #485→#486, #487), CI green on every code PR against its final base, branches deleted · rig **POWERED OFF** (unchanged since 2026-08-31) · ✅ ADR-015 + the wheels are on `main`, laptop-proven, **rig-unproven** · ✅ ADR-014 + presence-warm are on `main`; `/etc/robot/config.toml` predates both `[drive]` and `[gate] prewarm`, so the deployed robot runs the schema defaults (fake wheels, `never`) until reprovisioned · gh `AliSleiman0`.
 
-## ⭐ Next session — merge two PR stacks in order, then the rig
+## ⭐ Next session — the rig (nothing else is blocked on a laptop)
+
+The merge recipe below was followed exactly and worked; the one wrinkle: after a force-push +
+retarget, GitHub occasionally raised **no Actions run** for the new head (#484) — `gh pr close` /
+`gh pr reopen` re-triggered it. The §3.3 and §12.1 conflicts between the two stacks were the only
+ones, resolved by keeping both rows. Everything under "Then, the rig" is what remains, plus
+splicing `[gate] prewarm = "presence"` into the live config and reading `prewarm_hits` /
+`prewarm_misses` after a day.
+
+## What shipped 2026-09-02 — and how it was merged 2026-09-03
 
 ### What shipped 2026-09-02 (laptop only; nothing touched the Pi)
 
